@@ -223,11 +223,17 @@ export const ImaCloudLibraryPanel: React.FC<{
 
   // Fetch public catalog metadata (counts + recommended questions + share URLs)
   useEffect(() => {
-    if (!isOnline) return;
+    if (!isOnline || SITE_CONFIG.staticDemoMode) {
+      setImaApiReady(false);
+      return;
+    }
     fetch('/api/ima/catalog', {
       headers: { 'X-Toolbox-License': getLicenseToken() },
     })
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data) => {
         setImaApiReady(Boolean(data?.ok && data?.configured));
         if (data.ok && Array.isArray(data.libraries)) {
@@ -314,9 +320,9 @@ export const ImaCloudLibraryPanel: React.FC<{
     [isOnline, authHeaders, loadFolder]
   );
 
-  // Initial load for file browser + auto-hydrate incoming query (zero-token instant search preview)
+  // Initial load for file browser + auto-hydrate incoming query (only when backend IMA gateway is active)
   useEffect(() => {
-    if (!isOnline) return;
+    if (!isOnline || imaApiReady !== true) return;
     const incoming = initialQuery.trim();
     if (incoming) {
       setQaInput(incoming);
@@ -329,7 +335,7 @@ export const ImaCloudLibraryPanel: React.FC<{
         headers: authHeaders(),
         body: JSON.stringify({ kb: 'law_cases', query: incoming, filesOnly: true, smart: true }),
       })
-        .then((r) => r.json())
+        .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (!data?.ok) return;
           const terms: string[] = Array.isArray(data.usedTerms) ? data.usedTerms : [incoming];
@@ -343,7 +349,7 @@ export const ImaCloudLibraryPanel: React.FC<{
     } else {
       loadFolder('');
     }
-  }, [isOnline, initialQuery]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isOnline, imaApiReady, initialQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const buildFileUrl = (item: ImaEntryItem, download = false) => {
     const qs = new URLSearchParams({

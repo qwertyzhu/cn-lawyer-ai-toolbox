@@ -26,7 +26,7 @@ export const BrandLogo: React.FC<BrandLogoProps> = ({
         }`}
       >
         <img
-          src="/brand-emblem.svg"
+          src={`${import.meta.env.BASE_URL}brand-emblem.svg`}
           alt={SITE_CONFIG.appName}
           className="h-full w-full object-cover"
         />

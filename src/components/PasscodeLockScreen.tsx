@@ -152,13 +152,25 @@ export const PasscodeLockScreen: React.FC<PasscodeLockScreenProps> = ({
           </div>
           <div className="flex items-center gap-1.5">
             <WifiOff className="h-3.5 w-3.5 text-emerald-400" />
-            <span>断网全量本地可用</span>
+            <span>核心工具断网可用</span>
           </div>
         </div>
       </div>
 
-      <div className="mx-auto w-full max-w-md text-center text-[11px] text-slate-400">
-        © {new Date().getFullYear()} {SITE_CONFIG.firmName || SITE_CONFIG.appName} · Apache-2.0 Open Source
+      <div className="mx-auto w-full max-w-md text-center text-[11px] leading-5 text-slate-400 space-y-1">
+        <div>© {new Date().getFullYear()} {SITE_CONFIG.firmName || SITE_CONFIG.appName} · Apache-2.0 Open Source</div>
+        {SITE_CONFIG.icpNumber && (
+          <div>
+            <a
+              href="https://beian.miit.gov.cn/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-slate-400 hover:text-[#D1B27A] transition-colors underline underline-offset-2"
+            >
+              {SITE_CONFIG.icpNumber}
+            </a>
+          </div>
+        )}
       </div>
     </div>
   );

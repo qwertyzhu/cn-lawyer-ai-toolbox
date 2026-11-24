@@ -11,6 +11,9 @@ if (!fs.existsSync(DIST) || !fs.existsSync(SW_PATH)) {
   process.exit(0);
 }
 
+const rawBase = (process.env.VITE_BASE_PATH || '/').trim() || '/';
+const basePrefix = rawBase.endsWith('/') ? rawBase : `${rawBase}/`;
+
 function walk(dir, base = '') {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -19,13 +22,13 @@ function walk(dir, base = '') {
     if (entry.isDirectory()) {
       out.push(...walk(full, rel));
     } else if (entry.name !== 'sw.js' && !entry.name.endsWith('.map')) {
-      out.push(`/${rel}`);
+      out.push(`${basePrefix}${rel}`);
     }
   }
   return out;
 }
 
-const assets = ['/', ...walk(DIST)];
+const assets = [basePrefix, ...walk(DIST)];
 const hash = crypto
   .createHash('sha256')
   .update(assets.join('|') + Date.now())

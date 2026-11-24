@@ -896,13 +896,51 @@ async function readRawBody(req, maxBytes = 256 * 1024) {
 
 async function readJsonBody(req, maxBytes = 256 * 1024) {
   const raw = await readRawBody(req, maxBytes);
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const err = new Error('请求体不是合法的 JSON 格式');
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+function sanitizeRelayHeaders(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  const blocked = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'keep-alive', 'upgrade']);
+  for (const [k, v] of Object.entries(raw)) {
+    if (!k || blocked.has(k.toLowerCase())) continue;
+    if (typeof v === 'string' || typeof v === 'number') out[k] = String(v);
+  }
+  return out;
+}
+
+function pipeWebStreamSafely(webBody, res) {
+  const nodeStream = Readable.fromWeb(webBody);
+  nodeStream.on('error', () => {
+    if (!res.writableEnded) res.end();
+  });
+  res.on('close', () => {
+    if (!nodeStream.destroyed) nodeStream.destroy();
+  });
+  nodeStream.pipe(res);
 }
 
 const server = http.createServer(async (req, res) => {
   try {
     const fullUrl = new URL(req.url || '/', 'http://localhost');
     const pathname = fullUrl.pathname;
+
+    if (pathname === '/api/health' && req.method === 'GET') {
+      return sendJson(res, 200, {
+        ok: true,
+        service: 'cn-lawyer-ai-toolbox',
+        authMode: AUTH_MODE,
+        uptimeSec: Math.floor(process.uptime()),
+      });
+    }
 
     // =========================================================================
     // 0. Real-Time License Status & Director Account Enable/Disable Console API
@@ -1608,7 +1646,7 @@ const server = http.createServer(async (req, res) => {
           'Cache-Control': 'private, max-age=600',
           'X-Robots-Tag': 'noindex, nofollow, noarchive',
         });
-        Readable.fromWeb(cosResp.body).pipe(res);
+        pipeWebStreamSafely(cosResp.body, res);
         return;
       }
 
@@ -1650,7 +1688,7 @@ const server = http.createServer(async (req, res) => {
 
       const upstream = await fetch(safeUrl, {
         method: upstreamMethod,
-        headers: payload.headers || {},
+        headers: sanitizeRelayHeaders(payload.headers),
         ...(upstreamMethod === 'GET' ? {} : { body: payload.body }),
         redirect: 'error',
       });
@@ -1664,7 +1702,7 @@ const server = http.createServer(async (req, res) => {
       });
 
       if (upstream.body) {
-        Readable.fromWeb(upstream.body).pipe(res);
+        pipeWebStreamSafely(upstream.body, res);
       } else {
         res.end();
       }
@@ -1699,6 +1737,10 @@ const server = http.createServer(async (req, res) => {
     });
     fs.createReadStream(filePath).pipe(res);
   } catch (err) {
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
     sendJson(res, err.statusCode || 500, {
       ok: false,
       error: err instanceof Error ? err.message : 'Server error',

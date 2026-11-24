@@ -30,4 +30,7 @@ export const SITE_CONFIG = {
     'https://ima.qq.com/wiki/?shareId=a5d4993fac94797dc3892f0157c5a4011efd105c495d2b0e45ac311dc7dda91b',
   publicImaLibraryName: env.VITE_IMA_KB_NAME?.trim() || '法律法规案例库（持续更新）',
   githubUrl: 'https://github.com/qwertyzhu/cn-lawyer-ai-toolbox',
+  icpNumber: env.VITE_ICP_NUMBER?.trim() || '',
+  policeFilingNumber: env.VITE_POLICE_FILING?.trim() || '',
+  staticDemoMode: env.VITE_STATIC_DEMO === 'true',
 };

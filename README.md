@@ -1,10 +1,11 @@
 # ⚖️ 中国律师 AI 工具箱（CN Lawyer AI Toolbox）
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-0E223D?style=flat-square)](./LICENSE)
+[![Live Demo](https://img.shields.io/badge/Live_Demo-在线样板体验站-B89254?style=flat-square)](https://qwertyzhu.github.io/cn-lawyer-ai-toolbox/)
 [![CI & Privacy Guard](https://github.com/qwertyzhu/cn-lawyer-ai-toolbox/actions/workflows/ci.yml/badge.svg)](https://github.com/qwertyzhu/cn-lawyer-ai-toolbox/actions/workflows/ci.yml)
-[![Offline-First PWA](https://img.shields.io/badge/PWA-Offline--First-B89254?style=flat-square)](#核心功能全景)
 [![Node.js](https://img.shields.io/badge/Node.js-20%2B-2F6B3A?style=flat-square)](#30-秒极速运行)
 
+> **🚀 在线样板体验站（GitHub Pages 纯静态 · 零登录墙 · 点开即用）：https://qwertyzhu.github.io/cn-lawyer-ai-toolbox/**  
 > **一款由中国执业律师实战打磨、本地优先（Offline-First）+ 自带密钥（BYOK）的随身办案单兵工作台。**  
 > 涵盖**最高人民法院《法〔2025〕82号》全量 9 大领域 · 67 类纠纷 · 113 份官方要素式起诉状/答辩状/申请书真 Word (`.docx`) 生成**、**4,111 条离线法典与同屏司法解释**、**全国 31 省律师费与多方案 A4 报价单**、**50MB+ 本地保密证据 PDF 分卷与页码水印**、**一键案件隐私脱敏/还原**，以及 **6 大防幻觉法律 AI 专席**。
 

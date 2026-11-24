@@ -122,7 +122,7 @@ export const LawsAndChecklistsTab: React.FC = () => {
   useEffect(() => {
     if (cachedCorpus) return;
     let cancelled = false;
-    fetch('/data/laws-offline.json')
+    fetch(`${import.meta.env.BASE_URL}data/laws-offline.json`)
       .then((r) => r.json())
       .then((data: LawsCorpusPayload) => {
         if (!cancelled) {

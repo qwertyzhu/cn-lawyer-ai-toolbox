@@ -128,13 +128,13 @@ export const LawyerFeeQuoteTool: React.FC = () => {
     } else if (activeView !== 'calc') {
       qs.set('view', activeView);
     }
-    return `/tool-assets/lawyer-fee-workbench.html?${qs.toString()}`;
+    return `${import.meta.env.BASE_URL}tool-assets/lawyer-fee-workbench.html?${qs.toString()}`;
   }, [bridgedAmountYuan, activeView, sheetMode]);
 
   const iframeSrc = useMemo(() => {
     const qs = new URLSearchParams({ embed: '1' });
     if (bridgedAmountYuan) qs.set('amountYuan', String(bridgedAmountYuan));
-    return `/tool-assets/lawyer-fee-workbench.html?${qs.toString()}`;
+    return `${import.meta.env.BASE_URL}tool-assets/lawyer-fee-workbench.html?${qs.toString()}`;
   }, [bridgedAmountYuan]);
 
   const handleTriggerPrint = () => {

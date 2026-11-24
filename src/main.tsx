@@ -23,7 +23,7 @@ if ('serviceWorker' in navigator && import.meta.env.PROD) {
     });
 
     navigator.serviceWorker
-      .register('/sw.js', { updateViaCache: 'none' })
+      .register(`${import.meta.env.BASE_URL}sw.js`, { updateViaCache: 'none' })
       .then((reg) => {
         reg.update().catch(() => {});
         document.addEventListener('visibilitychange', () => {

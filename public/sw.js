@@ -8,7 +8,15 @@ self.addEventListener('install', (event) => {
     caches
       .open(CACHE_NAME)
       .then(async (cache) => {
-        const list = PRECACHE_ASSETS.length > 0 ? PRECACHE_ASSETS : ['/', '/index.html', '/manifest.webmanifest'];
+        const scopeUrl = new URL('./', self.registration.scope);
+        const list =
+          PRECACHE_ASSETS.length > 0
+            ? PRECACHE_ASSETS
+            : [
+                scopeUrl.pathname,
+                new URL('./index.html', scopeUrl).pathname,
+                new URL('./manifest.webmanifest', scopeUrl).pathname,
+              ];
         for (const asset of list) {
           try {
             await cache.add(asset);
@@ -64,13 +72,15 @@ self.addEventListener('fetch', (event) => {
             .then((c) => c || caches.match(url.pathname))
             .then((c) => {
               if (c) return c;
-              if (url.pathname.startsWith('/tool-assets/')) {
+              if (url.pathname.includes('/tool-assets/')) {
                 return new Response('离线缓存尚未就绪，请联网刷新一次页面', {
                   status: 503,
                   headers: { 'Content-Type': 'text/plain; charset=utf-8' },
                 });
               }
-              return caches.match('/index.html') || caches.match('/');
+              const scopeRoot = new URL('./', self.registration.scope).pathname;
+              const scopeIndex = new URL('./index.html', self.registration.scope).pathname;
+              return caches.match(scopeIndex).then((r) => r || caches.match(scopeRoot));
             })
         )
     );

@@ -226,7 +226,11 @@ let inflightCorpus: Promise<SpcTemplateCorpus> | null = null;
 export async function loadOfficialSpcCorpus(): Promise<SpcTemplateCorpus> {
   if (cachedCorpus) return cachedCorpus;
   if (inflightCorpus) return inflightCorpus;
-  inflightCorpus = fetch('/data/spc-2025-templates.json', { cache: 'force-cache' })
+  const baseUrl =
+    (typeof import.meta !== 'undefined' &&
+      (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL) ||
+    '/';
+  inflightCorpus = fetch(`${baseUrl}data/spc-2025-templates.json`, { cache: 'force-cache' })
     .then(async (resp) => {
       if (!resp.ok) {
         throw new Error(`加载最高法示范文本库失败 (HTTP ${resp.status})`);

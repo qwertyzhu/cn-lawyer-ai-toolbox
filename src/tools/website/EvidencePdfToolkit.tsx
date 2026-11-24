@@ -60,12 +60,12 @@ async function ensureOflStampFont(): Promise<void> {
   if (!oflSansPromise) {
     oflSansPromise = (async () => {
       const loadedAlready = Array.from(document.fonts).some(
-        (f) => f.family === 'TianranPdfOflSans' && f.status === 'loaded'
+        (f) => f.family === 'ToolboxPdfOflSans' && f.status === 'loaded'
       );
       if (loadedAlready) return;
       const face = new FontFace(
-        'TianranPdfOflSans',
-        'url(/fonts/ofl-noto-sans-sc-medium.woff2) format("woff2")',
+        'ToolboxPdfOflSans',
+        `url(${import.meta.env.BASE_URL}fonts/ofl-noto-sans-sc-medium.woff2) format("woff2")`,
         { weight: '500', style: 'normal' }
       );
       const loaded = await face.load();
@@ -86,7 +86,7 @@ function renderTextStampPng(
   const scale = 2; // Retina crispness
   const canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d')!;
-  const fontSpec = `500 ${opts.fontSize * scale}px "TianranPdfOflSans", "Noto Sans SC", sans-serif`;
+  const fontSpec = `500 ${opts.fontSize * scale}px "ToolboxPdfOflSans", "Noto Sans SC", sans-serif`;
   ctx.font = fontSpec;
   const metrics = ctx.measureText(text);
   const textW = Math.ceil(metrics.width);

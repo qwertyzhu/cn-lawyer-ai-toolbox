@@ -217,6 +217,23 @@ const ToolboxShell: React.FC<{
           </div>
         )}
 
+        {/* Optional Static Demo Banner (shown on GitHub Pages live showcase) */}
+        {SITE_CONFIG.staticDemoMode && (
+          <div className="bg-[#0E223D] border-b border-[#B89254]/30 px-3.5 py-1.5 text-[11px] text-[#F6F4EF] flex flex-wrap items-center justify-between gap-2">
+            <span>
+              <strong className="text-[#D1B27A]">开源在线样板体验站</strong> · 零登录墙 · 全部填表/测算/脱敏均在您当前浏览器本地运行，不上传任何服务器
+            </span>
+            <a
+              href={SITE_CONFIG.githubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 rounded border border-[#D1B27A]/50 bg-white/10 hover:bg-white/20 px-2 py-0.5 text-[10.5px] font-bold text-[#E2C690]"
+            >
+              GitHub 开源仓库 (Apache-2.0) →
+            </a>
+          </div>
+        )}
+
         {/* Active Tab Viewport */}
         <main className="flex-1 safe-pb lg:pb-8">
           {activeTab === 'home' && (
@@ -232,6 +249,32 @@ const ToolboxShell: React.FC<{
               onLicenseChanged={onLicenseChanged}
             />
           )}
+
+          <footer className="mx-auto max-w-6xl px-4 sm:px-6 pt-4 pb-6 text-center text-[11px] text-slate-400 flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+            <span>© {new Date().getFullYear()} {SITE_CONFIG.firmName || SITE_CONFIG.appName}</span>
+            <span className="text-slate-300">|</span>
+            <a
+              href={SITE_CONFIG.githubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-[#0E223D] transition-colors"
+            >
+              Apache-2.0 开源项目
+            </a>
+            {SITE_CONFIG.icpNumber && (
+              <>
+                <span className="text-slate-300">|</span>
+                <a
+                  href="https://beian.miit.gov.cn/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:text-[#0E223D] transition-colors"
+                >
+                  {SITE_CONFIG.icpNumber}
+                </a>
+              </>
+            )}
+          </footer>
         </main>
 
         {/* Mobile Bottom Single-Hand 5-Tab Bar */}
