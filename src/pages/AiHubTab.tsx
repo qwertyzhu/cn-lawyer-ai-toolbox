@@ -7,17 +7,26 @@ import {
   Camera,
   Check,
   ChevronDown,
+  ChevronRight,
   ChevronUp,
+  Compass,
   Copy,
   Download,
   Eye,
+  Feather,
+  FileSignature,
+  FileText,
   FileUp,
+  GitBranch,
   ImagePlus,
   KeyRound,
+  Layers,
   Loader2,
   Lock,
   MessageSquarePlus,
+  MessageSquareQuote,
   RotateCcw,
+  Scale,
   Send,
   ShieldCheck,
   Sparkles,
@@ -29,6 +38,7 @@ import {
 } from 'lucide-react';
 import { useToolbox } from '../context/ToolboxContext';
 import { ImageRedactModal } from '../components/ImageRedactModal';
+import { LegalMarkdownView } from '../components/LegalMarkdownView';
 import { AI_SPECIALISTS_REGISTRY } from '../data/toolRegistry';
 import { resolveVisionModel, streamAiCompletion, type ChatTurn } from '../lib/aiClient';
 import { copyToClipboard } from '../lib/clipboard';
@@ -57,6 +67,54 @@ const QUICK_REFINEMENT_CHIPS = [
   '补充管辖、送达与律师费承担条款',
   '改站在对方/法官视角指出我方漏洞',
 ];
+
+const SPECIALIST_ICONS: Record<AiSpecialistId, React.ComponentType<{ className?: string }>> = {
+  'contract-review': FileSignature,
+  'de-ai-polish': Feather,
+  'timeline-elements': GitBranch,
+  'cross-exam-questions': Scale,
+  'client-wechat-reply': MessageSquareQuote,
+  'legal-sandbox': Compass,
+};
+
+const SPECIALIST_PILLARS: Record<AiSpecialistId, string[]> = {
+  'contract-review': [
+    '逐条定位商业硬伤',
+    '直接给可粘贴示范条款',
+    '严禁编造法条序号',
+    '支持 .docx 原文直读',
+  ],
+  'de-ai-polish': [
+    '只改表达不改法律含义',
+    '程序性结构语一字不动',
+    '区分诉讼与非诉体例',
+    '附 7 列实质修改核对表',
+  ],
+  'timeline-elements': [
+    '事实与待核事项分离',
+    '输出标准时间线大事记表',
+    '按民/刑/行/执拆解要件',
+    '生成面谈追补证据清单',
+  ],
+  'cross-exam-questions': [
+    '真实/合法/关联/证明力四维',
+    '识别复印件与电子数据瑕疵',
+    '封闭式发问锁死庭审答复',
+    '标注当庭核对原件提示',
+  ],
+  'client-wechat-reply': [
+    '250–500 字适配手机阅读',
+    '纯文本清晰分段去星号',
+    '严守不包赢与保密红线',
+    '自然嵌入执业审慎边界',
+  ],
+  'legal-sandbox': [
+    '事实·判断·建议·风险四分离',
+    '严禁捏造指导案例与案号',
+    '不确定条号标注待核对',
+    '支持双模型多轮自由推演',
+  ],
+};
 
 function stripMarkdownForWechat(text: string): string {
   return text
@@ -107,6 +165,7 @@ export const AiHubTab: React.FC = () => {
 
   const [sessionMappings, setSessionMappings] = useState<RedactionMapping[]>([]);
   const [autoRestoreView, setAutoRestoreView] = useState(true);
+  const [formattedView, setFormattedView] = useState(true);
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [uiTurns, setUiTurns] = useState<UiConversationTurn[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -116,7 +175,7 @@ export const AiHubTab: React.FC = () => {
   const fileRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
   const followUpImageRef = useRef<HTMLInputElement>(null);
-  const threadEndRef = useRef<HTMLDivElement>(null);
+  const threadScrollRef = useRef<HTMLDivElement>(null);
 
   const specialist = useMemo(
     () => AI_SPECIALISTS_REGISTRY.find((s) => s.id === specialistId) || AI_SPECIALISTS_REGISTRY[0],
@@ -133,6 +192,10 @@ export const AiHubTab: React.FC = () => {
   const hasReadyKey = Boolean(
     activeProvider &&
       (activeProvider.apiKey?.trim() || (byok.pinEnabled && activeProvider.apiKeyEncrypted))
+  );
+
+  const isPinLocked = Boolean(
+    byok.pinEnabled && !activeProvider?.apiKey && activeProvider?.apiKeyEncrypted && !sessionUnlockedPin
   );
 
   // Sync preset & recommended model slot when switching specialist
@@ -171,8 +234,11 @@ export const AiHubTab: React.FC = () => {
   }, [aiHandoff, clearAiHandoff]);
 
   useEffect(() => {
-    if (streaming || uiTurns.length > 0) {
-      threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    if ((streaming || uiTurns.length > 0) && threadScrollRef.current) {
+      threadScrollRef.current.scrollTo({
+        top: threadScrollRef.current.scrollHeight,
+        behavior: 'smooth',
+      });
     }
   }, [uiTurns.length, streaming]);
 
@@ -204,6 +270,21 @@ export const AiHubTab: React.FC = () => {
     setSessionMappings([]);
     setErrorMsg(null);
     setUsedModelName('');
+  };
+
+  const handleUnlockPin = async () => {
+    if (!activeProvider?.apiKeyEncrypted || !pinUnlockInput.trim()) {
+      showToast('请输入安全 PIN 码');
+      return;
+    }
+    try {
+      await decryptWithPassphrase(activeProvider.apiKeyEncrypted, pinUnlockInput.trim());
+      setSessionUnlockedPin(pinUnlockInput.trim());
+      setPinUnlockInput('');
+      showToast('本机密钥保险箱已解锁');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'PIN 错误');
+    }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -290,7 +371,7 @@ export const AiHubTab: React.FC = () => {
 
   const runGeneration = async (isFollowUp = false, overridePrompt?: string) => {
     if (!isOnline) {
-      setErrorMsg('当前手机处于离线状态，AI 功能需要联网调用第三方大模型接口。');
+      setErrorMsg('当前设备处于离线状态，AI 功能需要联网调用第三方大模型接口。');
       return;
     }
 
@@ -407,7 +488,6 @@ export const AiHubTab: React.FC = () => {
       setStreamingUserImages([]);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : '生成中断');
-      // Restore follow-up images if request failed so user doesn't have to re-pick screenshots
       if (isFollowUp && attachedImgs.length > 0) {
         setFollowUpImages(attachedImgs);
       }
@@ -446,17 +526,75 @@ export const AiHubTab: React.FC = () => {
   const anyPendingImages = inputImages.length > 0 || followUpImages.length > 0;
   const historyHasImages = chatHistory.some((m) => m.images && m.images.length > 0);
   const willUseVision = anyPendingImages || historyHasImages;
+  const activeModelDisplay =
+    inputImages.length > 0
+      ? resolvedVisionModel || '需先配置识图模型'
+      : modelSlot === 'reasoning'
+      ? activeProvider?.reasoningModel || activeProvider?.fastModel
+      : activeProvider?.fastModel;
+
+  const ActiveSpecialistIcon = SPECIALIST_ICONS[specialist.id];
+  const activePillars = SPECIALIST_PILLARS[specialist.id];
+  const providerShortName = activeProvider?.name.split('（')[0] || '未配置服务商';
 
   return (
-    <div className="py-5 sm:py-8 px-4 sm:px-6 mx-auto max-w-6xl space-y-4">
+    <div className="py-5 sm:py-7 px-4 sm:px-6 mx-auto max-w-[1240px] space-y-4">
+      {/* Subtle Architectural Masthead */}
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-1">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-[#102747] to-[#081527] border border-[#B89254]/40 flex items-center justify-center shadow-[0_6px_16px_-8px_rgba(14,34,61,0.55)] flex-none">
+            <Sparkles className="h-4 w-4 text-[#DFC086]" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-[#9A7538]">
+                COUNSEL AI WORKBENCH
+              </span>
+              <span className="hidden sm:inline-block h-1 w-1 rounded-full bg-[#C9A463]/70" />
+              <span className="hidden sm:inline-block text-[10.5px] font-medium text-slate-500">
+                全领域办案专席 · 本地脱敏守护
+              </span>
+            </div>
+            <h1 className="font-display text-lg sm:text-[21px] font-bold tracking-[0.02em] text-[#0E223D] leading-tight">
+              AI 法律智囊舱
+            </h1>
+          </div>
+        </div>
+
+        {/* Right: Active Provider Quick Switch Pill */}
+        <button
+          type="button"
+          onClick={() => navigateTab('settings')}
+          className="group inline-flex items-center gap-2 rounded-full border border-[#DFD7C5] bg-white/90 hover:bg-white hover:border-[#B89254] px-3.5 py-1.5 text-xs shadow-[0_4px_14px_-10px_rgba(14,34,61,0.22)] transition-all"
+          title="前往「我的配置」切换模型或服务商"
+        >
+          <span
+            className={`h-2 w-2 rounded-full ${
+              !isOnline
+                ? 'bg-amber-400'
+                : hasReadyKey
+                ? 'bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.16)]'
+                : 'bg-rose-400'
+            }`}
+          />
+          <span className="font-semibold text-[#0E223D] max-w-[130px] truncate">{providerShortName}</span>
+          {resolvedVisionModel && (
+            <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-[#F5F0E4] px-2 py-0.5 text-[10px] font-medium text-[#7D5E29]">
+              <Eye className="h-2.5 w-2.5" /> 识图就绪
+            </span>
+          )}
+          <ChevronRight className="h-3.5 w-3.5 text-slate-400 group-hover:text-[#0E223D] group-hover:translate-x-0.5 transition-all" />
+        </button>
+      </div>
+
       {/* Offline Banner */}
       {!isOnline && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3.5 flex items-start gap-2.5 text-xs text-amber-950">
+        <div className="rounded-xl border border-amber-300/80 bg-gradient-to-r from-amber-50 to-[#FFFDF7] p-3.5 flex items-start gap-2.5 text-xs text-amber-950 shadow-sm">
           <WifiOff className="h-4 w-4 flex-none text-amber-700 mt-0.5" />
           <div>
             <div className="font-bold">当前处于离线模式（AI 智囊需联网）</div>
-            <p className="mt-0.5 leading-5">
-              AI 功能需在线直连您配置的第三方大模型 API；断网期间您可正常使用底部「离线工具」与「法典清单」全部本地功能。
+            <p className="mt-0.5 leading-5 text-amber-900/90">
+              AI 功能需在线直连您配置的第三方大模型 API；断网期间您可正常使用「离线工具」与「法典清单」全部本地功能。
             </p>
           </div>
         </div>
@@ -464,34 +602,38 @@ export const AiHubTab: React.FC = () => {
 
       {/* Missing API Key Banner */}
       {!hasReadyKey && (
-        <div className="rounded-lg border border-[#B89254] bg-[#0E223D] p-4 text-[#F6F4EF] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start gap-2.5">
-            <KeyRound className="h-5 w-5 flex-none text-[#D1B27A] mt-0.5" />
+        <div className="relative overflow-hidden rounded-2xl border border-[#B89254]/70 bg-gradient-to-r from-[#0E223D] via-[#132C50] to-[#0A192E] p-4 sm:p-5 text-[#F6F4EF] shadow-[0_14px_34px_-18px_rgba(14,34,61,0.5)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-3">
+            <div className="h-9 w-9 rounded-xl bg-[#D1B27A]/15 border border-[#D1B27A]/40 flex items-center justify-center flex-none">
+              <KeyRound className="h-4 w-4 text-[#DFC086]" />
+            </div>
             <div>
-              <div className="font-display text-sm font-bold text-white">
+              <div className="font-display text-sm sm:text-[15px] font-bold text-white">
                 首次使用请配置您个人的大模型 API Key（BYOK 自带密钥）
               </div>
-              <p className="mt-0.5 text-xs text-slate-300">
-                支持 DeepSeek、阿里云百炼、硅基流动、Kimi、智谱等，密钥仅保存在您本人的手机本地，律所不留存、零额外费用。
+              <p className="mt-0.5 text-xs text-slate-300 leading-5">
+                支持 DeepSeek、阿里云百炼、硅基流动、Kimi、智谱等，密钥仅加密保存于本机浏览器，零额外平台费。
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={() => navigateTab('settings')}
-            className="flex-none rounded-md bg-[#B89254] px-4 py-2 text-xs font-bold text-[#11151C]"
+            className="flex-none rounded-xl bg-gradient-to-r from-[#CFA968] to-[#DFBE82] hover:brightness-105 px-4 py-2.5 text-xs font-bold text-[#0E1A2B] shadow-sm transition-all"
           >
             前往 30 秒配置密钥 →
           </button>
         </div>
       )}
 
-      {/* PIN Vault Unlock Inline Bar */}
-      {byok.pinEnabled && !activeProvider.apiKey && activeProvider.apiKeyEncrypted && !sessionUnlockedPin && (
-        <div className="rounded-lg border border-[#DED8CC] bg-white p-3.5 flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-[#11151C]">
-            <Lock className="h-4 w-4 text-[#B89254]" />
-            <span>API 密钥受本机 PIN 码加密保护，请输入解锁本次会话：</span>
+      {/* Refined PIN Vault Unlock Strip */}
+      {isPinLocked && (
+        <div className="rounded-xl border border-[#DFD2B8] bg-gradient-to-r from-[#FDFBF6] via-white to-[#FAF5E9] px-4 py-2.5 shadow-[0_8px_22px_-16px_rgba(14,34,61,0.22)] flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2.5 text-xs font-semibold text-[#11151C]">
+            <span className="h-7 w-7 rounded-lg bg-[#F4ECDC] border border-[#E2D2B2] flex items-center justify-center flex-none">
+              <Lock className="h-3.5 w-3.5 text-[#9A7538]" />
+            </span>
+            <span>API 密钥受本机 PIN 码加密保护，请输入解锁本次会话</span>
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -499,22 +641,14 @@ export const AiHubTab: React.FC = () => {
               inputMode="numeric"
               value={pinUnlockInput}
               onChange={(e) => setPinUnlockInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleUnlockPin()}
               placeholder="输入安全 PIN"
-              className="w-32 rounded border border-[#D8D1C3] px-2.5 py-1.5 text-xs"
+              className="w-32 rounded-lg border border-[#D8CEB9] bg-white px-3 py-1.5 text-xs text-[#0E223D] placeholder:text-slate-400 focus:border-[#0E223D] focus:ring-2 focus:ring-[#B89254]/20 focus:outline-none"
             />
             <button
               type="button"
-              onClick={async () => {
-                try {
-                  await decryptWithPassphrase(activeProvider.apiKeyEncrypted!, pinUnlockInput.trim());
-                  setSessionUnlockedPin(pinUnlockInput.trim());
-                  setPinUnlockInput('');
-                  showToast('本机密钥保险箱已解锁');
-                } catch (err) {
-                  showToast(err instanceof Error ? err.message : 'PIN 错误');
-                }
-              }}
-              className="rounded bg-[#0E223D] px-3 py-1.5 text-xs font-semibold text-white"
+              onClick={handleUnlockPin}
+              className="rounded-lg bg-[#0E223D] hover:bg-[#17345D] px-3.5 py-1.5 text-xs font-semibold text-[#F6F4EF] shadow-sm transition-colors"
             >
               解锁
             </button>
@@ -522,10 +656,11 @@ export const AiHubTab: React.FC = () => {
         </div>
       )}
 
-      {/* 6 Specialists Strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+      {/* 6 Specialists Architectural Strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
         {AI_SPECIALISTS_REGISTRY.map((sp) => {
           const active = sp.id === specialist.id;
+          const IconComp = SPECIALIST_ICONS[sp.id];
           return (
             <button
               key={sp.id}
@@ -534,25 +669,42 @@ export const AiHubTab: React.FC = () => {
                 setSpecialistId(sp.id);
                 resetConversation();
               }}
-              className={`rounded-lg border p-3 text-left transition-all ${
+              className={`group relative overflow-hidden rounded-xl border p-3.5 text-left transition-all duration-200 ${
                 active
-                  ? 'border-[#0E223D] bg-[#0E223D] text-white shadow-sm'
-                  : 'border-[#DED8CC] bg-white text-[#11151C] hover:border-[#B89254]'
+                  ? 'border-[#1E3A63] bg-gradient-to-br from-[#102747] via-[#0E223D] to-[#081527] text-white shadow-[0_14px_28px_-14px_rgba(14,34,61,0.58)]'
+                  : 'border-[#E4DEC9] bg-white/95 hover:bg-white text-[#11151C] hover:-translate-y-0.5 hover:border-[#C7A468] hover:shadow-[0_12px_24px_-16px_rgba(14,34,61,0.25)]'
               }`}
             >
-              <div
-                className={`text-[10px] font-semibold uppercase tracking-wider ${
-                  active ? 'text-[#D1B27A]' : 'text-[#9A773E]'
-                }`}
-              >
-                {sp.code}
+              {active && (
+                <>
+                  <div className="absolute inset-x-0 top-0 h-[2.5px] bg-gradient-to-r from-[#B89254] via-[#E5CB96] to-[#B89254]/40" />
+                  <div className="pointer-events-none absolute -right-5 -top-5 h-16 w-16 rounded-full bg-[#D1B27A]/14 blur-xl" />
+                </>
+              )}
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={`font-num text-[10.5px] font-semibold tracking-[0.14em] ${
+                    active ? 'text-[#E0C38A]' : 'text-[#9A7538]'
+                  }`}
+                >
+                  {sp.code}
+                </span>
+                <span
+                  className={`h-6 w-6 rounded-lg flex items-center justify-center transition-colors ${
+                    active
+                      ? 'bg-white/10 border border-[#D1B27A]/30 text-[#E5CB96]'
+                      : 'bg-[#F6F2E8] text-[#85642B] group-hover:bg-[#0E223D] group-hover:text-[#DFC086]'
+                  }`}
+                >
+                  <IconComp className="h-3.5 w-3.5" />
+                </span>
               </div>
-              <div className="mt-1 font-display text-xs sm:text-[13px] font-bold leading-snug">
+              <div className="mt-2 font-display text-[13px] sm:text-[14px] font-bold leading-snug tracking-[0.02em]">
                 {sp.shortTitle}
               </div>
               <div
-                className={`mt-1 text-[10px] truncate ${
-                  active ? 'text-slate-300' : 'text-slate-500'
+                className={`mt-1 text-[10.5px] truncate ${
+                  active ? 'text-slate-300/90' : 'text-slate-500'
                 }`}
               >
                 {sp.badge}
@@ -562,405 +714,547 @@ export const AiHubTab: React.FC = () => {
         })}
       </div>
 
-      {/* Main Workspace */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-        {/* Left: Input, Docx + Screenshot Upload & Guardrails */}
-        <div className="lg:col-span-5 rounded-lg border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3.5">
-          <div>
-            <h2 className="font-display text-lg font-bold text-[#11151C]">{specialist.title}</h2>
-            <p className="mt-0.5 text-xs leading-5 text-slate-600">{specialist.desc}</p>
-          </div>
-
-          {/* Model Slot & Auto-Redact Bar */}
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-[#FAF9F6] border border-[#EAE5DA] p-2.5">
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setModelSlot('fast')}
-                className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
-                  modelSlot === 'fast'
-                    ? 'bg-[#0E223D] text-white'
-                    : 'text-slate-600 hover:bg-white'
-                }`}
-              >
-                <Zap className="h-3 w-3 text-[#D1B27A]" />
-                极速模型
-              </button>
-              <button
-                type="button"
-                onClick={() => setModelSlot('reasoning')}
-                className={`inline-flex items-center gap-1 rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
-                  modelSlot === 'reasoning'
-                    ? 'bg-[#0E223D] text-white'
-                    : 'text-slate-600 hover:bg-white'
-                }`}
-              >
-                <BrainCircuit className="h-3 w-3 text-[#D1B27A]" />
-                深度推理
-              </button>
+      {/* Main Executive Two-Column Studio */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+        {/* Left: Precision Legal Intake Folio */}
+        <div className="lg:col-span-5 rounded-2xl border border-[#E2DAC7] bg-white shadow-[0_18px_44px_-26px_rgba(14,34,61,0.22)] flex flex-col overflow-hidden">
+          <div className="h-[3px] w-full bg-gradient-to-r from-[#0E223D] via-[#B89254] to-[#E5DEC9]" />
+          <div className="p-4 sm:p-5 space-y-4 flex-1 flex flex-col">
+            {/* Specialist Heading */}
+            <div>
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-[#E6D7BA] bg-[#FBF7EE] px-2.5 py-0.5 text-[10.5px] font-semibold text-[#8A6529]">
+                <ActiveSpecialistIcon className="h-3 w-3" />
+                <span>{specialist.code}</span>
+                <span className="text-[#C9A463]">·</span>
+                <span>{specialist.badge}</span>
+              </div>
+              <h2 className="mt-2 font-display text-[18px] sm:text-[20px] font-bold leading-snug text-[#0E223D]">
+                {specialist.title}
+              </h2>
+              <p className="mt-1 text-xs leading-[1.65] text-slate-600">{specialist.desc}</p>
             </div>
 
-            <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-900 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={byok.autoRedactPrompt}
-                onChange={(e) =>
-                  updateByok({ ...byok, autoRedactPrompt: e.target.checked })
-                }
-                className="rounded accent-[#0E223D]"
-              />
-              <ShieldCheck className="h-3.5 w-3.5 text-emerald-700" />
-              文本自动脱敏
-            </label>
-          </div>
-
-          {/* Preset Stance Selector (Grouped by Practice Area + Custom Note) */}
-          {specialist.presetOptions && specialist.presetOptions.length > 0 && (
-            <div className="space-y-1.5">
-              <label className="block text-xs font-bold text-[#11151C]">
-                选择代理立场 / 文书场景（覆盖民商 · 知产 · 刑事 · 行政 · 执行 · 非诉与通用）：
-              </label>
-              <select
-                value={selectedPreset}
-                onChange={(e) => setSelectedPreset(e.target.value)}
-                className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 text-xs font-medium text-[#11151C] focus:border-[#0E223D] focus:outline-none"
-              >
-                {(() => {
-                  const hasGroups = specialist.presetOptions.some((o) => Boolean(o.group));
-                  if (!hasGroups) {
-                    return specialist.presetOptions.map((opt) => (
-                      <option key={opt.label} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ));
-                  }
-                  const groups: { name: string; items: typeof specialist.presetOptions }[] = [];
-                  for (const opt of specialist.presetOptions) {
-                    const gName = opt.group || '通用场景';
-                    let found = groups.find((g) => g.name === gName);
-                    if (!found) {
-                      found = { name: gName, items: [] };
-                      groups.push(found);
-                    }
-                    found.items.push(opt);
-                  }
-                  return groups.map((g) => (
-                    <optgroup key={g.name} label={`── ${g.name} ──`}>
-                      {g.items.map((opt) => (
-                        <option key={`${g.name}-${opt.label}`} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ));
-                })()}
-              </select>
-              <input
-                type="text"
-                value={customSceneNote}
-                onChange={(e) => setCustomSceneNote(e.target.value)}
-                placeholder="选填：补充具体文书名、审级或特别要求（如：二审上诉状 / 发给公安经侦 / 控制在 1500 字内）"
-                className="w-full rounded border border-[#E4DFD4] bg-white px-2.5 py-1.5 text-[11px] text-[#11151C] placeholder:text-slate-400 focus:border-[#0E223D] focus:outline-none"
-              />
-            </div>
-          )}
-
-          {/* Document + Screenshot Upload Toolbar */}
-          <div>
-            <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
-              <span className="text-xs font-bold text-[#11151C]">案件材料 / 截图输入</span>
-              <div className="flex flex-wrap items-center gap-1.5">
-                <input
-                  ref={fileRef}
-                  type="file"
-                  accept=".docx,.txt,.md,.csv"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                />
-                <input
-                  ref={imageRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  onChange={(e) => {
-                    if (e.target.files) attachImages(e.target.files, 'initial');
-                    e.target.value = '';
-                  }}
-                  className="hidden"
-                />
+            {/* Engine Segmented Switch + Tactile Redaction Toggle */}
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[#F7F4EC] border border-[#EAE2D0] p-1.5">
+              <div className="inline-flex items-center rounded-lg bg-[#EAE3D3]/80 p-0.5">
                 <button
                   type="button"
-                  onClick={() => fileRef.current?.click()}
-                  className="inline-flex items-center gap-1 rounded border border-[#0E223D]/25 bg-[#F6F4EF] px-2 py-1 text-[11px] font-semibold text-[#0E223D] hover:bg-[#EAE3D5]"
+                  onClick={() => setModelSlot('fast')}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                    modelSlot === 'fast'
+                      ? 'bg-[#0E223D] text-white shadow-sm'
+                      : 'text-slate-600 hover:text-[#0E223D]'
+                  }`}
                 >
-                  <FileUp className="h-3.5 w-3.5" /> .docx/.txt
+                  <Zap className={`h-3 w-3 ${modelSlot === 'fast' ? 'text-[#E0C38A]' : 'text-[#9A7538]'}`} />
+                  极速模型
                 </button>
                 <button
                   type="button"
-                  disabled={compressingImages || inputImages.length >= MAX_IMAGES_PER_TURN}
-                  onClick={() => imageRef.current?.click()}
-                  className="inline-flex items-center gap-1 rounded border border-[#B89254] bg-[#F3ECE0] px-2 py-1 text-[11px] font-bold text-[#7A5922] hover:bg-[#E7DBC6] disabled:opacity-50"
+                  onClick={() => setModelSlot('reasoning')}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-all ${
+                    modelSlot === 'reasoning'
+                      ? 'bg-[#0E223D] text-white shadow-sm'
+                      : 'text-slate-600 hover:text-[#0E223D]'
+                  }`}
                 >
-                  {compressingImages ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <Camera className="h-3.5 w-3.5" />
+                  <BrainCircuit
+                    className={`h-3 w-3 ${modelSlot === 'reasoning' ? 'text-[#E0C38A]' : 'text-[#9A7538]'}`}
+                  />
+                  深度推理
+                </button>
+              </div>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={byok.autoRedactPrompt}
+                onClick={() => updateByok({ ...byok, autoRedactPrompt: !byok.autoRedactPrompt })}
+                className={`inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
+                  byok.autoRedactPrompt
+                    ? 'bg-emerald-50/90 text-emerald-900 border border-emerald-200/80'
+                    : 'bg-white/70 text-slate-500 border border-[#E3DCC9]'
+                }`}
+              >
+                <ShieldCheck
+                  className={`h-3.5 w-3.5 ${byok.autoRedactPrompt ? 'text-emerald-600' : 'text-slate-400'}`}
+                />
+                <span>文本自动脱敏</span>
+                <span
+                  className={`relative inline-flex h-4 w-7 items-center rounded-full transition-colors ${
+                    byok.autoRedactPrompt ? 'bg-emerald-600' : 'bg-slate-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${
+                      byok.autoRedactPrompt ? 'translate-x-3.5' : 'translate-x-0.5'
+                    }`}
+                  />
+                </span>
+              </button>
+            </div>
+
+            {/* Grouped Practice Scenario Selector Card */}
+            {specialist.presetOptions && specialist.presetOptions.length > 0 && (
+              <div className="rounded-xl border border-[#EAE2D0] bg-[#FAF8F3] p-3 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-1.5">
+                  <label className="text-xs font-bold text-[#0E223D]">
+                    代理立场 / 文书场景
+                  </label>
+                  <span className="hidden sm:inline text-[10.5px] font-medium text-[#9A7538]">
+                    民商 · 知产 · 刑事 · 行政 · 执行 · 非诉
+                  </span>
+                </div>
+                <div className="relative">
+                  <select
+                    value={selectedPreset}
+                    onChange={(e) => setSelectedPreset(e.target.value)}
+                    className="appearance-none w-full rounded-lg border border-[#DCD4C1] bg-white pl-3 pr-9 py-2.5 text-xs font-medium text-[#11151C] shadow-[0_1px_2px_rgba(14,34,61,0.04)] transition-colors hover:border-[#B89254] focus:border-[#0E223D] focus:ring-2 focus:ring-[#B89254]/20 focus:outline-none"
+                  >
+                    {(() => {
+                      const hasGroups = specialist.presetOptions.some((o) => Boolean(o.group));
+                      if (!hasGroups) {
+                        return specialist.presetOptions.map((opt) => (
+                          <option key={opt.label} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ));
+                      }
+                      const groups: { name: string; items: typeof specialist.presetOptions }[] = [];
+                      for (const opt of specialist.presetOptions) {
+                        const gName = opt.group || '通用场景';
+                        let found = groups.find((g) => g.name === gName);
+                        if (!found) {
+                          found = { name: gName, items: [] };
+                          groups.push(found);
+                        }
+                        found.items.push(opt);
+                      }
+                      return groups.map((g) => (
+                        <optgroup key={g.name} label={`── ${g.name} ──`}>
+                          {g.items.map((opt) => (
+                            <option key={`${g.name}-${opt.label}`} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ));
+                    })()}
+                  </select>
+                  <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#8C6E3B]" />
+                </div>
+                <input
+                  type="text"
+                  value={customSceneNote}
+                  onChange={(e) => setCustomSceneNote(e.target.value)}
+                  placeholder="选填：补充具体文书名、审级或特别要求（如：二审上诉状 / 发给公安经侦 / 1500 字内）"
+                  className="w-full rounded-lg border border-[#E6DFCE] bg-white/90 px-3 py-2 text-[11.5px] text-[#11151C] placeholder:text-slate-400 transition-colors focus:bg-white focus:border-[#0E223D] focus:ring-2 focus:ring-[#B89254]/15 focus:outline-none"
+                />
+              </div>
+            )}
+
+            {/* Unified Material Composer Frame */}
+            <div className="flex-1 flex flex-col">
+              <div className="flex-1 flex flex-col rounded-xl border border-[#DCD4C1] bg-[#FCFBF8] overflow-hidden transition-all focus-within:bg-white focus-within:border-[#0E223D] focus-within:ring-2 focus-within:ring-[#0E223D]/8">
+                {/* Composer Toolbar */}
+                <div className="flex flex-wrap items-center justify-between gap-1.5 px-3 py-2 bg-[#F5F2EA]/85 border-b border-[#EAE2D0]">
+                  <span className="text-xs font-bold text-[#0E223D]">案件材料 / 截图输入</span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <input
+                      ref={fileRef}
+                      type="file"
+                      accept=".docx,.txt,.md,.csv"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                    <input
+                      ref={imageRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={(e) => {
+                        if (e.target.files) attachImages(e.target.files, 'initial');
+                        e.target.value = '';
+                      }}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileRef.current?.click()}
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#D8D0BE] bg-white hover:border-[#0E223D] px-2.5 py-1 text-[11px] font-semibold text-[#0E223D] shadow-[0_1px_2px_rgba(14,34,61,0.03)] transition-colors"
+                    >
+                      <FileUp className="h-3 w-3 text-[#8C6E3B]" /> .docx/.txt
+                    </button>
+                    <button
+                      type="button"
+                      disabled={compressingImages || inputImages.length >= MAX_IMAGES_PER_TURN}
+                      onClick={() => imageRef.current?.click()}
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#C9A463]/80 bg-[#F7EFE0] hover:bg-[#EFE3CA] px-2.5 py-1 text-[11px] font-bold text-[#7A5922] transition-colors disabled:opacity-50"
+                    >
+                      {compressingImages ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Camera className="h-3 w-3" />
+                      )}
+                      传截图/拍照 ({inputImages.length}/{MAX_IMAGES_PER_TURN})
+                    </button>
+                    {(inputText || inputImages.length > 0) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setInputText('');
+                          setInputImages([]);
+                          setSessionMappings([]);
+                        }}
+                        className="rounded-md p-1 text-slate-400 hover:bg-white hover:text-slate-700 transition-colors"
+                        title="清空输入"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <textarea
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onPaste={(e) => handlePasteImages(e, 'initial')}
+                  rows={8}
+                  placeholder={`${specialist.placeholder}\n（支持直接 Ctrl+V 粘贴截图，或点上方“传截图/拍照”上传合同/聊天记录照片）`}
+                  className="legal-scroll flex-1 min-h-[176px] w-full resize-y bg-transparent p-3.5 text-xs sm:text-[13.5px] leading-[1.75] text-[#14181F] placeholder:text-slate-400 focus:outline-none"
+                />
+                {inputText.length > 0 && (
+                  <div className="flex items-center justify-between px-3.5 py-1.5 border-t border-[#EFEAE0] bg-[#FAF8F3]/70 text-[10.5px] text-slate-500">
+                    <span>支持直接 Ctrl+V 粘贴补充截图</span>
+                    <span className="font-num font-medium text-[#7D5E29]">
+                      已输入 {inputText.length.toLocaleString()} 字
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Attached Initial Screenshots Strip */}
+              {inputImages.length > 0 && (
+                <div className="mt-2.5 space-y-2">
+                  <div className="grid grid-cols-3 gap-2">
+                    {inputImages.map((img) => (
+                      <div
+                        key={img.id}
+                        className="relative group rounded-lg border border-[#DED8CC] bg-[#FAF9F6] overflow-hidden shadow-xs"
+                      >
+                        <img
+                          src={img.dataUrl}
+                          alt={img.name}
+                          className="h-20 w-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setRedactingImageTarget({ bucket: 'initial', image: img })
+                          }
+                          className="absolute bottom-6 left-1 rounded-md bg-[#0E223D]/90 hover:bg-[#0E223D] border border-[#D1B27A]/60 px-1.5 py-0.5 text-[10px] font-bold text-[#E2C692]"
+                          title="用手指或鼠标涂抹遮盖敏感信息"
+                        >
+                          涂抹打码
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setInputImages((prev) => prev.filter((x) => x.id !== img.id))
+                          }
+                          className="absolute top-1 right-1 rounded-full bg-black/70 p-0.5 text-white hover:bg-red-600"
+                          title="移除图片"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                        <div className="px-1.5 py-0.5 text-[10px] text-slate-600 truncate bg-white/95">
+                          {img.sizeKb}KB · {img.width}×{img.height}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Confidentiality & Vision Model Status Alert */}
+                  <div className="rounded-xl border border-amber-300/80 bg-amber-50/90 p-2.5 text-[11px] leading-5 text-amber-950 space-y-1">
+                    <div className="flex items-start gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5 flex-none text-amber-700 mt-0.5" />
+                      <span>
+                        <strong>截图保密提醒：</strong>纯文本已自动脱敏，但图片画面无法自动遮挡真实姓名/身份证号，发送前请点击图片上的「涂抹打码」直接在本地永久遮盖敏感区域。
+                      </span>
+                    </div>
+                    {resolvedVisionModel ? (
+                      <div className="flex items-center gap-1 text-emerald-800 font-semibold pl-5">
+                        <Eye className="h-3 w-3" />
+                        含图将自动调用视觉模型：{resolvedVisionModel}
+                      </div>
+                    ) : (
+                      <div className="pl-5 flex flex-wrap items-center justify-between gap-1.5 text-red-800 font-semibold">
+                        <span>
+                          当前「{providerShortName}」未配置视觉识图模型（DeepSeek 官方暂仅支持纯文本）
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => navigateTab('settings')}
+                          className="underline text-[#0E223D]"
+                        >
+                          前往切换/配置识图模型 →
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Signature Primary Action Button */}
+            <div className="pt-0.5">
+              {!streaming ? (
+                <button
+                  type="button"
+                  onClick={() => runGeneration(false)}
+                  disabled={!isOnline}
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#0E223D] via-[#153156] to-[#0E223D] hover:brightness-110 py-3.5 px-4 text-xs sm:text-sm font-bold text-[#F8F5EE] ring-1 ring-inset ring-[#D1B27A]/35 shadow-[0_12px_26px_-14px_rgba(14,34,61,0.65)] transition-all hover:-translate-y-[0.5px] active:translate-y-0 disabled:opacity-45 disabled:hover:translate-y-0"
+                >
+                  <Sparkles className="h-4 w-4 text-[#E2C692] flex-none" />
+                  <span className="truncate">
+                    {uiTurns.length > 0 ? `重新发起「${specialist.shortTitle}」` : `启动「${specialist.shortTitle}」`}
+                  </span>
+                  {activeModelDisplay && (
+                    <span className="hidden sm:inline-block max-w-[160px] truncate rounded-md bg-white/10 border border-white/10 px-2 py-0.5 text-[10.5px] font-medium text-[#E5CB96]">
+                      {activeModelDisplay}
+                    </span>
                   )}
-                  传截图/拍照 ({inputImages.length}/{MAX_IMAGES_PER_TURN})
                 </button>
-                {(inputText || inputImages.length > 0) && (
+              ) : (
+                <button
+                  type="button"
+                  onClick={stopGeneration}
+                  className="w-full inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-red-700 to-red-800 hover:brightness-110 py-3.5 text-xs sm:text-sm font-bold text-white shadow-sm transition-all"
+                >
+                  <Square className="h-4 w-4 fill-current" /> 停止流式输出
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Executive Counsel Reading Desk & Multi-Turn Consultation Thread */}
+        <div className="lg:col-span-7 rounded-2xl border border-[#DDD5C3] bg-white shadow-[0_20px_48px_-26px_rgba(14,34,61,0.22)] flex flex-col overflow-hidden">
+          {/* Obsidian Architectural Top Bar */}
+          <div className="relative bg-gradient-to-r from-[#0C1D35] via-[#102646] to-[#091628] px-4 sm:px-5 py-3.5 text-[#F6F4EF] border-b border-[#B89254]/35 space-y-2.5">
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-transparent via-[#D1B27A]/75 to-transparent" />
+            {/* Row 1: Desk Title & Session Utilities */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-[10.5px] font-semibold uppercase tracking-[0.2em] text-[#DFC086] truncate">
+                  ✦ CN LAWYER COUNSEL DESK · 多轮研判工作舱
+                </span>
+                {uiTurns.length > 0 && (
+                  <span className="rounded-full bg-emerald-400/15 border border-emerald-400/30 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 flex-none">
+                    共 {uiTurns.length} 轮
+                  </span>
+                )}
+                {streaming && <Loader2 className="h-3.5 w-3.5 animate-spin text-[#E2C692] flex-none" />}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {sessionMappings.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => {
-                      setInputText('');
-                      setInputImages([]);
-                      setSessionMappings([]);
-                    }}
-                    className="p-1 text-slate-400 hover:text-slate-700"
-                    title="清空输入"
+                    onClick={() => setAutoRestoreView((v) => !v)}
+                    className={`rounded-md px-2 py-1 text-[10.5px] font-semibold border transition-colors ${
+                      autoRestoreView
+                        ? 'border-emerald-400/50 bg-emerald-950/60 text-emerald-200'
+                        : 'border-white/20 bg-white/10 text-slate-200'
+                    }`}
                   >
-                    <RotateCcw className="h-3.5 w-3.5" />
+                    {autoRestoreView ? `✓ 已还原真名 (${sessionMappings.length})` : '显示脱敏稿'}
+                  </button>
+                )}
+
+                {(uiTurns.length > 0 || streaming) && (
+                  <button
+                    type="button"
+                    onClick={() => setFormattedView((v) => !v)}
+                    className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/8 hover:bg-white/16 px-2 py-1 text-[10.5px] font-medium text-slate-200 transition-colors"
+                    title="切换文书阅读排版与原始 Markdown 纯文本"
+                  >
+                    <FileText className="h-3 w-3 text-[#DFC086]" />
+                    {formattedView ? '源码' : '排版'}
+                  </button>
+                )}
+
+                {uiTurns.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={resetConversation}
+                    className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/8 hover:bg-white/16 px-2 py-1 text-[10.5px] font-medium text-slate-200 transition-colors"
+                    title="清空当前对话开始新案件"
+                  >
+                    <MessageSquarePlus className="h-3 w-3 text-[#DFC086]" /> 新开对话
                   </button>
                 )}
               </div>
             </div>
 
-            <textarea
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onPaste={(e) => handlePasteImages(e, 'initial')}
-              rows={8}
-              placeholder={`${specialist.placeholder}\n（支持直接 Ctrl+V 粘贴截图，或点上方“传截图/拍照”上传合同/聊天记录照片）`}
-              className="w-full rounded-md border border-[#D8D1C3] bg-[#FAF9F6] p-3 text-xs sm:text-sm leading-6 text-[#14181F] focus:border-[#0E223D] focus:bg-white focus:outline-none"
-            />
-
-            {/* Attached Initial Screenshots Strip */}
-            {inputImages.length > 0 && (
-              <div className="mt-2.5 space-y-2">
-                <div className="grid grid-cols-3 gap-2">
-                  {inputImages.map((img) => (
-                    <div
-                      key={img.id}
-                      className="relative group rounded-md border border-[#DED8CC] bg-[#FAF9F6] overflow-hidden"
-                    >
-                      <img
-                        src={img.dataUrl}
-                        alt={img.name}
-                        className="h-20 w-full object-cover"
-                      />
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setRedactingImageTarget({ bucket: 'initial', image: img })
-                        }
-                        className="absolute bottom-6 left-1 rounded bg-[#0E223D]/90 hover:bg-[#0E223D] border border-[#D1B27A]/60 px-1.5 py-0.5 text-[10px] font-bold text-[#D1B27A]"
-                        title="用手指或鼠标涂抹遮盖敏感信息"
-                      >
-                        涂抹打码
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setInputImages((prev) => prev.filter((x) => x.id !== img.id))
-                        }
-                        className="absolute top-1 right-1 rounded-full bg-black/70 p-0.5 text-white hover:bg-red-600"
-                        title="移除图片"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                      <div className="px-1.5 py-0.5 text-[10px] text-slate-600 truncate bg-white/95">
-                        {img.sizeKb}KB · {img.width}×{img.height}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Confidentiality & Vision Model Status Alert */}
-                <div className="rounded-md border border-amber-300 bg-amber-50 p-2.5 text-[11px] leading-5 text-amber-950 space-y-1">
-                  <div className="flex items-start gap-1.5">
-                    <AlertTriangle className="h-3.5 w-3.5 flex-none text-amber-700 mt-0.5" />
-                    <span>
-                      <strong>截图保密提醒：</strong>纯文本已自动脱敏，但图片画面无法自动遮挡真实姓名/身份证号，发送前请点击图片上的「涂抹打码」直接在本地永久遮盖敏感区域。
-                    </span>
-                  </div>
-                  {resolvedVisionModel ? (
-                    <div className="flex items-center gap-1 text-emerald-800 font-semibold pl-5">
-                      <Eye className="h-3 w-3" />
-                      含图将自动调用视觉模型：{resolvedVisionModel}
-                    </div>
-                  ) : (
-                    <div className="pl-5 flex flex-wrap items-center justify-between gap-1.5 text-red-800 font-semibold">
-                      <span>
-                        当前「{activeProvider?.name.split('（')[0]}」未配置视觉识图模型（DeepSeek 官方暂仅支持纯文本）
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => navigateTab('settings')}
-                        className="underline text-[#0E223D]"
-                      >
-                        前往切换/配置识图模型 →
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            {!streaming ? (
-              <button
-                type="button"
-                onClick={() => runGeneration(false)}
-                disabled={!isOnline}
-                className="flex-1 inline-flex items-center justify-center gap-2 rounded-md bg-[#0E223D] hover:bg-[#16325A] py-3 px-3 text-xs sm:text-sm font-bold text-[#F6F4EF] disabled:opacity-45"
-              >
-                <Sparkles className="h-4 w-4 text-[#D1B27A] flex-none" />
-                <span className="truncate">
-                  {uiTurns.length > 0 ? `重新发起「${specialist.shortTitle}」` : `启动「${specialist.shortTitle}」`}
-                  （
-                  {inputImages.length > 0
-                    ? resolvedVisionModel || '需先配置识图模型'
-                    : modelSlot === 'reasoning'
-                    ? activeProvider?.reasoningModel || activeProvider?.fastModel
-                    : activeProvider?.fastModel}
-                  ）
-                </span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={stopGeneration}
-                className="flex-1 inline-flex items-center justify-center gap-2 rounded-md bg-red-700 hover:bg-red-800 py-3 text-xs sm:text-sm font-bold text-white"
-              >
-                <Square className="h-4 w-4 fill-current" /> 停止流式输出
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Right: Multi-Turn Legal Consultation Thread + Follow-Up Refinement Dock */}
-        <div className="lg:col-span-7 rounded-lg border border-[#0E223D] bg-[#0E223D] p-4 sm:p-5 text-[#F6F4EF] flex flex-col">
-          {/* Header Toolbar */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-white/15">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] uppercase tracking-[0.18em] text-[#D1B27A]">
-                  CN LAWYER AI OUTPUT · 多轮研判对话舱
-                </span>
-                {uiTurns.length > 0 && (
-                  <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
-                    共 {uiTurns.length} 轮
-                  </span>
-                )}
-                {streaming && <Loader2 className="h-3.5 w-3.5 animate-spin text-[#D1B27A]" />}
-              </div>
-              <div className="mt-0.5 text-[11px] text-slate-300 truncate">
-                {usedModelName
-                  ? `最近调用：${usedModelName}`
-                  : `就绪服务商：${activeProvider?.name.split('（')[0]}${resolvedVisionModel ? `（支持识图：${resolvedVisionModel}）` : ''}`}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              {sessionMappings.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => setAutoRestoreView((v) => !v)}
-                  className={`rounded px-2.5 py-1 text-[11px] font-semibold border transition-colors ${
-                    autoRestoreView
-                      ? 'border-emerald-400/50 bg-emerald-950/60 text-emerald-200'
-                      : 'border-white/20 bg-white/10 text-slate-200'
+            {/* Row 2: Live Model Status & Export/Copy Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-white/10">
+              <div className="flex items-center gap-1.5 text-[11px] text-slate-300/95 min-w-0">
+                <span
+                  className={`h-1.5 w-1.5 rounded-full flex-none ${
+                    streaming ? 'bg-[#E2C692] animate-pulse' : 'bg-emerald-400'
                   }`}
-                >
-                  {autoRestoreView
-                    ? `✓ 已还原真名 (${sessionMappings.length})`
-                    : `显示脱敏稿`}
-                </button>
-              )}
+                />
+                <span className="truncate">
+                  {usedModelName
+                    ? `最近调用：${usedModelName}`
+                    : `就绪服务商：${providerShortName}${resolvedVisionModel ? ` · 识图：${resolvedVisionModel}` : ''}`}
+                </span>
+              </div>
 
-              {uiTurns.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 flex-none">
                 <button
                   type="button"
-                  onClick={resetConversation}
-                  className="inline-flex items-center gap-1 rounded border border-white/20 bg-white/5 hover:bg-white/15 px-2.5 py-1 text-[11px] font-medium text-slate-200"
-                  title="清空当前对话开始新案件"
+                  onClick={() => {
+                    const raw = streaming ? streamingOutput : latestCompletedTurn?.assistantRaw || '';
+                    if (!raw.trim()) return;
+                    const visible = renderVisibleText(raw);
+                    const dateTag = new Date().toISOString().slice(0, 10);
+                    const fname = `${specialist.shortTitle}_${dateTag}.docx`;
+                    downloadMarkdownReportDocx(
+                      {
+                        title: specialist.title,
+                        subtitle: `生成日期：${dateTag} ｜ 供承办律师复核定稿使用`,
+                        markdownBody: visible,
+                      },
+                      fname
+                    );
+                    showToast(`已导出可编辑 Word 文档：${fname}`);
+                  }}
+                  disabled={!latestDisplayText || streaming}
+                  className="inline-flex items-center gap-1 rounded-lg border border-[#D1B27A]/55 bg-[#D1B27A]/12 hover:bg-[#D1B27A]/22 px-2.5 py-1 text-[11.5px] font-semibold text-[#E6CD9A] disabled:opacity-40 whitespace-nowrap transition-colors"
+                  title="纯浏览器本地导出为标准 Word (.docx) 文书底稿"
                 >
-                  <MessageSquarePlus className="h-3 w-3 text-[#D1B27A]" /> 新开对话
+                  <Download className="h-3 w-3" /> 导出 Word
                 </button>
-              )}
 
-              <button
-                type="button"
-                onClick={() => {
-                  const raw = streaming ? streamingOutput : latestCompletedTurn?.assistantRaw || '';
-                  if (!raw.trim()) return;
-                  const visible = renderVisibleText(raw);
-                  const dateTag = new Date().toISOString().slice(0, 10);
-                  const fname = `${specialist.shortTitle}_${dateTag}.docx`;
-                  downloadMarkdownReportDocx(
-                    {
-                      title: specialist.title,
-                      subtitle: `生成日期：${dateTag} ｜ 供承办律师复核定稿使用`,
-                      markdownBody: visible,
-                    },
-                    fname
-                  );
-                  showToast(`已导出可编辑 Word 文档：${fname}`);
-                }}
-                disabled={!latestDisplayText || streaming}
-                className="inline-flex items-center gap-1 rounded border border-[#D1B27A]/60 bg-[#091628] hover:bg-white/15 px-2.5 py-1.5 text-xs font-semibold text-[#D1B27A] disabled:opacity-40 whitespace-nowrap"
-                title="纯浏览器本地导出为标准 Word (.docx) 文书底稿"
-              >
-                <Download className="h-3.5 w-3.5" /> 导出 Word
-              </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    copyTurnText(
+                      'latest-wx',
+                      streaming ? streamingOutput : latestCompletedTurn?.assistantRaw || '',
+                      true
+                    )
+                  }
+                  disabled={!latestDisplayText}
+                  className="inline-flex items-center gap-1 rounded-lg border border-white/12 bg-white/10 hover:bg-white/20 px-2.5 py-1 text-[11.5px] font-semibold text-white disabled:opacity-40 whitespace-nowrap transition-colors"
+                  title="去除 Markdown 星号与井号，适合直接粘贴到微信对话框"
+                >
+                  微信纯文本
+                </button>
 
-              <button
-                type="button"
-                onClick={() =>
-                  copyTurnText('latest-wx', streaming ? streamingOutput : latestCompletedTurn?.assistantRaw || '', true)
-                }
-                disabled={!latestDisplayText}
-                className="inline-flex items-center gap-1 rounded bg-white/15 hover:bg-white/25 px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40 whitespace-nowrap"
-                title="去除 Markdown 星号与井号，适合直接粘贴到微信对话框"
-              >
-                微信纯文本
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  copyTurnText('latest-full', streaming ? streamingOutput : latestCompletedTurn?.assistantRaw || '', false)
-                }
-                disabled={!latestDisplayText}
-                className="inline-flex items-center gap-1 rounded bg-[#D1B27A] hover:bg-[#DEC28F] px-3 py-1.5 text-xs font-bold text-[#11151C] disabled:bg-white/15 disabled:text-slate-300 whitespace-nowrap"
-              >
-                {copiedId === 'latest-full' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                {copiedId === 'latest-full' ? '已复制' : '复制最新稿'}
-              </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    copyTurnText(
+                      'latest-full',
+                      streaming ? streamingOutput : latestCompletedTurn?.assistantRaw || '',
+                      false
+                    )
+                  }
+                  disabled={!latestDisplayText}
+                  className="inline-flex items-center gap-1 rounded-lg bg-gradient-to-r from-[#CFA968] to-[#E0C185] hover:brightness-105 px-3 py-1 text-[11.5px] font-bold text-[#0E1A2B] shadow-xs disabled:from-white/10 disabled:to-white/10 disabled:text-slate-400 whitespace-nowrap transition-all"
+                >
+                  {copiedId === 'latest-full' ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                  {copiedId === 'latest-full' ? '已复制' : '复制最新稿'}
+                </button>
+              </div>
             </div>
           </div>
 
           {errorMsg && (
-            <div className="mt-3 rounded bg-red-950/80 border border-red-400/50 p-3 text-xs text-red-100 flex items-start gap-2">
-              <AlertCircle className="h-4 w-4 flex-none text-red-300 mt-0.5" />
-              <div className="space-y-1">
+            <div className="mx-4 sm:mx-5 mt-3.5 rounded-xl bg-red-50 border border-red-200 p-3 text-xs text-red-900 flex items-start gap-2.5">
+              <AlertCircle className="h-4 w-4 flex-none text-red-600 mt-0.5" />
+              <div className="space-y-0.5">
                 <div className="font-bold">请求未能完成</div>
-                <p className="leading-5">{errorMsg}</p>
+                <p className="leading-5 text-red-800">{errorMsg}</p>
               </div>
             </div>
           )}
 
-          {/* Scrollable Multi-Turn Conversation Feed */}
-          <div className="mt-3 flex-1 min-h-[300px] max-h-[560px] overflow-y-auto rounded bg-[#091628] p-3.5 sm:p-4 border border-white/10 space-y-4">
+          {/* Warm Ivory Editorial Reading Canvas */}
+          <div
+            ref={threadScrollRef}
+            className="legal-scroll flex-1 min-h-[380px] max-h-[620px] overflow-y-auto bg-[#FAF8F3] p-4 sm:p-5 space-y-4"
+          >
             {uiTurns.length === 0 && !streaming ? (
-              <div className="text-xs sm:text-sm leading-7 text-slate-300 space-y-2.5">
-                <p>输入案件文字、导入本地 <code className="text-[#D1B27A]">.docx</code> 合同，或点击 <strong className="text-[#D1B27A]">「传截图/拍照」</strong> 上传合同/聊天记录照片，流式法律分析将在此按轮次留痕呈现。</p>
-                <ul className="space-y-1 text-xs text-slate-400 list-disc pl-4">
-                  <li><strong>完整多轮追问改稿：</strong>首轮生成后，可在下方无限轮次追问修改（如调语气、补条款、改诉请），每一轮版本均完整保留可对比复制，支持随时撤回上一轮。</li>
-                  <li><strong>多图截图识别：</strong>支持相册多选、现场拍照或电脑 <code className="text-slate-200">Ctrl+V</code> 粘贴截图（本地自动高清压缩，含图自动切换视觉模型）。</li>
-                  <li><strong>跨轮本地脱敏还原：</strong>开启「文本自动脱敏」后，多轮追问沿用同一套密码本不撞号，返回屏幕毫秒级还原真实姓名与公司全称。</li>
-                </ul>
+              <div className="h-full flex flex-col justify-center">
+                <div className="rounded-xl border border-[#E7E0CF] bg-white p-5 sm:p-6 shadow-[0_8px_28px_-18px_rgba(14,34,61,0.14)] space-y-4">
+                  {/* Ready Header */}
+                  <div className="flex items-start gap-3.5">
+                    <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-[#102747] to-[#081527] border border-[#B89254]/45 flex items-center justify-center text-[#E5CB96] shadow-[0_8px_18px_-10px_rgba(14,34,61,0.6)] flex-none">
+                      <ActiveSpecialistIcon className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-[10.5px] font-semibold uppercase tracking-[0.16em] text-[#9A7538]">
+                        {specialist.code} · 执业专席待命中
+                      </div>
+                      <h3 className="mt-0.5 font-display text-base sm:text-[17px] font-bold text-[#0E223D]">
+                        {specialist.shortTitle}工作台已就绪
+                      </h3>
+                      <p className="mt-1 text-xs leading-5 text-slate-600">
+                        在左侧输入案情文字、导入本地 <code className="rounded bg-[#F3EFE4] px-1 py-0.5 text-[#0E223D] font-mono text-[11px]">.docx</code>，或粘贴/上传证据截图，流式成稿与核对表格将在此处以文书排版呈现。
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Specialist-Specific Craft Pillars */}
+                  <div className="rounded-xl border border-[#EAE1CE] bg-gradient-to-br from-[#FCF9F2] to-[#F7F2E6] p-3.5">
+                    <div className="text-[11px] font-bold text-[#7D5E29] mb-2">
+                      当前专席内置实务纪律
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                      {activePillars.map((pillar) => (
+                        <div key={pillar} className="flex items-center gap-2 text-xs text-[#232B38]">
+                          <span className="h-1.5 w-1.5 rounded-full bg-[#B89254] flex-none" />
+                          <span>{pillar}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 3 Tactile Capability Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div className="rounded-xl border border-[#ECE6D8] bg-[#FCFBF8] p-3 space-y-1">
+                      <div className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0E223D]">
+                        <Layers className="h-3.5 w-3.5 text-[#9A7538]" />
+                        多轮追问留痕
+                      </div>
+                      <p className="text-[11px] leading-[1.6] text-slate-500">
+                        首轮成稿后可无限轮次微调语气与诉请，每轮版本独立可导 Word 或撤回。
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[#ECE6D8] bg-[#FCFBF8] p-3 space-y-1">
+                      <div className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0E223D]">
+                        <ShieldCheck className="h-3.5 w-3.5 text-emerald-700" />
+                        跨轮本地脱敏
+                      </div>
+                      <p className="text-[11px] leading-[1.6] text-slate-500">
+                        沿用同一密码本不撞号，补充要求同步脱敏，返回屏幕毫秒级还原真名。
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-[#ECE6D8] bg-[#FCFBF8] p-3 space-y-1">
+                      <div className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0E223D]">
+                        <Camera className="h-3.5 w-3.5 text-[#9A7538]" />
+                        多图识读打码
+                      </div>
+                      <p className="text-[11px] leading-[1.6] text-slate-500">
+                        支持相册多选与 Ctrl+V 贴图，发送前可本地涂抹遮盖敏感证件区域。
+                      </p>
+                    </div>
+                  </div>
+                </div>
               </div>
             ) : (
               <>
@@ -968,18 +1262,18 @@ export const AiHubTab: React.FC = () => {
                   const visibleAns = renderVisibleText(turn.assistantRaw);
                   const reasoningOpen = Boolean(expandedReasoningIds[turn.id]);
                   return (
-                    <div key={turn.id} className="space-y-2.5 pb-4 border-b border-white/10 last:border-0 last:pb-0">
-                      {/* User Turn Bubble */}
-                      <div className="rounded-lg bg-white/8 border border-white/10 px-3 py-2 text-xs">
-                        <div className="flex items-center justify-between gap-2 text-[10px] text-[#D1B27A] font-semibold">
+                    <div key={turn.id} className="space-y-3">
+                      {/* User Turn Folio Note */}
+                      <div className="rounded-xl border border-[#E6DFCE] bg-[#F2EEE4]/85 px-3.5 py-2.5 text-xs">
+                        <div className="flex items-center justify-between gap-2 text-[10.5px] font-semibold text-[#8A6529]">
                           <span>第 {turn.roundNo} 轮提问 / 修改指令</span>
                           {turn.userImages.length > 0 && (
-                            <span className="inline-flex items-center gap-1 text-emerald-300">
+                            <span className="inline-flex items-center gap-1 rounded-full bg-white/80 px-2 py-0.5 text-emerald-800 border border-emerald-200/70">
                               <Camera className="h-3 w-3" /> 附 {turn.userImages.length} 张截图
                             </span>
                           )}
                         </div>
-                        <p className="mt-1 text-slate-200 leading-5 whitespace-pre-wrap line-clamp-4">
+                        <p className="mt-1 text-[#2A3241] leading-5 whitespace-pre-wrap line-clamp-4">
                           {turn.userDisplayText}
                         </p>
                         {turn.userImages.length > 0 && (
@@ -989,19 +1283,25 @@ export const AiHubTab: React.FC = () => {
                                 key={img.id}
                                 src={img.dataUrl}
                                 alt={img.name}
-                                className="h-14 w-14 rounded object-cover border border-white/20"
+                                className="h-14 w-14 rounded-lg object-cover border border-[#D8D0BE] shadow-xs"
                               />
                             ))}
                           </div>
                         )}
                       </div>
 
-                      {/* Assistant Turn Output */}
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap items-center justify-between gap-1.5 text-[11px]">
-                          <span className="font-semibold text-[#D1B27A]">
-                            ✦ 第 {turn.roundNo} 轮研判结果 · <span className="text-slate-400 font-normal">{turn.usedModel}</span>
-                          </span>
+                      {/* Assistant Turn Archival Paper Sheet */}
+                      <div className="rounded-xl border border-[#E5DEC9] bg-white p-4 sm:p-5 shadow-[0_8px_24px_-16px_rgba(14,34,61,0.16)] space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#EFEAE0]">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="h-2 w-2 rounded-full bg-[#B89254] flex-none" />
+                            <span className="font-display text-xs sm:text-[13px] font-bold text-[#0E223D]">
+                              第 {turn.roundNo} 轮研判成稿
+                            </span>
+                            <span className="rounded-md bg-[#F6F3EB] border border-[#EAE2D0] px-2 py-0.5 text-[10px] font-medium text-slate-600 truncate max-w-[180px]">
+                              {turn.usedModel}
+                            </span>
+                          </div>
                           <div className="flex items-center gap-1.5">
                             <button
                               type="button"
@@ -1018,21 +1318,21 @@ export const AiHubTab: React.FC = () => {
                                 );
                                 showToast(`已导出 Word：${fname}`);
                               }}
-                              className="inline-flex items-center gap-1 rounded bg-white/10 hover:bg-white/20 px-2 py-0.5 text-[10px] font-medium text-emerald-200"
+                              className="inline-flex items-center gap-1 rounded-md border border-[#E2DAC7] bg-[#FAF8F3] hover:border-[#0E223D] px-2 py-1 text-[10.5px] font-semibold text-[#0E223D] transition-colors"
                             >
-                              <Download className="h-2.5 w-2.5" /> Word
+                              <Download className="h-2.5 w-2.5 text-[#8A6529]" /> Word
                             </button>
                             <button
                               type="button"
                               onClick={() => copyTurnText(`${turn.id}-wx`, turn.assistantRaw, true)}
-                              className="rounded bg-white/10 hover:bg-white/20 px-2 py-0.5 text-[10px] font-medium text-slate-200"
+                              className="rounded-md border border-[#E2DAC7] bg-[#FAF8F3] hover:border-[#0E223D] px-2 py-1 text-[10.5px] font-medium text-slate-700 transition-colors"
                             >
                               {copiedId === `${turn.id}-wx` ? '已复制' : '微信版'}
                             </button>
                             <button
                               type="button"
                               onClick={() => copyTurnText(turn.id, turn.assistantRaw, false)}
-                              className="inline-flex items-center gap-1 rounded bg-[#B89254]/25 hover:bg-[#B89254]/40 px-2 py-0.5 text-[10px] font-semibold text-[#D1B27A]"
+                              className="inline-flex items-center gap-1 rounded-md border border-[#D4B47C]/70 bg-[#FBF6EA] hover:bg-[#F3E8D1] px-2 py-1 text-[10.5px] font-semibold text-[#7A5922] transition-colors"
                             >
                               {copiedId === turn.id ? <Check className="h-2.5 w-2.5" /> : <Copy className="h-2.5 w-2.5" />}
                               {copiedId === turn.id ? '已复制' : '复制本轮'}
@@ -1041,7 +1341,7 @@ export const AiHubTab: React.FC = () => {
                         </div>
 
                         {turn.reasoning && (
-                          <div className="rounded border border-white/15 bg-[#0E223D]/70">
+                          <div className="rounded-lg border border-[#EAE2D0] bg-[#FAF8F3]">
                             <button
                               type="button"
                               onClick={() =>
@@ -1050,35 +1350,39 @@ export const AiHubTab: React.FC = () => {
                                   [turn.id]: !prev[turn.id],
                                 }))
                               }
-                              className="flex w-full items-center justify-between px-3 py-1.5 text-[11px] text-[#D1B27A]"
+                              className="flex w-full items-center justify-between px-3 py-2 text-[11px] font-semibold text-[#7D5E29]"
                             >
-                              <span>💭 深度思考推导链（{turn.reasoning.length} 字）</span>
+                              <span>深度思考推导链（{turn.reasoning.length} 字）</span>
                               {reasoningOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                             </button>
                             {reasoningOpen && (
-                              <div className="border-t border-white/10 px-3 py-2 max-h-40 overflow-y-auto text-[11px] leading-5 whitespace-pre-wrap text-slate-400">
+                              <div className="legal-scroll border-t border-[#EAE2D0] px-3 py-2.5 max-h-44 overflow-y-auto text-[11px] leading-5 whitespace-pre-wrap text-slate-500">
                                 {turn.reasoning}
                               </div>
                             )}
                           </div>
                         )}
 
-                        <div className="text-xs sm:text-sm leading-7 whitespace-pre-wrap text-slate-100">
-                          {visibleAns}
-                        </div>
+                        {formattedView ? (
+                          <LegalMarkdownView content={visibleAns} />
+                        ) : (
+                          <div className="text-xs sm:text-[13.5px] leading-[1.8] whitespace-pre-wrap text-[#1B2230] font-mono">
+                            {visibleAns}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );
                 })}
 
-                {/* Active Streaming Bubble */}
+                {/* Active Streaming Sheet */}
                 {streaming && (
-                  <div className="space-y-2.5 pt-2 border-t border-[#D1B27A]/30">
-                    <div className="rounded-lg bg-white/8 border border-white/10 px-3 py-2 text-xs">
-                      <div className="text-[10px] text-[#D1B27A] font-semibold">
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-[#E6DFCE] bg-[#F2EEE4]/85 px-3.5 py-2.5 text-xs">
+                      <div className="text-[10.5px] font-semibold text-[#8A6529]">
                         第 {uiTurns.length + 1} 轮提问（生成中…）
                       </div>
-                      <p className="mt-1 text-slate-200 leading-5 whitespace-pre-wrap line-clamp-3">
+                      <p className="mt-1 text-[#2A3241] leading-5 whitespace-pre-wrap line-clamp-3">
                         {streamingUserText}
                       </p>
                       {streamingUserImages.length > 0 && (
@@ -1088,31 +1392,47 @@ export const AiHubTab: React.FC = () => {
                               key={img.id}
                               src={img.dataUrl}
                               alt={img.name}
-                              className="h-12 w-12 rounded object-cover border border-white/20"
+                              className="h-12 w-12 rounded-lg object-cover border border-[#D8D0BE]"
                             />
                           ))}
                         </div>
                       )}
                     </div>
 
-                    {streamingReasoning && (
-                      <div className="rounded border border-white/15 bg-[#0E223D]/70 px-3 py-2 text-[11px] leading-5 text-slate-400 max-h-32 overflow-y-auto whitespace-pre-wrap">
-                        💭 思考中：{streamingReasoning}
+                    <div className="rounded-xl border border-[#D8C7A4] bg-white p-4 sm:p-5 shadow-[0_8px_24px_-16px_rgba(14,34,61,0.18)] space-y-3">
+                      <div className="flex items-center gap-2 pb-2 border-b border-[#EFEAE0] text-xs font-semibold text-[#0E223D]">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-[#B89254]" />
+                        <span>正在实时起草第 {uiTurns.length + 1} 轮研判成稿…</span>
                       </div>
-                    )}
 
-                    <div className="text-xs sm:text-sm leading-7 whitespace-pre-wrap text-slate-100">
-                      {renderVisibleText(streamingOutput) || '正在实时连接大模型输出，请稍候…'}
+                      {streamingReasoning && (
+                        <div className="legal-scroll rounded-lg border border-[#EAE2D0] bg-[#FAF8F3] px-3 py-2 text-[11px] leading-5 text-slate-500 max-h-32 overflow-y-auto whitespace-pre-wrap">
+                          深度思考中：{streamingReasoning}
+                        </div>
+                      )}
+
+                      {streamingOutput ? (
+                        formattedView ? (
+                          <LegalMarkdownView content={renderVisibleText(streamingOutput)} />
+                        ) : (
+                          <div className="text-xs sm:text-[13.5px] leading-[1.8] whitespace-pre-wrap text-[#1B2230]">
+                            {renderVisibleText(streamingOutput)}
+                          </div>
+                        )
+                      ) : (
+                        <div className="text-xs text-slate-500 leading-6">
+                          正在实时连接大模型接口并按专席实务纪律起草，请稍候…
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
               </>
             )}
-            <div ref={threadEndRef} />
           </div>
 
-          {/* Multi-Turn Follow-Up Refinement Dock (with Screenshot Attach & Quick Refinement Chips) */}
-          <div className="mt-3 pt-3 border-t border-white/15 space-y-2.5">
+          {/* Grounded Follow-Up Refinement Dock */}
+          <div className="bg-[#F4F1E8] border-t border-[#E5DEC9] px-4 sm:px-5 py-3 space-y-2.5">
             {chatHistory.length > 0 && !streaming && (
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-1.5">
@@ -1122,7 +1442,7 @@ export const AiHubTab: React.FC = () => {
                         key={chip}
                         type="button"
                         onClick={() => runGeneration(true, chip)}
-                        className="rounded-full border border-white/15 bg-white/8 hover:bg-white/15 px-2.5 py-0.5 text-[11px] text-slate-200 transition-colors"
+                        className="rounded-full border border-[#DDD4C0] bg-white hover:border-[#B89254] hover:text-[#0E223D] px-2.5 py-1 text-[11px] font-medium text-slate-600 shadow-[0_1px_2px_rgba(14,34,61,0.03)] transition-all"
                       >
                         + {chip}
                       </button>
@@ -1132,7 +1452,7 @@ export const AiHubTab: React.FC = () => {
                     <button
                       type="button"
                       onClick={undoLastRound}
-                      className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-[#D1B27A]"
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 hover:text-[#0E223D]"
                     >
                       <Undo2 className="h-3 w-3" /> 撤回上一轮
                     </button>
@@ -1140,14 +1460,14 @@ export const AiHubTab: React.FC = () => {
                 </div>
 
                 {followUpImages.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5 rounded bg-white/8 p-2 border border-white/15">
+                  <div className="flex flex-wrap items-center gap-1.5 rounded-xl bg-white p-2 border border-[#E2DAC7]">
                     {followUpImages.map((img) => (
                       <div key={img.id} className="relative">
                         <img
                           src={img.dataUrl}
                           alt={img.name}
                           onClick={() => setRedactingImageTarget({ bucket: 'followup', image: img })}
-                          className="h-12 w-12 rounded object-cover border border-white/25 cursor-pointer"
+                          className="h-12 w-12 rounded-lg object-cover border border-[#D8D0BE] cursor-pointer"
                           title="点击进入本地涂抹打码"
                         />
                         <button
@@ -1161,7 +1481,7 @@ export const AiHubTab: React.FC = () => {
                         </button>
                       </div>
                     ))}
-                    <span className="text-[10px] text-amber-200">
+                    <span className="text-[10.5px] text-[#7A5922] font-medium">
                       {resolvedVisionModel
                         ? `将使用 ${resolvedVisionModel} 识别补充截图`
                         : '当前服务商未配置识图模型，请先在「我的配置」切换'}
@@ -1169,7 +1489,7 @@ export const AiHubTab: React.FC = () => {
                   </div>
                 )}
 
-                <div className="flex gap-1.5">
+                <div className="flex items-center gap-1.5 rounded-xl border border-[#D8CFBC] bg-white p-1.5 shadow-xs focus-within:border-[#0E223D] focus-within:ring-2 focus-within:ring-[#B89254]/15">
                   <input
                     ref={followUpImageRef}
                     type="file"
@@ -1185,7 +1505,7 @@ export const AiHubTab: React.FC = () => {
                     type="button"
                     disabled={compressingImages || followUpImages.length >= MAX_IMAGES_PER_TURN}
                     onClick={() => followUpImageRef.current?.click()}
-                    className="flex-none inline-flex items-center justify-center rounded border border-white/20 bg-white/10 hover:bg-white/20 px-2.5 py-2 text-xs text-[#D1B27A] disabled:opacity-40"
+                    className="flex-none inline-flex items-center justify-center rounded-lg bg-[#F6F2E8] hover:bg-[#ECE4D2] p-2 text-[#85642B] transition-colors disabled:opacity-40"
                     title="追问时补充上传截图"
                   >
                     <ImagePlus className="h-4 w-4" />
@@ -1197,31 +1517,31 @@ export const AiHubTab: React.FC = () => {
                     onPaste={(e) => handlePasteImages(e, 'followup')}
                     onKeyDown={(e) => e.key === 'Enter' && runGeneration(true)}
                     placeholder="继续追问修改（支持粘贴/附补充截图，如：把违约金改成日万分之五）…"
-                    className="flex-1 min-w-0 rounded border border-white/20 bg-[#091628] px-3 py-2 text-xs text-white placeholder:text-slate-400 focus:border-[#D1B27A] focus:outline-none"
+                    className="flex-1 min-w-0 bg-transparent px-2 py-1.5 text-xs text-[#11151C] placeholder:text-slate-400 focus:outline-none"
                   />
                   <button
                     type="button"
                     onClick={() => runGeneration(true)}
-                    className="flex-none inline-flex items-center gap-1 rounded bg-[#B89254] hover:bg-[#C9A465] px-3.5 py-2 text-xs font-bold text-[#11151C]"
+                    className="flex-none inline-flex items-center gap-1 rounded-lg bg-[#0E223D] hover:bg-[#17345D] px-3.5 py-2 text-xs font-bold text-[#F6F4EF] transition-colors"
                   >
-                    <Send className="h-3.5 w-3.5" /> 追问
+                    <Send className="h-3.5 w-3.5 text-[#E0C38A]" /> 追问
                   </button>
                 </div>
               </div>
             )}
 
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
               <span>
                 {willUseVision && resolvedVisionModel
-                  ? `👁️ 视觉模式就绪：${resolvedVisionModel}（请复核识图文字与法源）`
+                  ? `视觉模式就绪：${resolvedVisionModel}（请复核识图文字与法源）`
                   : '提示：AI 辅助初稿请由主办律师复核事实与法源后使用'}
               </span>
               <button
                 type="button"
                 onClick={() => openLawsSearch('', 'statutes')}
-                className="inline-flex items-center gap-1 text-[#D1B27A] hover:underline font-medium"
+                className="inline-flex items-center gap-1 text-[#8C6526] hover:text-[#0E223D] font-semibold transition-colors"
               >
-                <BookOpen className="h-3 w-3" /> 去离线法典核对原文
+                <BookOpen className="h-3.5 w-3.5" /> 去离线法典核对原文 →
               </button>
             </div>
           </div>
