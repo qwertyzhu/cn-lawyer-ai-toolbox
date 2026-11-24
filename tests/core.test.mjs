@@ -18,9 +18,11 @@ import {
 import { buildIcsContent } from '../src/lib/icsGenerator.ts';
 import { AI_SPECIALISTS_REGISTRY } from '../src/data/toolRegistry.ts';
 import {
-  COMPANION_DOCS_CATALOG,
-  buildCompanionDocxBytes,
+  COMPANION_PLACEHOLDER_SPECS,
   extractCompanionContextFromSpcDraft,
+  fillCustomDocxTemplateBytes,
+  inspectUploadedDocxTemplate,
+  replacePlaceholdersInWordXml,
 } from '../src/lib/companionDocsBuilder.ts';
 import {
   ELEMENTS_COMPLAINT_TEMPLATES,
@@ -733,7 +735,7 @@ test('AI Hub 6 specialists cover full practice domains (civil/commercial/IP/crim
   assert.ok(deAi.systemPrompt.includes('可能影响法律含义的修改清单'));
 });
 
-test('5-doc filing companion bundle reuses SPC draft parties + lawyer profile and builds valid OOXML .docx', async () => {
+test('Local custom .docx template engine handles Word-split XML runs, detects privacy residuals, and fills user-uploaded templates cleanly', async () => {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const corpus = JSON.parse(
     fs.readFileSync(path.resolve(__dirname, '../public/data/spc-2025-templates.json'), 'utf8')
@@ -756,24 +758,52 @@ test('5-doc filing companion bundle reuses SPC draft parties + lawyer profile an
   assert.equal(ctx.clientName, '示例甲方科技公司');
   assert.equal(ctx.opponentName, '示例乙方贸易公司');
   assert.equal(ctx.lawyerName, '示例律师');
-  assert.equal(COMPANION_DOCS_CATALOG.length, 5);
+  assert.ok(COMPANION_PLACEHOLDER_SPECS.length >= 18);
 
-  for (const item of COMPANION_DOCS_CATALOG) {
-    const out = buildCompanionDocxBytes(item.kind, {
-      ...ctx,
-      courtName: '杭州市西湖区人民法院',
-      preservationAmount: '人民币 500,000 元',
-      targetEvidenceOrg: '中国工商银行杭州分行',
-    });
-    assert.ok(out.bytes.length > 1500, `${item.kind} docx should be non-empty`);
-    const extracted = await extractLocalDocumentText({
-      name: out.fileName,
-      arrayBuffer: async () => out.bytes.buffer.slice(out.bytes.byteOffset, out.bytes.byteOffset + out.bytes.byteLength),
-      text: async () => '',
-    });
-    assert.ok(extracted.includes('示例甲方科技公司'), `${item.kind} missing client name`);
-    assert.ok(extracted.includes('示例律师'), `${item.kind} missing lawyer name`);
-  }
+  const splitXml =
+    `<w:p><w:r><w:t>委托人：</w:t></w:r><w:r><w:t>{{</w:t></w:r><w:r><w:t>委托</w:t></w:r><w:r><w:t>人}}</w:t></w:r><w:r><w:t>诉{{对方当事人}}</w:t></w:r></w:p>`;
+  const patched = replacePlaceholdersInWordXml(splitXml, {
+    委托人: '示例甲方科技公司',
+    对方当事人: '示例乙方贸易公司',
+  });
+  assert.equal(patched.replacedCount, 2);
+  assert.ok(patched.xml.includes('示例甲方科技公司'));
+  assert.ok(patched.xml.includes('示例乙方贸易公司'));
+  assert.ok(!patched.xml.includes('{{'));
+
+  const blankTemplateBytes = buildMarkdownReportDocxBytes({
+    title: '自定义空白授权模板',
+    markdownBody:
+      '委托人：{{委托人}}\n对方当事人：{{对方当事人}}\n受案法院：{{受案法院}}\n受托律师：{{受托律师}}（证号：{{执业证号}}）\n律所：{{律所名称}}\n授权范围：{{授权范围}}',
+  });
+  const cleanInspect = await inspectUploadedDocxTemplate(blankTemplateBytes);
+  assert.equal(cleanInspect.totalPrivacyHits, 0, 'Clean blank placeholder template should have 0 privacy hits');
+  assert.ok(cleanInspect.matchedPlaceholders.includes('{{委托人}}'));
+  assert.ok(cleanInspect.matchedPlaceholders.includes('{{受托律师}}'));
+
+  const filled = await fillCustomDocxTemplateBytes(blankTemplateBytes, {
+    ...ctx,
+    courtName: '杭州市西湖区人民法院',
+  });
+  assert.ok(filled.replacedCount >= 7);
+  const extracted = await extractLocalDocumentText({
+    name: '套打结果.docx',
+    arrayBuffer: async () =>
+      filled.bytes.buffer.slice(filled.bytes.byteOffset, filled.bytes.byteOffset + filled.bytes.byteLength),
+    text: async () => '',
+  });
+  assert.ok(extracted.includes('示例甲方科技公司'));
+  assert.ok(extracted.includes('示例乙方贸易公司'));
+  assert.ok(extracted.includes('杭州市西湖区人民法院'));
+  assert.ok(extracted.includes('13301202010000001'));
+  assert.ok(!extracted.includes('{{委托人}}'));
+
+  const leakyTemplateBytes = buildMarkdownReportDocxBytes({
+    title: '未清空旧案信息的误传模板',
+    markdownBody: '委托人：杭州某演示文化有限公司，联系电话：13958001234，案号（2025）浙0106民初999号。',
+  });
+  const leakyInspect = await inspectUploadedDocxTemplate(leakyTemplateBytes);
+  assert.ok(leakyInspect.totalPrivacyHits >= 2, 'Residual privacy detector must flag leftover company/phone/caseNo');
 });
 
 test('SPC multi-turn AI patch engine supports row updates, row exclusion/restoration, custom extra rows, and OOXML .docx roundtrip', async () => {

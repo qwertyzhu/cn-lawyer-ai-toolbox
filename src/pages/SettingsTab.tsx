@@ -863,7 +863,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           </span>
         </div>
         <p className="text-xs leading-5 text-slate-600">
-          填写后仅保存在您个人本机（团队激活码模式下支持加密跨端同步），自动联动至：<strong>「要素式起诉状/答辩状」委托诉讼代理人一键带入</strong>、<strong>5 份立案配套文书（授权委托书/送达地址确认书/调查令等）</strong>、<strong>律师费报价单落款</strong>及 <strong>AI 导出 Word 副标题</strong>。
+          填写后仅保存在您个人本机（团队激活码模式下支持加密跨端同步），自动联动至：<strong>「要素式起诉状/答辩状」委托诉讼代理人一键带入</strong>、<strong>您本地自传的 Word 配套模板套打</strong>、<strong>律师费报价单落款</strong>及 <strong>AI 导出 Word 副标题</strong>。
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
           <div>
@@ -912,7 +912,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               type="text"
               value={profileDraft.address}
               onChange={(e) => setProfileDraft((p) => ({ ...p, address: e.target.value }))}
-              placeholder="用于《送达地址确认书》自动填入"
+              placeholder="用于自传模板 {{律所地址}} 自动填入"
               className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 focus:border-[#0E223D] focus:bg-white focus:outline-none"
             />
           </div>

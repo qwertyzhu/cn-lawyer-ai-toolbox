@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   BookmarkPlus,
   CheckCircle2,
   ChevronDown,
@@ -36,10 +37,14 @@ import { useToolbox } from '../../context/ToolboxContext';
 import { resolveVisionModel, streamAiCompletion } from '../../lib/aiClient';
 import { copyToClipboard } from '../../lib/clipboard';
 import {
-  COMPANION_DOCS_CATALOG,
-  downloadCompanionDocx,
+  addLocalCustomDocxTemplateFromFile,
+  clearAllLocalCustomDocxTemplates,
+  COMPANION_PLACEHOLDER_SPECS,
+  deleteLocalCustomDocxTemplate,
+  downloadFilledCustomDocx,
   extractCompanionContextFromSpcDraft,
-  type CompanionDocKind,
+  loadLocalCustomDocxTemplates,
+  type LocalCustomDocxTemplate,
 } from '../../lib/companionDocsBuilder';
 import { decryptWithPassphrase } from '../../lib/cryptoVault';
 import { downloadOfficialSpcDocx } from '../../lib/docxBuilder';
@@ -650,12 +655,18 @@ export const ElementsComplaintTool: React.FC = () => {
   const [showNoticeBox, setShowNoticeBox] = useState(false);
   const [openQuickFillRowId, setOpenQuickFillRowId] = useState<string | null>(null);
 
-  // Companion 5-doc filing bundle state
+  // Strictly browser-local lawyer-uploaded companion .docx templates (zero hardcoded templates, zero server upload)
   const [showCompanionPanel, setShowCompanionPanel] = useState(false);
+  const [customTemplates, setCustomTemplates] = useState<LocalCustomDocxTemplate[]>(() =>
+    loadLocalCustomDocxTemplates()
+  );
+  const [uploadingTpl, setUploadingTpl] = useState(false);
+  const [showPlaceholderGuide, setShowPlaceholderGuide] = useState(false);
   const [companionCourt, setCompanionCourt] = useState('');
   const [companionAuthScope, setCompanionAuthScope] = useState<'special' | 'general'>('special');
   const [companionPreserveAmt, setCompanionPreserveAmt] = useState('');
   const [companionInvestigateOrg, setCompanionInvestigateOrg] = useState('');
+  const customTplInputRef = useRef<HTMLInputElement>(null);
 
   // AI Convert & Multi-Turn Table Copilot state
   const [sourceText, setSourceText] = useState('');
@@ -1358,17 +1369,73 @@ ${JSON.stringify(editableRowSpecs)}`;
     );
   };
 
-  const handleDownloadCompanionDoc = (kind: CompanionDocKind) => {
+  const handleUploadCustomTemplates = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploadingTpl(true);
+    let addedCount = 0;
+    let warnedCount = 0;
+    let lastError = '';
+    try {
+      for (const file of Array.from(files)) {
+        try {
+          const { template, list } = await addLocalCustomDocxTemplateFromFile(file);
+          setCustomTemplates(list);
+          addedCount += 1;
+          if (template.totalPrivacyHits > 0) warnedCount += 1;
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : `导入 ${file.name} 失败`;
+        }
+      }
+      if (addedCount > 0) {
+        showToast(
+          warnedCount > 0
+            ? `已本地导入 ${addedCount} 份模板（其中 ${warnedCount} 份检测到疑似旧案/客户信息残留，请留意卡片红字提醒）`
+            : `已将 ${addedCount} 份专属 Word 模板保存至当前浏览器本地（未上传服务器）`
+        );
+      } else if (lastError) {
+        showToast(lastError);
+      }
+    } finally {
+      setUploadingTpl(false);
+      if (customTplInputRef.current) customTplInputRef.current.value = '';
+    }
+  };
+
+  const handleFillAndDownloadCustomTemplate = async (tplItem: LocalCustomDocxTemplate) => {
     if (!tpl || !draft) return;
-    const baseCtx = extractCompanionContextFromSpcDraft(tpl, draft, lawyerProfile);
-    const fname = downloadCompanionDocx(kind, {
-      ...baseCtx,
-      courtName: companionCourt.trim() || baseCtx.courtName,
-      authScope: companionAuthScope,
-      preservationAmount: companionPreserveAmt.trim(),
-      targetEvidenceOrg: companionInvestigateOrg.trim(),
-    });
-    showToast(`已复用当前主体与执业档案生成配套 Word：${fname}`);
+    try {
+      const baseCtx = extractCompanionContextFromSpcDraft(tpl, draft, lawyerProfile);
+      const { fileName, replacedCount } = await downloadFilledCustomDocx(tplItem, {
+        ...baseCtx,
+        courtName: companionCourt.trim() || baseCtx.courtName,
+        authScope: companionAuthScope,
+        preservationAmount: companionPreserveAmt.trim(),
+        targetEvidenceOrg: companionInvestigateOrg.trim(),
+      });
+      showToast(
+        replacedCount > 0
+          ? `已按本案主体原样套打生成 Word：${fileName}（自动填充 ${replacedCount} 处占位符）`
+          : `已导出 ${fileName}（未命中 {{占位符}}，可在 Word 模板中插入下方标签后重新导入）`
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '套打导出失败，请检查模板是否为标准 .docx');
+    }
+  };
+
+  const handleDeleteCustomTemplate = (id: string) => {
+    setCustomTemplates(deleteLocalCustomDocxTemplate(id));
+    showToast('已从本机浏览器移除该模板');
+  };
+
+  const handleClearAllCustomTemplates = () => {
+    clearAllLocalCustomDocxTemplates();
+    setCustomTemplates([]);
+    showToast('已清空本机保存的全部自定义 Word 模板');
+  };
+
+  const handleCopyPlaceholderToken = async (token: string) => {
+    const ok = await copyToClipboard(token);
+    if (ok) showToast(`已复制占位符 ${token}，可直接粘贴到您的 Word 模板中`);
   };
 
   const handleResetDraft = () => {
@@ -2949,7 +3016,9 @@ ${JSON.stringify(editableRowSpecs)}`;
                 className="inline-flex items-center gap-1.5 rounded-lg border border-[#C9A463] bg-[#FAF6EC] hover:bg-[#F3ECE0] px-3.5 py-2.5 text-xs font-bold text-[#7A5922]"
               >
                 <FolderOutput className="h-4 w-4" />
-                {showCompanionPanel ? '收起立案配套 5 件套' : '联出立案配套文书（5 份 Word）'}
+                {showCompanionPanel
+                  ? '收起个人自传模板套打'
+                  : `个人自传配套模板套打${customTemplates.length > 0 ? `（本机 ${customTemplates.length} 份）` : ''}`}
               </button>
               <button
                 type="button"
@@ -2961,45 +3030,132 @@ ${JSON.stringify(editableRowSpecs)}`;
             </div>
           </section>
 
-          {/* 5-Doc Court Filing Companion Bundle Generator */}
+          {/* Strictly Local-Only Lawyer-Uploaded Custom Word (.docx) Template Fill Workbench */}
           {showCompanionPanel && (
-            <section className="rounded-xl border border-[#D9C7A3] bg-gradient-to-br from-[#FDFBF6] via-white to-[#F7F2E6] p-4 sm:p-5 space-y-3.5 shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EAE2D0] pb-2.5">
-                <div>
-                  <div className="flex items-center gap-2">
+            <section className="rounded-xl border border-[#D9C7A3] bg-gradient-to-br from-[#FDFBF6] via-white to-[#F7F2E6] p-4 sm:p-5 space-y-4 shadow-sm">
+              <input
+                ref={customTplInputRef}
+                type="file"
+                accept=".docx"
+                multiple
+                className="hidden"
+                onChange={(e) => handleUploadCustomTemplates(e.target.files)}
+              />
+
+              <div className="flex flex-wrap items-start justify-between gap-2.5 border-b border-[#EAE2D0] pb-3">
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
                     <FolderOutput className="h-4 w-4 text-[#9A7538]" />
                     <h3 className="font-display text-sm sm:text-base font-bold text-[#0E223D]">
-                      立案前序配套文书一键联出（填一次主体，出全套 Word）
+                      我的自传配套 Word 模板套打（零内置固定模板）
                     </h3>
+                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-900">
+                      <Lock className="h-2.5 w-2.5" /> 仅存当前浏览器本地 · 永不上传服务器 · 不参与云同步
+                    </span>
                   </div>
-                  <p className="mt-0.5 text-[11.5px] text-slate-600">
-                    自动复用上方已填的当事人、案由/案号及「我的配置 → 个人执业档案」（{lawyerProfile.name ? `已绑定：${lawyerProfile.name}` : '未填执业档案时保留下划线空位'}），纯本地生成 `.docx`。
+                  <p className="text-[11.5px] leading-5 text-slate-600">
+                    各律所与受案法院的《授权委托书》《送达地址确认书》《财产保全申请书》等版式各异，本模块<strong>不预置任何固定文书模板</strong>。
+                    请上传您自己清空了旧案信息的空白 .docx 模板，系统将在本机原样保留您的表格、红头与字体，自动把上方已填当事人与执业档案（
+                    {lawyerProfile.name ? `已绑定：${lawyerProfile.name}` : '未填执业档案时保留空下划线'}
+                    ）套填入对应占位符。
                   </p>
                 </div>
-                {!lawyerProfile.name && (
+
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => navigateTab('settings')}
-                    className="rounded-lg border border-[#B89254] bg-white px-2.5 py-1 text-[11px] font-bold text-[#7A5922] hover:bg-[#FBF7EE]"
+                    disabled={uploadingTpl}
+                    onClick={() => customTplInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-3 py-1.5 text-xs font-bold text-[#F6F4EF] disabled:opacity-60"
                   >
-                    去完善执业档案 →
+                    {uploadingTpl ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-[#D1B27A]" />
+                    ) : (
+                      <FileUp className="h-3.5 w-3.5 text-[#D1B27A]" />
+                    )}
+                    本地导入 .docx 空白模板
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => setShowPlaceholderGuide((v) => !v)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2.5 py-1.5 text-[11px] font-bold text-[#0E223D]"
+                  >
+                    <Copy className="h-3 w-3 text-[#9A7538]" />
+                    {showPlaceholderGuide ? '收起占位符清单' : '复制 {{占位符}} 标签'}
+                  </button>
+                  {!lawyerProfile.name && (
+                    <button
+                      type="button"
+                      onClick={() => navigateTab('settings')}
+                      className="rounded-lg border border-[#B89254] bg-white px-2.5 py-1.5 text-[11px] font-bold text-[#7A5922] hover:bg-[#FBF7EE]"
+                    >
+                      去完善执业档案 →
+                    </button>
+                  )}
+                </div>
               </div>
 
+              {/* Clickable Placeholder Reference Guide */}
+              {(showPlaceholderGuide || customTemplates.length === 0) && (
+                <div className="rounded-xl border border-[#E5DEC9] bg-white/90 p-3.5 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-[#0E223D]">
+                      支持自动套打的占位符标签（点击即可复制，粘贴到您自己的 Word .docx 空白模板中）：
+                    </div>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const allText = COMPANION_PLACEHOLDER_SPECS.map(
+                          (p) => `${p.token}  // ${p.label}`
+                        ).join('\n');
+                        const ok = await copyToClipboard(allText);
+                        if (ok) showToast('已复制全部占位符清单');
+                      }}
+                      className="inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2 py-0.5 text-[10.5px] font-semibold text-[#0E223D] hover:border-[#0E223D]"
+                    >
+                      <Copy className="h-3 w-3 text-[#9A7538]" /> 复制全部清单
+                    </button>
+                  </div>
+                  {(['案件与当事主体', '律师与律所档案', '常用可变项'] as const).map((group) => (
+                    <div key={group} className="space-y-1">
+                      <div className="text-[10.5px] font-bold text-slate-500">{group}</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {COMPANION_PLACEHOLDER_SPECS.filter((p) => p.group === group).map((p) => (
+                          <button
+                            key={p.token}
+                            type="button"
+                            onClick={() => handleCopyPlaceholderToken(p.token)}
+                            title={`${p.label}${p.aliases?.length ? `（兼容别名：${p.aliases.join(' / ')}）` : ''} — 点击复制`}
+                            className="inline-flex items-center gap-1 rounded-md border border-[#E2DAC7] bg-[#FAF7F0] hover:border-[#0E223D] hover:bg-white px-2 py-1 text-[11px] transition-colors"
+                          >
+                            <code className="font-mono font-bold text-[#0E223D]">{p.token}</code>
+                            <span className="text-[10px] text-slate-500">{p.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Optional Per-Case Context Variables */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
                 <div>
-                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">受案法院（选填）</label>
+                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">
+                    受案法院（对应 {'{{受案法院}}'}）
+                  </label>
                   <input
                     type="text"
                     value={companionCourt}
                     onChange={(e) => setCompanionCourt(e.target.value)}
-                    placeholder="例：杭州市西湖区人民法院"
+                    placeholder="选填，如：杭州市西湖区人民法院"
                     className="w-full rounded-lg border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs"
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">委托授权范围</label>
+                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">
+                    委托授权范围（对应 {'{{授权范围}}'}）
+                  </label>
                   <div className="grid grid-cols-2 gap-1 rounded-lg bg-[#EFEAE0] p-0.5">
                     <button
                       type="button"
@@ -3026,52 +3182,145 @@ ${JSON.stringify(editableRowSpecs)}`;
                   </div>
                 </div>
                 <div>
-                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">保全标的额（选填）</label>
+                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">
+                    保全标的额（对应 {'{{保全标的额}}'}）
+                  </label>
                   <input
                     type="text"
                     value={companionPreserveAmt}
                     onChange={(e) => setCompanionPreserveAmt(e.target.value)}
-                    placeholder="例：人民币 500,000 元"
+                    placeholder="选填，如：人民币 500,000 元"
                     className="w-full rounded-lg border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs"
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">协助调查单位（选填）</label>
+                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">
+                    协助调查单位（对应 {'{{协助调查单位}}'}）
+                  </label>
                   <input
                     type="text"
                     value={companionInvestigateOrg}
                     onChange={(e) => setCompanionInvestigateOrg(e.target.value)}
-                    placeholder="例：某银行 / 市场监管局"
+                    placeholder="选填，如：某银行 / 市场监管局"
                     className="w-full rounded-lg border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs"
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
-                {COMPANION_DOCS_CATALOG.map((item) => (
-                  <button
-                    key={item.kind}
-                    type="button"
-                    onClick={() => handleDownloadCompanionDoc(item.kind)}
-                    className="group rounded-xl border border-[#E2DAC7] bg-white hover:border-[#0E223D] hover:shadow-sm p-3 text-left transition-all flex flex-col justify-between gap-2"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="font-display text-xs font-bold text-[#0E223D]">
-                          《{item.title}》
-                        </span>
-                        <span className="rounded bg-[#F5F0E4] px-1.5 py-0.5 text-[9.5px] font-bold text-[#7A5922]">
-                          {item.badge}
-                        </span>
+              {/* Uploaded Local Templates Grid or Clean Empty State */}
+              {customTemplates.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-[#CBB994] bg-white/80 p-5 text-center space-y-2.5">
+                  <div className="font-display text-sm font-bold text-[#0E223D]">
+                    当前浏览器尚未导入您的个人配套 Word 模板
+                  </div>
+                  <p className="mx-auto max-w-2xl text-[11.5px] leading-5 text-slate-600">
+                    ① 在您自己常用的空白 Word（.docx）模板中，将变动处改为上方 <code>{'{{委托人}}'}</code>、<code>{'{{对方当事人}}'}</code>、<code>{'{{受托律师}}'}</code> 等占位符（并确保已删净旧案当事人信息）；
+                    ② 点击「本地导入 .docx 空白模板」存入当前浏览器；
+                    ③ 以后办理每起案件，点一下即可原样保留您的 Word 格式一键套打导出，全程不离开本机。
+                  </p>
+                  <div>
+                    <button
+                      type="button"
+                      disabled={uploadingTpl}
+                      onClick={() => customTplInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-4 py-2 text-xs font-bold text-[#F6F4EF]"
+                    >
+                      <FileUp className="h-3.5 w-3.5 text-[#D1B27A]" /> 选择本机 .docx 空白模板
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between text-[11px] text-slate-600">
+                    <span>
+                      本机已保存 <strong>{customTemplates.length}</strong> 份专属模板（仅当前浏览器可见）
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleClearAllCustomTemplates}
+                      className="inline-flex items-center gap-1 text-red-700 hover:underline font-medium"
+                    >
+                      <Trash2 className="h-3 w-3" /> 清空全部本地模板
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                    {customTemplates.map((item) => (
+                      <div
+                        key={item.id}
+                        className="rounded-xl border border-[#E2DAC7] bg-white p-3.5 flex flex-col justify-between gap-2.5 shadow-2xs"
+                      >
+                        <div className="space-y-1.5">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="font-display text-xs font-bold text-[#0E223D] truncate" title={item.fileName}>
+                                {item.name}
+                              </div>
+                              <div className="text-[10px] text-slate-400">
+                                {(item.sizeBytes / 1024).toFixed(1)} KB · 本地 .docx
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteCustomTemplate(item.id)}
+                              title="从本机移除该模板"
+                              className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-700"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+
+                          {item.matchedPlaceholders.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              <span className="rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-bold text-emerald-800">
+                                已识别 {item.matchedPlaceholders.length} 项占位符
+                              </span>
+                              {item.matchedPlaceholders.slice(0, 4).map((tk) => (
+                                <code
+                                  key={tk}
+                                  className="rounded bg-[#F6F3EC] px-1 py-0.5 text-[9.5px] text-slate-600"
+                                >
+                                  {tk}
+                                </code>
+                              ))}
+                              {item.matchedPlaceholders.length > 4 && (
+                                <span className="text-[10px] text-slate-400">
+                                  +{item.matchedPlaceholders.length - 4}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10.5px] text-amber-900">
+                              尚未检测到 <code>{'{{...}}'}</code> 占位符，可对照上方清单在 Word 中添加后重新导入。
+                            </div>
+                          )}
+
+                          {item.totalPrivacyHits > 0 && (
+                            <div className="rounded-lg border border-red-200 bg-red-50/90 px-2.5 py-1.5 text-[10.5px] leading-4 text-red-800 flex items-start gap-1.5">
+                              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5 text-red-600" />
+                              <span>
+                                <strong>本地隐私残留提醒：</strong>检测到疑似旧案信息（
+                                {item.privacyAlerts
+                                  .map((a) => `${a.categoryLabel}×${a.count}`)
+                                  .join('、')}
+                                ），请确认已清空真实客户/案件信息再用作通用模板。
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleFillAndDownloadCustomTemplate(item)}
+                          className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-3 py-2 text-[11.5px] font-bold text-[#F6F4EF]"
+                        >
+                          <Download className="h-3.5 w-3.5 text-[#D1B27A]" /> 套打导出 Word (.docx)
+                        </button>
                       </div>
-                      <p className="mt-1 text-[10.5px] leading-4 text-slate-500">{item.desc}</p>
-                    </div>
-                    <div className="inline-flex items-center gap-1 text-[11px] font-bold text-[#0E223D] group-hover:text-[#9A7538]">
-                      <Download className="h-3 w-3" /> 下载 Word (.docx)
-                    </div>
-                  </button>
-                ))}
-              </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </section>
           )}
         </div>
