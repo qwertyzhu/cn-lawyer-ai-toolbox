@@ -11,6 +11,7 @@ import {
   EyeOff,
   HelpCircle,
   KeyRound,
+  Link2,
   Loader2,
   LogOut,
   RefreshCw,
@@ -60,9 +61,28 @@ interface CloudLawyerAccount {
   status: 'active' | 'disabled';
   expiresAt: string;
   issuedAt: string;
+  activatedAt?: string;
   lastSeenAt: string;
+  activationCode?: string;
   updatedAt: string;
   note: string;
+}
+
+function computeNextSerialNumber(accounts: CloudLawyerAccount[]): number {
+  let maxSeq = 0;
+  for (const a of accounts) {
+    const m = String(a.serialNo || '').match(/^(?:TR|LAW)-\d{4}-(\d{1,4})$/);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > maxSeq) maxSeq = n;
+    }
+  }
+  return maxSeq + 1;
+}
+
+function isAccountActivated(acct: CloudLawyerAccount): boolean {
+  if (acct.activatedAt !== undefined) return Boolean(acct.activatedAt);
+  return Boolean(acct.lastSeenAt);
 }
 
 const ROLE_OPTIONS: LawyerRoleLabel[] = [
@@ -110,6 +130,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [accountsLoading, setAccountsLoading] = useState(false);
   const [accountsError, setAccountsError] = useState<string | null>(null);
   const [togglingKey, setTogglingKey] = useState<string | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [accountFilter, setAccountFilter] = useState<'all' | 'activated' | 'pending' | 'disabled'>('all');
+  const [revealedCodeKey, setRevealedCodeKey] = useState<string | null>(null);
+  const [busyCodeKey, setBusyCodeKey] = useState<string | null>(null);
   const [newAcctName, setNewAcctName] = useState('');
   const [newAcctSerial, setNewAcctSerial] = useState('');
   const [newAcctRole, setNewAcctRole] = useState<LawyerRoleLabel>('专职律师');
@@ -319,13 +343,22 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       const startSeq = Math.max(1, Number(serialStart) || 1);
       const year = new Date().getFullYear();
       const out: { holder: string; code: string; cardText: string }[] = [];
+      const upsertBatch: {
+        holderName: string;
+        role: string;
+        serialNo: string;
+        expiresAt: string;
+        issuedAt: string;
+        activationCode: string;
+        status: 'active';
+      }[] = [];
 
       for (let i = 0; i < names.length; i++) {
         const parts = names[i].split(/[:：]/);
         const holderName = parts[0].trim();
         const resolvedRole = (parts[1] || issueRole).trim();
         if (!holderName) continue;
-        const serialNo = `TR-${year}-${String(startSeq + i).padStart(3, '0')}`;
+        const serialNo = `LAW-${year}-${String(startSeq + i).padStart(3, '0')}`;
         const { code, info } = await signActivationCodeWithMasterToken(masterToken, {
           holderName,
           role: resolvedRole,
@@ -337,31 +370,24 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           code,
           cardText: formatWeChatInvitationCard(info, origin),
         });
+        upsertBatch.push({
+          holderName,
+          role: resolvedRole,
+          serialNo,
+          expiresAt,
+          issuedAt: info.issuedAt,
+          activationCode: code,
+          status: 'active',
+        });
       }
 
       saveAdminMasterToken(masterToken);
       setIssuedCards(out);
       setSerialStart(String(startSeq + names.length));
-      // Silently register newly issued accounts into cloud account control table if online
-      if (navigator.onLine && out.length > 0) {
+      // Silently register newly issued accounts & archive their codes into cloud account control table if online
+      if (navigator.onLine && upsertBatch.length > 0) {
         try {
-          const payloadStr = JSON.stringify({
-            accounts: names
-              .map((raw, idx) => {
-                const parts = raw.split(/[:：]/);
-                const holderName = parts[0].trim();
-                const resolvedRole = (parts[1] || issueRole).trim();
-                if (!holderName) return null;
-                return {
-                  holderName,
-                  role: resolvedRole,
-                  serialNo: `TR-${year}-${String(startSeq + idx).padStart(3, '0')}`,
-                  expiresAt,
-                  status: 'active',
-                };
-              })
-              .filter(Boolean),
-          });
+          const payloadStr = JSON.stringify({ accounts: upsertBatch });
           const headers = await buildSignedAdminHeaders(
             masterToken,
             license.rawCode,
@@ -388,6 +414,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     }
   };
 
+  const getAdminOrigin = () => window.location.origin;
+
   const fetchCloudAccounts = async () => {
     setAccountsError(null);
     if (!masterToken.trim()) {
@@ -407,11 +435,126 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       const data = await resp.json();
       if (!data.ok) throw new Error(data.error || '加载云端账户列表失败');
       saveAdminMasterToken(masterToken);
-      setCloudAccounts(data.accounts || []);
+      const list: CloudLawyerAccount[] = data.accounts || [];
+      setCloudAccounts(list);
+      const nextSeq = computeNextSerialNumber(list);
+      setSerialStart((prev) => (prev === '1' && nextSeq > 1 ? String(nextSeq) : prev));
     } catch (err) {
       setAccountsError(err instanceof Error ? err.message : '连接管理端失败');
     } finally {
       setAccountsLoading(false);
+    }
+  };
+
+  const ensureAccountCode = async (acct: CloudLawyerAccount): Promise<string> => {
+    if (acct.activationCode && acct.activationCode.startsWith('TR1-')) {
+      return acct.activationCode;
+    }
+    if (!masterToken.trim()) {
+      throw new Error('请先在上方填入主任主密钥（TR-MASTER-...）以查看或生成激活凭证');
+    }
+    const year = new Date().getFullYear();
+    const resolvedSerial =
+      acct.serialNo || `LAW-${year}-${String(computeNextSerialNumber(cloudAccounts)).padStart(3, '0')}`;
+    const { code, info } = await signActivationCodeWithMasterToken(masterToken, {
+      holderName: acct.holderName,
+      role: acct.role,
+      serialNo: resolvedSerial,
+      expiresAt: acct.expiresAt || '',
+      issuedAt: acct.issuedAt || undefined,
+    });
+    try {
+      const payloadStr = JSON.stringify({
+        holderName: acct.holderName,
+        serialNo: resolvedSerial,
+        role: acct.role,
+        expiresAt: acct.expiresAt || '',
+        issuedAt: info.issuedAt,
+        activationCode: code,
+        status: acct.status,
+      });
+      const headers = await buildSignedAdminHeaders(
+        masterToken,
+        license.rawCode,
+        'POST',
+        '/api/admin/accounts/upsert',
+        payloadStr
+      );
+      await fetch('/api/admin/accounts/upsert', { method: 'POST', headers, body: payloadStr });
+    } catch {
+      // Keep local code even if archive write fails
+    }
+    setCloudAccounts((prev) =>
+      prev.map((a) =>
+        a.key === acct.key
+          ? { ...a, serialNo: resolvedSerial, issuedAt: info.issuedAt, activationCode: code }
+          : a
+      )
+    );
+    return code;
+  };
+
+  const handleCopyAccountLink = async (acct: CloudLawyerAccount) => {
+    setBusyCodeKey(acct.key);
+    setAccountsError(null);
+    try {
+      const code = await ensureAccountCode(acct);
+      const quickUrl = `${getAdminOrigin()}/?activate=${encodeURIComponent(code)}`;
+      await copyToClipboard(quickUrl);
+      showToast(`已复制「${acct.holderName}」一键免输激活链接，可直接粘贴发微信`);
+    } catch (err) {
+      setAccountsError(err instanceof Error ? err.message : '生成或复制链接失败');
+    } finally {
+      setBusyCodeKey(null);
+    }
+  };
+
+  const handleToggleRevealCode = async (acct: CloudLawyerAccount) => {
+    if (revealedCodeKey === acct.key) {
+      setRevealedCodeKey(null);
+      return;
+    }
+    setBusyCodeKey(acct.key);
+    setAccountsError(null);
+    try {
+      await ensureAccountCode(acct);
+      setRevealedCodeKey(acct.key);
+    } catch (err) {
+      setAccountsError(err instanceof Error ? err.message : '获取激活密钥失败');
+    } finally {
+      setBusyCodeKey(null);
+    }
+  };
+
+  const handleDeleteCloudAccount = async (acct: CloudLawyerAccount) => {
+    if (!window.confirm(`确定从后台账号表中移除「${acct.holderName}（${acct.serialNo || acct.role}）」吗？`)) {
+      return;
+    }
+    setDeletingKey(acct.key);
+    setAccountsError(null);
+    try {
+      const payloadStr = JSON.stringify({ key: acct.key });
+      const headers = await buildSignedAdminHeaders(
+        masterToken,
+        license.rawCode,
+        'POST',
+        '/api/admin/accounts/delete',
+        payloadStr
+      );
+      const resp = await fetch('/api/admin/accounts/delete', {
+        method: 'POST',
+        headers,
+        body: payloadStr,
+      });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || '删除失败');
+      setCloudAccounts((prev) => prev.filter((a) => a.key !== acct.key));
+      if (revealedCodeKey === acct.key) setRevealedCodeKey(null);
+      showToast(`已移除「${acct.holderName}」记录`);
+    } catch (err) {
+      setAccountsError(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setDeletingKey(null);
     }
   };
 
@@ -452,17 +595,27 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   const handleAddCloudAccount = async () => {
     const cleanName = newAcctName.trim();
-    const cleanSerial = newAcctSerial.trim();
-    if (!cleanName && !cleanSerial) {
-      showToast('请输入律师姓名或授权编号');
+    const year = new Date().getFullYear();
+    const cleanSerial =
+      newAcctSerial.trim() ||
+      `LAW-${year}-${String(computeNextSerialNumber(cloudAccounts)).padStart(3, '0')}`;
+    if (!cleanName) {
+      showToast('请输入律师姓名');
       return;
     }
     setAccountsError(null);
     try {
+      const { code, info } = await signActivationCodeWithMasterToken(masterToken, {
+        holderName: cleanName,
+        role: newAcctRole,
+        serialNo: cleanSerial,
+      });
       const payloadStr = JSON.stringify({
-        holderName: cleanName || cleanSerial,
+        holderName: cleanName,
         serialNo: cleanSerial,
         role: newAcctRole,
+        issuedAt: info.issuedAt,
+        activationCode: code,
         status: 'active',
       });
       const headers = await buildSignedAdminHeaders(
@@ -482,7 +635,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       setNewAcctName('');
       setNewAcctSerial('');
       await fetchCloudAccounts();
-      showToast(`已将「${cleanName || cleanSerial}」加入云端账户列表`);
+      showToast(`已登记「${cleanName}（${cleanSerial}）」并生成专属激活凭证，可在列表中一键复制链接`);
     } catch (err) {
       setAccountsError(err instanceof Error ? err.message : '添加账户失败');
     }
@@ -1104,84 +1257,302 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   </div>
                 </div>
 
-                {/* Live Account List with 1-Click Enable/Disable */}
+                {/* Live Account List with 3-State Status, Filter Bar, Key Viewer & 1-Click Enable/Disable */}
                 {cloudAccounts.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-[#D8D1C3] bg-white py-8 px-4 text-center text-xs text-slate-500 space-y-2">
-                    <p>粘贴您的主任主密钥并点击上方「同步账户」，即可管理全所已登记与已上线律师账号的实时启停状态。</p>
+                    <p>粘贴您的主任主密钥并点击上方「同步账户」，即可管理全所律师账号的激活状态、随时查看/复制个人激活链接，并一键实时停用或恢复。</p>
                     <p className="text-[11px] text-slate-400">
-                      停用后，该律师联网打开工具箱或检索 IMA 云库、调用 AI 转发接口将在 1 秒内立即拦截生效；重新点击「恢复启用」即可秒恢复。
+                      停用后，该律师联网打开工具箱或调用服务端接口将在 1 秒内立即拦截生效；重新点击「恢复启用」即可秒恢复。
                     </p>
                   </div>
                 ) : (
-                  <div className="divide-y divide-[#EFECE5] rounded-lg border border-[#DED8CC] bg-white overflow-hidden">
-                    {cloudAccounts.map((acct) => {
-                      const isSelf = Boolean(
-                        acct.holderName === license.holderName ||
-                          (license.serialNo && acct.serialNo === license.serialNo)
-                      );
-                      const isActive = acct.status === 'active';
-                      return (
-                        <div
-                          key={acct.key}
-                          className={`flex flex-wrap items-center justify-between gap-2 px-3.5 py-3 text-xs ${
-                            isActive ? 'bg-white' : 'bg-red-50/40'
-                          }`}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="font-display font-bold text-[#11151C]">
-                                {acct.holderName}
-                              </span>
-                              <span className="rounded bg-[#F3ECE0] px-1.5 py-0.5 text-[10px] font-semibold text-[#7A5922]">
-                                {acct.role}
-                              </span>
-                              <span
-                                className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                                  isActive
-                                    ? 'bg-emerald-100 text-emerald-800'
-                                    : 'bg-red-100 text-red-700'
-                                }`}
-                              >
-                                {isActive ? '● 启用中' : '● 已停用'}
-                              </span>
-                              {isSelf && (
-                                <span className="text-[10px] text-slate-400">（当前本机主任）</span>
-                              )}
-                            </div>
-                            <div className="mt-1 text-[11px] text-slate-500 flex flex-wrap gap-x-3 gap-y-0.5">
-                              <span className="font-mono">
-                                编号：{acct.serialNo || '按姓名管控（待首次激活）'}
-                              </span>
-                              {acct.lastSeenAt && (
-                                <span>
-                                  最近在线：{new Date(acct.lastSeenAt).toLocaleString('zh-CN', { hour12: false })}
-                                </span>
-                              )}
-                            </div>
-                          </div>
+                  (() => {
+                    const activatedCount = cloudAccounts.filter(
+                      (a) => a.status === 'active' && isAccountActivated(a)
+                    ).length;
+                    const pendingCount = cloudAccounts.filter(
+                      (a) => a.status === 'active' && !isAccountActivated(a)
+                    ).length;
+                    const disabledCount = cloudAccounts.filter((a) => a.status === 'disabled').length;
 
-                          <div className="flex items-center gap-1.5 flex-none">
-                            <button
-                              type="button"
-                              disabled={isSelf || togglingKey === acct.key}
-                              onClick={() => handleToggleAccount(acct)}
-                              className={`rounded-md px-3 py-1.5 text-xs font-bold transition-colors disabled:opacity-40 ${
-                                isActive
-                                  ? 'border border-red-300 bg-white text-red-700 hover:bg-red-50'
-                                  : 'bg-emerald-700 text-white hover:bg-emerald-800'
-                              }`}
-                            >
-                              {togglingKey === acct.key
-                                ? '处理中…'
-                                : isActive
-                                ? '关闭账户'
-                                : '恢复启用'}
-                            </button>
-                          </div>
+                    const visibleAccounts = cloudAccounts.filter((a) => {
+                      if (accountFilter === 'activated') return a.status === 'active' && isAccountActivated(a);
+                      if (accountFilter === 'pending') return a.status === 'active' && !isAccountActivated(a);
+                      if (accountFilter === 'disabled') return a.status === 'disabled';
+                      return true;
+                    });
+
+                    const origin = getAdminOrigin();
+
+                    return (
+                      <div className="space-y-2.5">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setAccountFilter('all')}
+                            className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                              accountFilter === 'all'
+                                ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                                : 'border-[#DED8CC] bg-white text-[#11151C] hover:border-[#B89254]'
+                            }`}
+                          >
+                            <div className="text-[10px] opacity-75">全部账号</div>
+                            <div className="font-mono text-sm font-bold">{cloudAccounts.length} 席</div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setAccountFilter('activated')}
+                            className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                              accountFilter === 'activated'
+                                ? 'border-emerald-700 bg-emerald-700 text-white'
+                                : 'border-emerald-200 bg-emerald-50/70 text-emerald-900 hover:border-emerald-400'
+                            }`}
+                          >
+                            <div className="text-[10px] opacity-80">● 已激活使用</div>
+                            <div className="font-mono text-sm font-bold">{activatedCount} 人</div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setAccountFilter('pending')}
+                            className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                              accountFilter === 'pending'
+                                ? 'border-amber-600 bg-amber-600 text-white'
+                                : 'border-amber-200 bg-amber-50/70 text-amber-900 hover:border-amber-400'
+                            }`}
+                          >
+                            <div className="text-[10px] opacity-80">○ 待点击激活</div>
+                            <div className="font-mono text-sm font-bold">{pendingCount} 人</div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setAccountFilter('disabled')}
+                            className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                              accountFilter === 'disabled'
+                                ? 'border-red-700 bg-red-700 text-white'
+                                : 'border-red-200 bg-red-50/70 text-red-900 hover:border-red-400'
+                            }`}
+                          >
+                            <div className="text-[10px] opacity-80">✕ 已停用</div>
+                            <div className="font-mono text-sm font-bold">{disabledCount} 人</div>
+                          </button>
                         </div>
-                      );
-                    })}
-                  </div>
+
+                        <div className="divide-y divide-[#EFECE5] rounded-lg border border-[#DED8CC] bg-white overflow-hidden">
+                          {visibleAccounts.length === 0 ? (
+                            <div className="py-8 text-center text-xs text-slate-400">
+                              当前筛选分类下暂无账号记录
+                            </div>
+                          ) : (
+                            visibleAccounts.map((acct) => {
+                              const isSelf = Boolean(acct.holderName === license.holderName);
+                              const isActive = acct.status === 'active';
+                              const activated = isAccountActivated(acct);
+                              const isRevealed = revealedCodeKey === acct.key;
+                              const isBusyCode = busyCodeKey === acct.key;
+                              const storedCode = acct.activationCode || '';
+                              const quickUrl = storedCode
+                                ? `${origin}/?activate=${encodeURIComponent(storedCode)}`
+                                : '';
+
+                              return (
+                                <div
+                                  key={acct.key}
+                                  className={`px-3.5 py-3 text-xs ${
+                                    !isActive
+                                      ? 'bg-red-50/40'
+                                      : activated
+                                      ? 'bg-white'
+                                      : 'bg-amber-50/20'
+                                  }`}
+                                >
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex flex-wrap items-center gap-1.5">
+                                        <span className="font-display font-bold text-[#11151C]">
+                                          {acct.holderName}
+                                        </span>
+                                        <span className="rounded bg-[#F3ECE0] px-1.5 py-0.5 text-[10px] font-semibold text-[#7A5922]">
+                                          {acct.role}
+                                        </span>
+                                        {!isActive ? (
+                                          <span className="rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-bold text-red-700">
+                                            ● 已停用
+                                          </span>
+                                        ) : activated ? (
+                                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-800">
+                                            ● 已激活
+                                          </span>
+                                        ) : (
+                                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                                            ○ 待激活
+                                          </span>
+                                        )}
+                                        {isSelf && (
+                                          <span className="text-[10px] text-slate-400">（当前本机主任）</span>
+                                        )}
+                                        {acct.note && (
+                                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+                                            {acct.note}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="mt-1 text-[11px] text-slate-500 flex flex-wrap gap-x-3 gap-y-0.5">
+                                        <span className="font-mono">
+                                          编号：{acct.serialNo || '待分配'}
+                                        </span>
+                                        {activated ? (
+                                          <>
+                                            {acct.activatedAt && (
+                                              <span>
+                                                首次激活：{new Date(acct.activatedAt).toLocaleString('zh-CN', { hour12: false })}
+                                              </span>
+                                            )}
+                                            {acct.lastSeenAt && (
+                                              <span>
+                                                最近活跃：{new Date(acct.lastSeenAt).toLocaleString('zh-CN', { hour12: false })}
+                                              </span>
+                                            )}
+                                          </>
+                                        ) : (
+                                          <span className="text-amber-700/80">
+                                            尚未点击激活链接（律师首次点开并联网后自动点亮）
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    <div className="flex flex-wrap items-center gap-1.5 flex-none">
+                                      <button
+                                        type="button"
+                                        disabled={isBusyCode}
+                                        onClick={() => handleCopyAccountLink(acct)}
+                                        className="inline-flex items-center gap-1 rounded-md border border-[#D1B27A] bg-[#FAF6EC] hover:bg-[#F3ECE0] px-2.5 py-1.5 text-[11px] font-bold text-[#7A5922] disabled:opacity-45"
+                                        title="一键复制该律师专属免输激活链接"
+                                      >
+                                        <Link2 className="h-3 w-3" />
+                                        复制链接
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={isBusyCode}
+                                        onClick={() => handleToggleRevealCode(acct)}
+                                        className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-[11px] font-semibold transition-colors disabled:opacity-45 ${
+                                          isRevealed
+                                            ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                                            : 'border-[#D8D1C3] bg-white text-[#11151C] hover:border-[#0E223D]'
+                                        }`}
+                                      >
+                                        {isRevealed ? (
+                                          <>
+                                            <EyeOff className="h-3 w-3" /> 收起密钥
+                                          </>
+                                        ) : (
+                                          <>
+                                            <Eye className="h-3 w-3" /> 查看密钥
+                                          </>
+                                        )}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={isSelf || togglingKey === acct.key}
+                                        onClick={() => handleToggleAccount(acct)}
+                                        className={`rounded-md px-2.5 py-1.5 text-[11px] font-bold transition-colors disabled:opacity-40 ${
+                                          isActive
+                                            ? 'border border-red-300 bg-white text-red-700 hover:bg-red-50'
+                                            : 'bg-emerald-700 text-white hover:bg-emerald-800'
+                                        }`}
+                                      >
+                                        {togglingKey === acct.key
+                                          ? '处理中…'
+                                          : isActive
+                                          ? '关闭账户'
+                                          : '恢复启用'}
+                                      </button>
+                                      {!isSelf && (
+                                        <button
+                                          type="button"
+                                          disabled={deletingKey === acct.key}
+                                          onClick={() => handleDeleteCloudAccount(acct)}
+                                          className="rounded-md border border-slate-200 bg-white p-1.5 text-slate-400 hover:border-red-300 hover:text-red-600 disabled:opacity-40"
+                                          title="从账号表移除"
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {isRevealed && storedCode && (
+                                    <div className="mt-3 rounded-lg border border-[#DED8CC] bg-[#FAF9F6] p-3 space-y-2.5">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <span className="text-[11px] font-bold text-[#0E223D]">
+                                          「{acct.holderName}」专属激活凭证（仅主任私密可见）
+                                        </span>
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                          <button
+                                            type="button"
+                                            onClick={async () => {
+                                              await copyToClipboard(storedCode);
+                                              showToast(`已复制「${acct.holderName}」的激活密钥`);
+                                            }}
+                                            className="inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-white px-2 py-1 text-[11px] font-semibold text-[#11151C] hover:border-[#0E223D]"
+                                          >
+                                            <Copy className="h-3 w-3" /> 复制密钥
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={async () => {
+                                              const card = formatWeChatInvitationCard(
+                                                {
+                                                  rawCode: storedCode,
+                                                  holderName: acct.holderName,
+                                                  role: acct.role,
+                                                  serialNo: acct.serialNo || 'LAW-VIP',
+                                                  issuedAt: acct.issuedAt || new Date().toISOString().slice(0, 10),
+                                                  expiresAt: acct.expiresAt || null,
+                                                  fingerprint: '',
+                                                  activatedAt: acct.activatedAt || '',
+                                                },
+                                                origin
+                                              );
+                                              await copyToClipboard(card);
+                                              showToast(`已复制「${acct.holderName}」完整微信授权函`);
+                                            }}
+                                            className="inline-flex items-center gap-1 rounded bg-[#B89254] px-2.5 py-1 text-[11px] font-bold text-[#11151C]"
+                                          >
+                                            <Share2 className="h-3 w-3" /> 复制微信发放函
+                                          </button>
+                                        </div>
+                                      </div>
+
+                                      <div className="space-y-1.5">
+                                        <div>
+                                          <div className="text-[10px] font-semibold text-slate-500 mb-0.5">
+                                            一键免输激活链接：
+                                          </div>
+                                          <div className="rounded border border-[#EAE5DA] bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#0E223D] break-all select-all">
+                                            {quickUrl}
+                                          </div>
+                                        </div>
+                                        <div>
+                                          <div className="text-[10px] font-semibold text-slate-500 mb-0.5">
+                                            专属激活密钥（TR1-...）：
+                                          </div>
+                                          <div className="rounded border border-[#EAE5DA] bg-white px-2.5 py-1.5 font-mono text-[11px] text-slate-700 break-all select-all">
+                                            {storedCode}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()
                 )}
               </div>
             ) : (

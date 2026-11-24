@@ -215,6 +215,11 @@ function loadAccountRegistry() {
           if (!canonKey) continue;
           if (canonKey !== oldKey || rawRec.key !== canonKey) migrated = true;
           const prev = normalized[canonKey];
+          const hasExplicitActivated = Object.prototype.hasOwnProperty.call(rawRec, 'activatedAt');
+          const resolvedActivatedAt = hasExplicitActivated
+            ? String(rawRec.activatedAt || '')
+            : String(rawRec.lastSeenAt || '');
+          const resolvedCode = String(rawRec.activationCode || '').trim();
           if (!prev) {
             normalized[canonKey] = {
               key: canonKey,
@@ -224,7 +229,9 @@ function loadAccountRegistry() {
               status: rawRec.status === 'disabled' ? 'disabled' : 'active',
               expiresAt: String(rawRec.expiresAt || ''),
               issuedAt: String(rawRec.issuedAt || ''),
+              activatedAt: resolvedActivatedAt,
               lastSeenAt: String(rawRec.lastSeenAt || ''),
+              activationCode: resolvedCode.startsWith('TR1-') ? resolvedCode : '',
               updatedAt: String(rawRec.updatedAt || new Date().toISOString()),
               note: String(rawRec.note || ''),
             };
@@ -234,12 +241,16 @@ function loadAccountRegistry() {
             if (serialNo && (!prev.serialNo || (rawRec.updatedAt || '') >= (prev.updatedAt || ''))) {
               prev.serialNo = serialNo;
             }
+            if (resolvedActivatedAt && (!prev.activatedAt || resolvedActivatedAt < prev.activatedAt)) {
+              prev.activatedAt = resolvedActivatedAt;
+            }
             if ((rawRec.lastSeenAt || '') > (prev.lastSeenAt || '')) prev.lastSeenAt = rawRec.lastSeenAt;
+            if (resolvedCode.startsWith('TR1-') && !prev.activationCode) prev.activationCode = resolvedCode;
             if ((rawRec.updatedAt || '') > (prev.updatedAt || '')) prev.updatedAt = rawRec.updatedAt;
           }
         }
-        const reg = { version: 2, accounts: normalized };
-        if (migrated || parsed.version !== 2) {
+        const reg = { version: 3, accounts: normalized };
+        if (migrated || parsed.version !== 3) {
           try {
             const tmp = `${ACCOUNT_REGISTRY_PATH}.tmp.${process.pid}`;
             fs.writeFileSync(tmp, JSON.stringify(reg, null, 2), { mode: 0o600 });
@@ -267,12 +278,14 @@ function loadAccountRegistry() {
       status: 'active',
       expiresAt: '',
       issuedAt: '',
+      activatedAt: '',
       lastSeenAt: '',
+      activationCode: '',
       updatedAt: now,
       note: '',
     };
   }
-  return { version: 2, accounts };
+  return { version: 3, accounts };
 }
 
 let accountRegistryCache = loadAccountRegistry();
@@ -289,11 +302,12 @@ function saveAccountRegistry(reg) {
   }
 }
 
-function checkAndTouchAccount(wire) {
+function checkAndTouchAccount(wire, rawToken = '') {
   const accounts = accountRegistryCache.accounts || {};
   const serialNo = String(wire.s || '').trim();
   const holderName = String(wire.n || '').trim();
   const role = String(wire.r || '专职律师').trim();
+  const cleanToken = String(rawToken || '').trim().startsWith('TR1-') ? String(rawToken || '').trim() : '';
 
   const key = makeAccountKey(serialNo, holderName);
   const entry = accounts[key] || null;
@@ -309,7 +323,7 @@ function checkAndTouchAccount(wire) {
     };
   }
 
-  // Auto-discover & touch lastSeenAt (one canonical row per lawyer)
+  // Auto-discover & touch activatedAt/lastSeenAt (one canonical row per lawyer)
   const now = new Date().toISOString();
   let dirty = false;
 
@@ -322,7 +336,9 @@ function checkAndTouchAccount(wire) {
       status: 'active',
       expiresAt: wire.e || '',
       issuedAt: wire.t || '',
+      activatedAt: now,
       lastSeenAt: now,
+      activationCode: cleanToken || legacySerialEntry?.activationCode || '',
       updatedAt: now,
       note: legacySerialEntry?.note || '',
     };
@@ -331,9 +347,16 @@ function checkAndTouchAccount(wire) {
     }
     dirty = true;
   } else {
-    // Update serialNo/role if the lawyer switched to a newer code, and throttle lastSeenAt writes (5 min)
     if (serialNo && entry.serialNo !== serialNo) {
       entry.serialNo = serialNo;
+      dirty = true;
+    }
+    if (!entry.activatedAt) {
+      entry.activatedAt = now;
+      dirty = true;
+    }
+    if (cleanToken && entry.activationCode !== cleanToken) {
+      entry.activationCode = cleanToken;
       dirty = true;
     }
     const prevSeen = entry.lastSeenAt ? Date.parse(entry.lastSeenAt) : 0;
@@ -346,7 +369,7 @@ function checkAndTouchAccount(wire) {
   }
 
   if (dirty) {
-    saveAccountRegistry({ version: 2, accounts });
+    saveAccountRegistry({ version: 3, accounts });
   }
   return { active: true };
 }
@@ -378,7 +401,8 @@ function loadImaCredentials() {
   return { clientId, apiKey };
 }
 
-async function verifyTianranLicenseDetailed(rawToken) {
+async function verifyTianranLicenseDetailed(rawToken, opts = {}) {
+  const shouldTouch = opts.touch !== false;
   if (!rawToken || !rawToken.startsWith('TR1-')) {
     return { valid: false, active: false, reason: '未检测到有效的团队专属激活凭证' };
   }
@@ -414,7 +438,17 @@ async function verifyTianranLicenseDetailed(rawToken) {
       return { valid: true, active: false, wire, reason: `该专属激活码已于 ${wire.e} 到期，请联系主任续期` };
     }
 
-    const accountState = checkAndTouchAccount(wire);
+    const accountState = shouldTouch
+      ? checkAndTouchAccount(wire, rawToken)
+      : (() => {
+          const accounts = accountRegistryCache.accounts || {};
+          const key = makeAccountKey(String(wire.s || '').trim(), String(wire.n || '').trim());
+          const matched = accounts[key] || (wire.s ? accounts[String(wire.s).trim()] : null);
+          if (matched && matched.status === 'disabled') {
+            return { active: false, reason: '该律师账号已被律所管理端停用' };
+          }
+          return { active: true };
+        })();
     if (!accountState.active) {
       return { valid: true, active: false, wire, reason: accountState.reason };
     }
@@ -425,7 +459,9 @@ async function verifyTianranLicenseDetailed(rawToken) {
 }
 
 async function verifyAdminSignedRequest(req, pathname, rawBodyText) {
-  const lic = await verifyTianranLicenseDetailed(String(req.headers['x-toolbox-license'] || ''));
+  const lic = await verifyTianranLicenseDetailed(String(req.headers['x-toolbox-license'] || ''), {
+    touch: false,
+  });
   if (!lic.valid || !lic.active || !lic.wire || !isFirmAdminRole(lic.wire.r)) {
     return { ok: false, status: 403, error: '仅限启用状态的主任律师账号访问管理端接口' };
   }
@@ -720,6 +756,7 @@ const server = http.createServer(async (req, res) => {
           const key = makeAccountKey(serialNo, holderName);
           const prev = accounts[key] || null;
 
+          const incomingCode = String(it?.activationCode || '').trim();
           accounts[key] = {
             key,
             serialNo: serialNo || prev?.serialNo || '',
@@ -728,14 +765,18 @@ const server = http.createServer(async (req, res) => {
             status: it?.status === 'disabled' ? 'disabled' : prev?.status || 'active',
             expiresAt: String(it?.expiresAt ?? prev?.expiresAt ?? '').trim(),
             issuedAt: String(it?.issuedAt ?? prev?.issuedAt ?? '').trim(),
+            activatedAt: prev?.activatedAt || '',
             lastSeenAt: prev?.lastSeenAt || '',
+            activationCode: incomingCode.startsWith('TR1-')
+              ? incomingCode
+              : prev?.activationCode || '',
             updatedAt: now,
             note: String(it?.note ?? prev?.note ?? '').trim(),
           };
           count++;
         }
 
-        saveAccountRegistry({ version: 2, accounts });
+        saveAccountRegistry({ version: 3, accounts });
         return sendJson(res, 200, {
           ok: true,
           updated: count,
@@ -753,21 +794,20 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 404, { ok: false, error: '未找到对应的律师账户记录' });
         }
 
-        // Prevent self-lockout of the currently authenticated Managing Partner account
+        // Prevent self-lockout of the currently authenticated Managing Partner account (match by holderName)
         const adminSerial = String(auth.adminWire.s || '').trim();
         const adminName = String(auth.adminWire.n || '').trim();
-        if (
-          nextStatus === 'disabled' &&
-          ((adminName && target.holderName === adminName) ||
-            (adminSerial && target.serialNo === adminSerial))
-        ) {
+        const isSelfTarget = adminName
+          ? target.holderName === adminName
+          : Boolean(adminSerial && target.serialNo === adminSerial);
+        if (nextStatus === 'disabled' && isSelfTarget) {
           return sendJson(res, 400, { ok: false, error: '为防误锁管理端，不可停用您当前登录的主任账号' });
         }
 
         target.status = nextStatus;
         target.updatedAt = new Date().toISOString();
         if (note !== undefined) target.note = note;
-        saveAccountRegistry({ version: 2, accounts });
+        saveAccountRegistry({ version: 3, accounts });
 
         return sendJson(res, 200, { ok: true, account: target });
       }
@@ -781,11 +821,14 @@ const server = http.createServer(async (req, res) => {
         }
         const adminSerial = String(auth.adminWire.s || '').trim();
         const adminName = String(auth.adminWire.n || '').trim();
-        if ((adminName && target.holderName === adminName) || (adminSerial && target.serialNo === adminSerial)) {
+        const isSelfTarget = adminName
+          ? target.holderName === adminName
+          : Boolean(adminSerial && target.serialNo === adminSerial);
+        if (isSelfTarget) {
           return sendJson(res, 400, { ok: false, error: '不可删除当前登录的主任账号' });
         }
         delete accounts[key];
-        saveAccountRegistry({ version: 2, accounts });
+        saveAccountRegistry({ version: 3, accounts });
         return sendJson(res, 200, { ok: true });
       }
 
