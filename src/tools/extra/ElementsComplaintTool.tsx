@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookmarkPlus,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Download,
   Eye,
@@ -16,45 +18,66 @@ import {
   Plus,
   Printer,
   RotateCcw,
+  Search,
   ShieldCheck,
   Sparkles,
   Trash2,
+  Wand2,
   X,
 } from 'lucide-react';
 import { ImageRedactModal } from '../../components/ImageRedactModal';
 import { useToolbox } from '../../context/ToolboxContext';
-import {
-  buildComplaintPlainText,
-  buildComplaintSections,
-  createEmptyParty,
-  createInitialComplaintDraft,
-  ELEMENTS_COMPLAINT_TEMPLATES,
-  getResolvedCauseTitle,
-  type ComplaintDraftState,
-  type ComplaintTemplateCategory,
-  type ComplaintTemplateDef,
-  type ElementFieldDef,
-  type PartyEntity,
-} from '../../data/elementsComplaintTemplates';
 import { resolveVisionModel, streamAiCompletion } from '../../lib/aiClient';
 import { copyToClipboard } from '../../lib/clipboard';
 import { decryptWithPassphrase } from '../../lib/cryptoVault';
-import { downloadElementsComplaintDocx } from '../../lib/docxBuilder';
+import { downloadOfficialSpcDocx } from '../../lib/docxBuilder';
 import { extractLocalDocumentText } from '../../lib/docxReader';
 import { compressImageFileToAttachment } from '../../lib/imageUtils';
 import { redactLegalText, restoreRedactedText } from '../../lib/redactor';
+import {
+  applyPartyQuickFillToCellText,
+  buildOfficialSpcPlainText,
+  buildResolvedSpcDocument,
+  createEmptyPartyQuickFill,
+  createInitialSpcDraft,
+  getTodayChinaDateCn,
+  loadOfficialSpcCorpus,
+  parseCheckboxTokens,
+  POPULAR_TEMPLATE_NAMES,
+  setAllMediationBenefitChoices,
+  SPC_DOC_ROLE_LABELS,
+  SPC_DOMAINS,
+  toggleCheckboxAtIndex,
+  type OfficialSpcDraftState,
+  type OfficialSpcRow,
+  type OfficialSpcTemplate,
+  type PartyQuickFillData,
+  type ResolvedSpcDocument,
+  type SpcDocRole,
+  type SpcDomainId,
+  type SpcRoleTag,
+  type SpcTemplateCorpus,
+} from '../../lib/spcOfficialTemplates';
 import type { AiImageAttachment, RedactionMapping } from '../../types/toolbox';
 
-const DRAFT_STORAGE_KEY = 'cn_lawyer_box_elements_complaint_draft_v1';
+const DRAFT_STORAGE_KEY = 'spc2025_elements_doc_draft_v2';
 
-const TEMPLATE_CATEGORIES: ('全部' | ComplaintTemplateCategory)[] = [
-  '全部',
-  '商事合同',
-  '金融借贷',
-  '劳动家事与人损',
-  '行政与执行',
-  '知产与网络',
-  '通用兜底',
+const ORG_TYPE_OPTIONS = [
+  '有限责任公司',
+  '股份有限公司',
+  '上市公司',
+  '其他企业法人',
+  '事业单位',
+  '社会团体',
+  '基金会',
+  '社会服务机构',
+  '机关法人',
+  '农村集体经济组织法人',
+  '城镇农村的合作经济组织法人',
+  '基层群众性自治组织法人',
+  '个人独资企业',
+  '合伙企业',
+  '不具有法人资格的专业服务机构',
 ];
 
 function escapeHtml(s: string): string {
@@ -63,39 +86,6 @@ function escapeHtml(s: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-}
-
-function loadSavedDraft(): ComplaintDraftState {
-  try {
-    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<ComplaintDraftState>;
-      if (parsed && parsed.templateId) {
-        const base = createInitialComplaintDraft(parsed.templateId);
-        return {
-          ...base,
-          ...parsed,
-          plaintiffs:
-            Array.isArray(parsed.plaintiffs) && parsed.plaintiffs.length > 0
-              ? parsed.plaintiffs
-              : base.plaintiffs,
-          defendants:
-            Array.isArray(parsed.defendants) && parsed.defendants.length > 0
-              ? parsed.defendants
-              : base.defendants,
-          agent: { ...base.agent, ...(parsed.agent || {}) },
-          thirdParty: { ...base.thirdParty, ...(parsed.thirdParty || {}) },
-          claims: { ...base.claims, ...(parsed.claims || {}) },
-          claimChoices: { ...base.claimChoices, ...(parsed.claimChoices || {}) },
-          facts: { ...base.facts, ...(parsed.facts || {}) },
-          factChoices: { ...base.factChoices, ...(parsed.factChoices || {}) },
-        };
-      }
-    }
-  } catch {
-    // ignore corrupt draft
-  }
-  return createInitialComplaintDraft('sales_contract');
 }
 
 function extractFirstJsonObject(raw: string): Record<string, unknown> | null {
@@ -144,86 +134,481 @@ function restoreDeepStrings<T>(value: T, mappings: RedactionMapping[]): T {
   return value;
 }
 
-function normalizePartyKind(raw: unknown, fallback: 'org' | 'person'): 'org' | 'person' {
-  if (raw === 'person' || raw === 'org') return raw;
-  if (typeof raw === 'string') {
-    if (/自然人|个人|公民|person/i.test(raw)) return 'person';
-    if (/公司|法人|组织|机构|单位|企业|机关|org/i.test(raw)) return 'org';
-  }
-  return fallback;
-}
-
-function normalizePartyArray(raw: unknown): Record<string, unknown>[] {
-  if (Array.isArray(raw)) {
-    return raw.filter((x): x is Record<string, unknown> => Boolean(x && typeof x === 'object'));
-  }
-  if (raw && typeof raw === 'object') {
-    return [raw as Record<string, unknown>];
-  }
-  return [];
-}
-
-function reconcileFieldChoices(
-  fields: ElementFieldDef[],
-  values: Record<string, string>,
-  choices: Record<string, string>
-): Record<string, string> {
-  const out = { ...choices };
-  const isNeg = (s: string) => /^(无|否|不主张|无保全|未经复议直诉|到期自然违约)$/.test(s.trim());
-  for (const f of fields) {
-    if ((f.kind !== 'radio' && f.kind !== 'radio_detail') || !f.options || f.options.length === 0) {
-      continue;
-    }
-    const detail = (values[f.key] || '').trim();
-    const cur = (out[f.key] || '').trim();
-    // If model wrote an option or affirmative detail into values[key] while choice is missing/negative, reconcile cleanly
-    if (cur && !f.options.includes(cur)) {
-      const fuzzy = f.options.find((o) => o.includes(cur) || cur.includes(o));
-      if (fuzzy) out[f.key] = fuzzy;
-    }
-    if (detail && !/^(无|暂无|不适用|不主张|否)$/i.test(detail)) {
-      if (!out[f.key] || isNeg(out[f.key])) {
-        const matchedOpt =
-          f.options.find((o) => !isNeg(o) && detail.includes(o.replace(/主张|合同/g, ''))) ||
-          f.options.find((o) => !isNeg(o));
-        if (matchedOpt) out[f.key] = matchedOpt;
+function loadSavedSpcDraft(corpus: SpcTemplateCorpus): OfficialSpcDraftState {
+  const defaultTpl =
+    corpus.templates.find((t) => t.displayName === '买卖合同纠纷民事起诉状') || corpus.templates[0];
+  try {
+    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<OfficialSpcDraftState>;
+      if (parsed && parsed.templateId) {
+        const matched = corpus.templates.find((t) => t.id === parsed.templateId);
+        if (matched) {
+          const base = createInitialSpcDraft(matched);
+          return {
+            ...base,
+            ...parsed,
+            rowValues: { ...base.rowValues, ...(parsed.rowValues || {}) },
+            gridValues: { ...base.gridValues, ...(parsed.gridValues || {}) },
+            extraRows: Array.isArray(parsed.extraRows) ? parsed.extraRows : [],
+            attachmentRows: { ...base.attachmentRows, ...(parsed.attachmentRows || {}) },
+          };
+        }
       }
     }
+  } catch {
+    // ignore corrupt draft
   }
-  return out;
+  return createInitialSpcDraft(defaultTpl);
 }
 
-function mergeExtractedParty(
-  rawObj: Record<string, unknown> | undefined,
-  fallback: PartyEntity
-): PartyEntity {
-  if (!rawObj || typeof rawObj !== 'object') return fallback;
-  const s = (k: string, def = '') =>
-    typeof rawObj[k] === 'string' && (rawObj[k] as string).trim()
-      ? (rawObj[k] as string).trim()
-      : def;
-  const kind = normalizePartyKind(rawObj.kind, fallback.kind);
-  return {
-    ...fallback,
-    kind,
-    name: s('name', fallback.name),
-    gender: s('gender', fallback.gender),
-    birthDate: s('birthDate', fallback.birthDate),
-    ethnicity: s('ethnicity', fallback.ethnicity),
-    workUnit: s('workUnit', fallback.workUnit),
-    jobTitle: s('jobTitle', fallback.jobTitle),
-    domicile: s('domicile', fallback.domicile),
-    residence: s('residence', fallback.residence),
-    idNumber: s('idNumber', fallback.idNumber),
-    regAddress: s('regAddress', fallback.regAddress),
-    legalRep: s('legalRep', fallback.legalRep),
-    repTitle: s('repTitle', fallback.repTitle),
-    creditCode: s('creditCode', fallback.creditCode),
-    orgType: s('orgType', fallback.orgType),
-    ownershipNature: s('ownershipNature', fallback.ownershipNature || '民营'),
-    phone: s('phone', fallback.phone),
-  };
+function buildPrintableHtml(doc: ResolvedSpcDocument): string {
+  const has4Col = doc.rows.some((r) => r.kind === 'grid' && (r.cells?.length || 0) === 4);
+  const has3Col = doc.rows.some((r) => r.kind === 'grid' && (r.cells?.length || 0) === 3);
+  const totalCols = has4Col && has3Col ? 6 : has4Col ? 5 : has3Col ? 3 : 2;
+  const twoSpans: [number, number] =
+    totalCols === 6 ? [2, 4] : totalCols === 5 ? [2, 3] : totalCols === 3 ? [1, 2] : [1, 1];
+  const fourSpans: [number, number, number, number] =
+    totalCols === 6 ? [1, 2, 2, 1] : [1, 2, 1, 1];
+  const threeSpans: [number, number, number] = totalCols === 6 ? [2, 2, 2] : [1, 1, 1];
+
+  const colgroupHtml =
+    totalCols === 6
+      ? '<colgroup><col style="width:16%"/><col style="width:11.2%"/><col style="width:22.8%"/><col style="width:10.1%"/><col style="width:5.9%"/><col style="width:34%"/></colgroup>'
+      : totalCols === 5
+      ? '<colgroup><col style="width:16%"/><col style="width:11.2%"/><col style="width:22.8%"/><col style="width:16%"/><col style="width:34%"/></colgroup>'
+      : totalCols === 3
+      ? '<colgroup><col style="width:27.2%"/><col style="width:33%"/><col style="width:39.8%"/></colgroup>'
+      : '<colgroup><col style="width:27.2%"/><col style="width:72.8%"/></colgroup>';
+
+  const trs: string[] = [];
+  for (let i = 0; i < doc.rows.length; i++) {
+    const r = doc.rows[i];
+    if (r.kind === 'notice') {
+      const noticeHtml = (r.value || '')
+        .split('\n')
+        .map((line) => {
+          const t = line.trim();
+          if (t.startsWith('★') && t.endsWith('★')) return `<div class="star">${escapeHtml(t)}</div>`;
+          if (t === '说明：' || t === '说明:') return `<div class="notice-hd">${escapeHtml(t)}</div>`;
+          return `<div>${escapeHtml(line)}</div>`;
+        })
+        .join('');
+      trs.push(`<tr><td colspan="${totalCols}" class="notice">${noticeHtml}</td></tr>`);
+    } else if (r.kind === 'section') {
+      const lines = (r.value || '').split('\n').filter((x) => x.trim());
+      const secHtml = lines
+        .map((l, idx) =>
+          idx === 0 ? `<div class="sec-main">${escapeHtml(l)}</div>` : `<div class="sec-sub">${escapeHtml(l)}</div>`
+        )
+        .join('');
+      trs.push(`<tr><td colspan="${totalCols}" class="sec">${secHtml}</td></tr>`);
+    } else if (r.kind === 'guide' || r.kind === 'full_input') {
+      trs.push(
+        `<tr><td colspan="${totalCols}" class="${r.kind === 'guide' ? 'guide' : 'val'}">${escapeHtml(r.value || '').replace(/\n/g, '<br/>')}</td></tr>`
+      );
+    } else if (r.kind === 'grid' && r.cells && r.cells.length === 4) {
+      trs.push(
+        `<tr>` +
+          `<td colspan="${fourSpans[0]}" class="lbl">${escapeHtml(r.cells[0])}</td>` +
+          `<td colspan="${fourSpans[1]}" class="val">${escapeHtml(r.cells[1]).replace(/\n/g, '<br/>')}</td>` +
+          `<td colspan="${fourSpans[2]}" class="lbl">${escapeHtml(r.cells[2])}</td>` +
+          `<td colspan="${fourSpans[3]}" class="val">${escapeHtml(r.cells[3]).replace(/\n/g, '<br/>')}</td>` +
+          `</tr>`
+      );
+    } else if (r.kind === 'grid' && r.cells && r.cells.length === 3) {
+      let rowSpan = 1;
+      if (!r.vMergeContinue) {
+        let j = i + 1;
+        while (j < doc.rows.length && doc.rows[j].vMergeContinue) {
+          rowSpan++;
+          j++;
+        }
+      }
+      const col0 = r.vMergeContinue
+        ? ''
+        : `<td colspan="${threeSpans[0]}"${rowSpan > 1 ? ` rowspan="${rowSpan}"` : ''} class="lbl">${escapeHtml(r.cells[0]).replace(/\n/g, '<br/>')}</td>`;
+      trs.push(
+        `<tr>${col0}` +
+          `<td colspan="${threeSpans[1]}" class="val">${escapeHtml(r.cells[1]).replace(/\n/g, '<br/>')}</td>` +
+          `<td colspan="${threeSpans[2]}" class="val">${escapeHtml(r.cells[2]).replace(/\n/g, '<br/>')}</td>` +
+          `</tr>`
+      );
+    } else {
+      trs.push(
+        `<tr>` +
+          `<td colspan="${twoSpans[0]}" class="lbl">${escapeHtml(r.label || '').replace(/\n/g, '<br/>')}</td>` +
+          `<td colspan="${twoSpans[1]}" class="val">${escapeHtml(r.value || '').replace(/\n/g, '<br/>')}</td>` +
+          `</tr>`
+      );
+    }
+  }
+
+  const attachmentsHtml = (doc.attachments || [])
+    .map((att) => {
+      const cols = Math.max(1, att.columns.length);
+      const ths = att.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join('');
+      const body = att.rows
+        .map((row) => {
+          if (row.length === 1 && cols > 1) {
+            return `<tr><td colspan="${cols}" class="att-grp">${escapeHtml(row[0])}</td></tr>`;
+          }
+          const tds = Array.from({ length: cols }, (_, ci) => `<td>${escapeHtml(row[ci] || '').replace(/\n/g, '<br/>')}</td>`).join('');
+          return `<tr>${tds}</tr>`;
+        })
+        .join('');
+      const footers = att.footerLines.map((fl) => `<div class="sign-line">${escapeHtml(fl)}</div>`).join('');
+      return `
+        <div class="page-break"></div>
+        <div class="att-label">${escapeHtml(att.label)}</div>
+        <div class="att-title">${escapeHtml(att.title)}</div>
+        ${att.subtitle ? `<div class="att-sub">${escapeHtml(att.subtitle)}</div>` : ''}
+        <table class="att-tbl"><thead><tr>${ths}</tr></thead><tbody>${body}</tbody></table>
+        <div class="sign">${footers}</div>
+      `;
+    })
+    .join('');
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>${escapeHtml(doc.displayName)}</title>
+<style>
+  @page { size: A4; margin: 20mm 20mm 20mm 24mm; }
+  body { font-family: "FangSong", "STFangsong", "仿宋", "SimSun", "Songti SC", serif; color: #000; margin: 0; padding: 20px; background: #fff; font-size: 14px; line-height: 1.65; }
+  h1 { text-align: center; font-family: "SimSun", "Songti SC", serif; font-size: 28px; font-weight: 700; margin: 0 0 6px; letter-spacing: 3px; }
+  .sub { text-align: center; font-family: "SimSun", "Songti SC", serif; font-size: 19px; font-weight: 700; margin: 0 0 14px; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  td, th { border: 1px solid #000; padding: 6px 8px; vertical-align: middle; word-break: break-word; }
+  td.notice { font-size: 13px; line-height: 1.6; vertical-align: top; }
+  .notice-hd { font-family: "SimSun", "Songti SC", serif; font-weight: 700; margin-bottom: 2px; }
+  .star { text-align: center; font-family: "SimSun", "Songti SC", serif; font-weight: 700; margin: 6px 0 3px; }
+  td.sec { text-align: center; padding: 7px 8px; }
+  .sec-main { font-family: "SimSun", "Songti SC", serif; font-weight: 700; font-size: 15px; }
+  .sec-sub { font-size: 12.5px; margin-top: 2px; }
+  td.guide { min-height: 46px; vertical-align: top; }
+  td.lbl { text-align: center; font-family: "SimSun", "Songti SC", serif; }
+  td.val { text-align: left; }
+  .sign { margin-top: 24px; text-align: right; font-family: "SimSun", "Songti SC", serif; font-size: 15px; line-height: 2; }
+  .page-break { page-break-before: always; margin-top: 32px; }
+  .att-label { font-family: "SimHei", "Heiti SC", sans-serif; font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+  .att-title { text-align: center; font-family: "SimSun", "Songti SC", serif; font-weight: 700; font-size: 19px; margin-bottom: 8px; }
+  .att-sub { text-align: center; font-size: 13px; margin-bottom: 8px; }
+  table.att-tbl th { font-family: "SimSun", "Songti SC", serif; font-weight: 700; text-align: center; font-size: 13px; }
+  table.att-tbl td { font-size: 13px; }
+  td.att-grp { font-family: "SimSun", "Songti SC", serif; font-weight: 700; }
+  .no-print { text-align: right; margin-bottom: 12px; }
+  .no-print button { padding: 7px 16px; background: #0E223D; color: #fff; border: 0; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  @media print { body { padding: 0; } .no-print { display: none; } }
+</style>
+</head>
+<body>
+  <div class="no-print"><button onclick="window.print()">打印 / 另存为 PDF</button></div>
+  <h1>${escapeHtml(doc.docTitle)}</h1>
+  ${doc.docSubtitle ? `<div class="sub">${escapeHtml(doc.docSubtitle)}</div>` : ''}
+  <table>${colgroupHtml}<tbody>${trs.join('')}</tbody></table>
+  <div class="sign">
+    <div>${escapeHtml(doc.signerLine)}${escapeHtml(doc.signerName) || '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'}</div>
+    <div>${escapeHtml(doc.dateLine)}${escapeHtml(doc.signDate) || '&nbsp;&nbsp;&nbsp;&nbsp;年&nbsp;&nbsp;&nbsp;&nbsp;月&nbsp;&nbsp;&nbsp;&nbsp;日'}</div>
+  </div>
+  ${doc.footnotes?.length ? `<div style="margin-top:16px;font-size:12.5px;line-height:1.6;">${doc.footnotes.map((f) => `<div>${escapeHtml(f)}</div>`).join('')}</div>` : ''}
+  ${attachmentsHtml}
+</body>
+</html>`;
 }
+
+// Inline Party Quick-Fill Mini-Panel
+const PartyQuickFillPanel: React.FC<{
+  roleTag: SpcRoleTag;
+  templateText: string;
+  onApply: (filledText: string) => void;
+}> = ({ roleTag, templateText, onApply }) => {
+  const [data, setData] = useState<PartyQuickFillData>(createEmptyPartyQuickFill);
+  const isAgent = roleTag === 'agent';
+  const isPerson = roleTag === 'plaintiff_person' || roleTag === 'defendant_person' || roleTag === 'third_person';
+  const hasBankFields = templateText.includes('银行账号');
+
+  const patch = (p: Partial<PartyQuickFillData>) => setData((prev) => ({ ...prev, ...p }));
+
+  return (
+    <div className="rounded-lg border border-[#D1B27A]/60 bg-[#FBF8F1] p-3 space-y-2.5 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-bold text-[#0E223D] inline-flex items-center gap-1">
+          <Wand2 className="h-3.5 w-3.5 text-[#B89254]" />
+          快速结构化填入（自动按最高法官方原表行距与勾选项填好）
+        </span>
+      </div>
+
+      {isAgent ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div className="sm:col-span-2 flex gap-2">
+            {[
+              { v: true, label: '有委托诉讼代理人' },
+              { v: false, label: '无委托诉讼代理人' },
+            ].map((opt) => (
+              <button
+                key={String(opt.v)}
+                type="button"
+                onClick={() => patch({ agentHas: opt.v })}
+                className={`rounded border px-2.5 py-1 font-semibold ${
+                  data.agentHas === opt.v
+                    ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                    : 'border-[#D8D1C3] bg-white text-slate-600'
+                }`}
+              >
+                {data.agentHas === opt.v ? '☑ ' : '☐ '}
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {data.agentHas && (
+            <>
+              <input
+                type="text"
+                value={data.name}
+                onChange={(e) => patch({ name: e.target.value })}
+                placeholder="代理律师姓名"
+                className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+              />
+              <input
+                type="text"
+                value={data.workUnit}
+                onChange={(e) => patch({ workUnit: e.target.value })}
+                placeholder="律师事务所名称"
+                className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+              />
+              <input
+                type="text"
+                value={data.jobTitle}
+                onChange={(e) => patch({ jobTitle: e.target.value })}
+                placeholder="职务（如：律师）"
+                className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+              />
+              <input
+                type="text"
+                value={data.phone}
+                onChange={(e) => patch({ phone: e.target.value })}
+                placeholder="联系电话"
+                className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+              />
+              <div className="sm:col-span-2 flex gap-2">
+                {(['特别授权', '一般授权'] as const).map((a) => (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => patch({ agentAuthority: a })}
+                    className={`rounded border px-2.5 py-1 font-semibold ${
+                      data.agentAuthority === a
+                        ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                        : 'border-[#D8D1C3] bg-white text-slate-600'
+                    }`}
+                  >
+                    {data.agentAuthority === a ? '☑ ' : '☐ '}
+                    {a}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      ) : isPerson ? (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <input
+            type="text"
+            value={data.name}
+            onChange={(e) => patch({ name: e.target.value })}
+            placeholder="姓名 *"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <div className="flex gap-1.5 items-center">
+            {(['男', '女'] as const).map((g) => (
+              <button
+                key={g}
+                type="button"
+                onClick={() => patch({ gender: g })}
+                className={`flex-1 rounded border py-1.5 font-semibold ${
+                  data.gender === g
+                    ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                    : 'border-[#D8D1C3] bg-white text-slate-600'
+                }`}
+              >
+                {data.gender === g ? '☑ ' : '☐ '}
+                {g}
+              </button>
+            ))}
+          </div>
+          <input
+            type="text"
+            value={data.birthDate}
+            onChange={(e) => patch({ birthDate: e.target.value })}
+            placeholder="出生日期（如 1988-05-12）"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.ethnicity}
+            onChange={(e) => patch({ ethnicity: e.target.value })}
+            placeholder="民族（如：汉族）"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.workUnit}
+            onChange={(e) => patch({ workUnit: e.target.value })}
+            placeholder="工作单位"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.phone}
+            onChange={(e) => patch({ phone: e.target.value })}
+            placeholder="联系电话"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.domicile}
+            onChange={(e) => patch({ domicile: e.target.value })}
+            placeholder="住所地（户籍所在地）"
+            className="sm:col-span-2 rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.residence}
+            onChange={(e) => patch({ residence: e.target.value })}
+            placeholder="经常居住地"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.idType}
+            onChange={(e) => patch({ idType: e.target.value })}
+            placeholder="证件类型（居民身份证）"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.idNumber}
+            onChange={(e) => patch({ idNumber: e.target.value })}
+            placeholder="公民身份号码 / 证件号码"
+            className="sm:col-span-2 rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5 font-mono"
+          />
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <input
+            type="text"
+            value={data.name}
+            onChange={(e) => patch({ name: e.target.value })}
+            placeholder="法人 / 组织全称 *"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.creditCode}
+            onChange={(e) => patch({ creditCode: e.target.value })}
+            placeholder="统一社会信用代码（18位）"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5 font-mono"
+          />
+          <input
+            type="text"
+            value={data.domicile}
+            onChange={(e) => patch({ domicile: e.target.value })}
+            placeholder="住所地（主要办事机构所在地）"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.regAddress}
+            onChange={(e) => patch({ regAddress: e.target.value })}
+            placeholder="注册地 / 登记地（留空可同住所地）"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <input
+            type="text"
+            value={data.legalRep}
+            onChange={(e) => patch({ legalRep: e.target.value })}
+            placeholder="法定代表人 / 负责人姓名"
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          />
+          <div className="grid grid-cols-2 gap-1.5">
+            <input
+              type="text"
+              value={data.repTitle}
+              onChange={(e) => patch({ repTitle: e.target.value })}
+              placeholder="职务（法定代表人）"
+              className="rounded border border-[#D8D1C3] bg-white px-2 py-1.5"
+            />
+            <input
+              type="text"
+              value={data.phone}
+              onChange={(e) => patch({ phone: e.target.value })}
+              placeholder="联系电话"
+              className="rounded border border-[#D8D1C3] bg-white px-2 py-1.5"
+            />
+          </div>
+          {hasBankFields && (
+            <>
+              <input
+                type="text"
+                value={data.bankAccount || ''}
+                onChange={(e) => patch({ bankAccount: e.target.value })}
+                placeholder="收款银行账号（执行案款）"
+                className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5 font-mono"
+              />
+              <input
+                type="text"
+                value={data.bankName || ''}
+                onChange={(e) => patch({ bankName: e.target.value })}
+                placeholder="开户行名称"
+                className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+              />
+            </>
+          )}
+          <select
+            value={data.orgType}
+            onChange={(e) => patch({ orgType: e.target.value })}
+            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+          >
+            {ORG_TYPE_OPTIONS.map((ot) => (
+              <option key={ot} value={ot}>
+                组织类型：{ot}
+              </option>
+            ))}
+          </select>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-semibold text-slate-600">所有制：</span>
+            {(['民营', '国有', '其他'] as const).map((nat) => (
+              <button
+                key={nat}
+                type="button"
+                onClick={() => patch({ ownershipNature: nat })}
+                className={`rounded border px-2 py-1 text-[11px] font-semibold ${
+                  data.ownershipNature === nat
+                    ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                    : 'border-[#D8D1C3] bg-white text-slate-600'
+                }`}
+              >
+                {nat}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => onApply(applyPartyQuickFillToCellText(templateText, roleTag, data))}
+          className="inline-flex items-center gap-1.5 rounded-md bg-[#0E223D] hover:bg-[#163257] px-3 py-1.5 text-xs font-bold text-white"
+        >
+          <CheckCircle2 className="h-3.5 w-3.5 text-[#D1B27A]" /> 写入当前官方表格栏
+        </button>
+      </div>
+    </div>
+  );
+};
 
 export const ElementsComplaintTool: React.FC = () => {
   const {
@@ -237,9 +622,16 @@ export const ElementsComplaintTool: React.FC = () => {
     showToast,
   } = useToolbox();
 
-  const [draft, setDraft] = useState<ComplaintDraftState>(loadSavedDraft);
-  const [activeMode, setActiveMode] = useState<'ai' | 'form' | 'preview'>('ai');
-  const [catFilter, setCatFilter] = useState<'全部' | ComplaintTemplateCategory>('全部');
+  const [corpus, setCorpus] = useState<SpcTemplateCorpus | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [draft, setDraft] = useState<OfficialSpcDraftState | null>(null);
+
+  const [activeMode, setActiveMode] = useState<'ai' | 'form' | 'preview'>('form');
+  const [domainFilter, setDomainFilter] = useState<'popular' | SpcDomainId>('popular');
+  const [roleFilter, setRoleFilter] = useState<'all' | SpcDocRole>('all');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [showNoticeBox, setShowNoticeBox] = useState(false);
+  const [openQuickFillRowId, setOpenQuickFillRowId] = useState<string | null>(null);
 
   // AI Convert state
   const [sourceText, setSourceText] = useState('');
@@ -254,20 +646,108 @@ export const ElementsComplaintTool: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
 
-  const tpl: ComplaintTemplateDef = useMemo(
-    () =>
-      ELEMENTS_COMPLAINT_TEMPLATES.find((t) => t.id === draft.templateId) ||
-      ELEMENTS_COMPLAINT_TEMPLATES[0],
-    [draft.templateId]
-  );
+  // Load official 113-template corpus offline-first
+  useEffect(() => {
+    let alive = true;
+    loadOfficialSpcCorpus()
+      .then((data) => {
+        if (!alive) return;
+        setCorpus(data);
+        setDraft(loadSavedSpcDraft(data));
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setLoadError(err instanceof Error ? err.message : '加载最高法官方示范文本库失败');
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
-  const filteredTemplates = useMemo(
-    () =>
-      catFilter === '全部'
-        ? ELEMENTS_COMPLAINT_TEMPLATES
-        : ELEMENTS_COMPLAINT_TEMPLATES.filter((t) => t.category === catFilter),
-    [catFilter]
-  );
+  // Auto-persist local draft
+  useEffect(() => {
+    if (!draft) return;
+    try {
+      localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    } catch {
+      // ignore quota error
+    }
+  }, [draft]);
+
+  const tpl: OfficialSpcTemplate | null = useMemo(() => {
+    if (!corpus || !draft) return null;
+    return corpus.templates.find((t) => t.id === draft.templateId) || corpus.templates[0] || null;
+  }, [corpus, draft]);
+
+  const domainCounts = useMemo(() => {
+    const map: Record<string, number> = { popular: POPULAR_TEMPLATE_NAMES.length };
+    if (!corpus) return map;
+    for (const t of corpus.templates) {
+      map[t.domainId] = (map[t.domainId] || 0) + 1;
+    }
+    return map;
+  }, [corpus]);
+
+  const filteredTemplates = useMemo(() => {
+    if (!corpus) return [];
+    const q = searchQuery.trim().toLowerCase();
+    let list = corpus.templates;
+    if (q) {
+      list = list.filter(
+        (t) =>
+          t.displayName.toLowerCase().includes(q) ||
+          t.causeName.toLowerCase().includes(q) ||
+          t.domainName.toLowerCase().includes(q) ||
+          t.docTitle.toLowerCase().includes(q)
+      );
+    } else if (domainFilter === 'popular') {
+      list = POPULAR_TEMPLATE_NAMES.map((name) =>
+        corpus.templates.find((t) => t.displayName === name)
+      ).filter((x): x is OfficialSpcTemplate => Boolean(x));
+    } else {
+      list = list.filter((t) => t.domainId === domainFilter);
+    }
+    if (roleFilter !== 'all') {
+      list = list.filter((t) => t.docRole === roleFilter);
+    }
+    return list;
+  }, [corpus, domainFilter, roleFilter, searchQuery]);
+
+  const resolvedDoc = useMemo(() => {
+    if (!tpl || !draft) return null;
+    return buildResolvedSpcDocument(tpl, draft);
+  }, [tpl, draft]);
+
+  // Group official rows under their verbatim official section headings for structured Form editing
+  const groupedSections = useMemo(() => {
+    if (!tpl) return { noticeRow: null as OfficialSpcRow | null, groups: [] as { title: string; subtitle?: string; rows: OfficialSpcRow[] }[] };
+    let noticeRow: OfficialSpcRow | null = null;
+    const groups: { title: string; subtitle?: string; rows: OfficialSpcRow[] }[] = [];
+    let currentGroup: { title: string; subtitle?: string; rows: OfficialSpcRow[] } | null = null;
+
+    for (const r of tpl.rows) {
+      if (r.kind === 'notice') {
+        noticeRow = r;
+        continue;
+      }
+      if (r.kind === 'section') {
+        const lines = (r.templateText || '').split('\n').filter((x) => x.trim());
+        currentGroup = {
+          title: lines[0] || '要素内容',
+          subtitle: lines.slice(1).join(' '),
+          rows: [],
+        };
+        groups.push(currentGroup);
+        continue;
+      }
+      if (!currentGroup) {
+        currentGroup = { title: '基本案件信息', rows: [] };
+        groups.push(currentGroup);
+      }
+      currentGroup.rows.push(r);
+    }
+    return { noticeRow, groups };
+  }, [tpl]);
 
   const activeProvider =
     byok.providers.find((p) => p.id === byok.activeProviderId) || byok.providers[0];
@@ -276,46 +756,46 @@ export const ElementsComplaintTool: React.FC = () => {
     byok.pinEnabled && activeProvider?.apiKeyEncrypted && !sessionUnlockedPin
   );
 
-  // Persist local draft automatically
-  useEffect(() => {
-    try {
-      localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
-    } catch {
-      // ignore quota error
-    }
-  }, [draft]);
+  const handleSelectTemplate = (nextTpl: OfficialSpcTemplate) => {
+    if (tpl && nextTpl.id === tpl.id) return;
+    setDraft(createInitialSpcDraft(nextTpl));
+    setOpenQuickFillRowId(null);
+    showToast(`已切换最高法官方模板：${nextTpl.displayName}`);
+  };
 
-  const sections = useMemo(() => buildComplaintSections(tpl, draft), [tpl, draft]);
-  const causeTitle = useMemo(() => getResolvedCauseTitle(tpl, draft), [tpl, draft]);
-  const docTitle = tpl.docTitle || '民事起诉状';
-  const [plaintiffRoleLabel, defendantRoleLabel] = tpl.partyRoleLabels || ['原告', '被告'];
-  const signerLabel = tpl.signerLabel || '具状人（签字、盖章）';
+  const updateRowValue = (rowId: string, nextVal: string) => {
+    setDraft((prev) =>
+      prev ? { ...prev, rowValues: { ...prev.rowValues, [rowId]: nextVal } } : prev
+    );
+  };
 
-  const handleSelectTemplate = (nextId: string) => {
-    if (nextId === draft.templateId) return;
-    const nextTpl =
-      ELEMENTS_COMPLAINT_TEMPLATES.find((t) => t.id === nextId) ||
-      ELEMENTS_COMPLAINT_TEMPLATES[0];
-    const nextClaimChoices: Record<string, string> = {};
-    for (const f of nextTpl.claimFields) {
-      if (f.defaultOption) nextClaimChoices[f.key] = f.defaultOption;
-    }
-    const nextFactChoices: Record<string, string> = {};
-    for (const f of nextTpl.factFields) {
-      if (f.defaultOption) nextFactChoices[f.key] = f.defaultOption;
-    }
-    setDraft((prev) => ({
-      ...prev,
-      templateId: nextTpl.id,
-      claims: {
-        litigation_cost: prev.claims.litigation_cost || '本案案件受理费、保全费由被告承担。',
-        legal_basis: nextTpl.defaultLegalBasis,
-      },
-      claimChoices: nextClaimChoices,
-      facts: {},
-      factChoices: nextFactChoices,
-    }));
-    showToast(`已切换示范文本：${nextTpl.title}（原被告信息已保留）`);
+  const updateGridCell = (rowId: string, colIdx: number, nextVal: string, fallbackCells: string[]) => {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const cur = prev.gridValues[rowId] ? [...prev.gridValues[rowId]] : [...fallbackCells];
+      cur[colIdx] = nextVal;
+      return { ...prev, gridValues: { ...prev.gridValues, [rowId]: cur } };
+    });
+  };
+
+  const handleDuplicatePartyRow = (sourceRow: OfficialSpcRow) => {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const count = prev.extraRows.filter((e) => e.sourceRowId === sourceRow.id).length;
+      return {
+        ...prev,
+        extraRows: [
+          ...prev.extraRows,
+          {
+            uid: `extra_${sourceRow.id}_${Date.now()}`,
+            sourceRowId: sourceRow.id,
+            label: `${sourceRow.label || ''}`.replace(/^(原告|被告|第三人|答辩人|自诉人|申请执行人|被执行人|申请人|被申请人|委托诉讼代理人)/, `$1${count + 2}`),
+            value: sourceRow.templateText || '',
+          },
+        ],
+      };
+    });
+    showToast(`已按《说明》第 4 条复制新增一栏「${(sourceRow.label || '').replace(/\n/g, '')}」`);
   };
 
   const handleUploadDoc = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -340,10 +820,9 @@ export const ElementsComplaintTool: React.FC = () => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
     const remain = Math.max(0, 6 - sourceImages.length);
-    const slice = files.slice(0, remain);
     try {
       const added: AiImageAttachment[] = [];
-      for (const f of slice) {
+      for (const f of files.slice(0, remain)) {
         added.push(await compressImageFileToAttachment(f));
       }
       setSourceImages((prev) => [...prev, ...added]);
@@ -355,18 +834,19 @@ export const ElementsComplaintTool: React.FC = () => {
     }
   };
 
-  const handleAiExtractToForm = async () => {
+  const handleAiExtractToOfficialForm = async () => {
+    if (!tpl || !draft) return;
     setExtractError('');
     if (!sourceText.trim() && sourceImages.length === 0) {
-      setExtractError('请先上传传统起诉状（.docx/.txt）、粘贴案情正文或上传起诉状/合同截图。');
+      setExtractError('请先上传传统起诉状/答辩状（.docx/.txt）、粘贴案情正文或上传截图。');
       return;
     }
     if (!isOnline) {
-      setExtractError('当前处于断网离线模式，AI 提取需要联网；您可以直接切到「离线填表编辑」手动填写并导出 Word。');
+      setExtractError('当前处于离线模式，AI 提取需要联网；您可以直接切到「官方原表逐项编辑」免费离线填表导出 Word。');
       return;
     }
     if (!activeProvider || !hasApiKey) {
-      setExtractError('尚未配置个人大模型 API Key。请点击下方按钮前往「我的配置」2 分钟绑定，或先用「离线填表编辑」。');
+      setExtractError('尚未配置个人大模型 API Key。请前往「我的配置」2 分钟绑定，或先使用「官方原表逐项编辑」。');
       return;
     }
 
@@ -388,13 +868,13 @@ export const ElementsComplaintTool: React.FC = () => {
 
     if (sourceImages.length > 0 && !resolveVisionModel(activeProvider)) {
       setExtractError(
-        `当前大模型「${activeProvider.name}」暂不支持图片识别。请在「我的配置」切换为阿里云百炼 / 硅基流动 / 智谱等支持识图的模型，或直接粘贴/导入 .docx 文本。`
+        `当前大模型「${activeProvider.name}」暂不支持图片识别。请在「我的配置」切换视觉模型，或导入 .docx/.txt 文本。`
       );
       return;
     }
 
     setExtracting(true);
-    setExtractLog('正在通过您个人配置的大模型提取起诉状核心要素…');
+    setExtractLog(`正在按最高法官方《${tpl.displayName}》逐行提取要素…`);
 
     let mappings: RedactionMapping[] = [];
     let promptMaterial = sourceText.trim();
@@ -404,60 +884,42 @@ export const ElementsComplaintTool: React.FC = () => {
       mappings = res.mappings;
     }
 
-    const claimSchemaHints = tpl.claimFields
-      .map((f) =>
-        f.options
-          ? `  "${f.key}": "${f.label}（如有选项从 ${f.options.join('/')} 选填，附具体说明）"`
-          : `  "${f.key}": "${f.label}"`
-      )
-      .join(',\n');
+    // Build exact official row specification so the LLM fills strictly inside official SPC slots
+    const editableRowSpecs = tpl.rows
+      .filter((r) => r.kind === 'field' || r.kind === 'full_input' || r.kind === 'grid')
+      .map((r) => {
+        if (r.kind === 'grid' && r.cells) {
+          return { id: r.id, kind: 'grid', cells: r.cells };
+        }
+        return {
+          id: r.id,
+          kind: r.kind,
+          label: (r.label || '').replace(/\n/g, ''),
+          officialTemplate: r.templateText || '',
+        };
+      });
 
-    const factSchemaHints = tpl.factFields
-      .map((f) =>
-        f.options
-          ? `  "${f.key}": "${f.label}（如有选项从 ${f.options.join('/')} 选填，附具体说明）"`
-          : `  "${f.key}": "${f.label}"`
-      )
-      .join(',\n');
-
-    const systemPrompt = `你是中国资深诉讼律师助手，专责将律师提供的传统民事起诉状、案情摘要或合同/证据材料，精准解析为最高人民法院《民事起诉状（${causeTitle}）示范文本》的严格结构化 JSON。
-铁律：
-1. 严禁编造任何原文中未出现的姓名、公司名、统一社会信用代码、身份证号、金额、日期或合同编号；原文未提及的字段一律填 ""（空字符串）。
-2. 若材料中存在脱敏占位符（如 [公司主体A]、[当事人甲]、[身份证号1]），必须一字不差原样保留在 JSON 值中，以便本地自动还原。
-3. 只输出一个合法的 JSON 对象（不要输出任何额外解释文字），结构必须严格匹配以下字段：
+    const systemPrompt = `你是中国资深诉讼律师助手，专责将律师提供的传统诉状、答辩状、裁判文书或案件材料，严格按照最高人民法院《法〔2025〕82号》官方示范文本《${tpl.displayName}》的原始表格结构逐行填充为 JSON。
+铁律（必须严格遵守）：
+1. 必须完整保留每个栏目官方原文中的提示前缀、换行和选项结构（例如“姓名：”“名称：”“截至  年  月  日止…”“男□ 女□”“是□ 否□”），只能在对应空白处填入原文提取的事实，并将命中的“□”改为“☑”，未命中的保持“□”！
+2. 严禁编造任何材料中未出现的姓名、公司名、统一社会信用代码、身份证号、金额、日期、案号或合同条款；材料未涉及的栏目直接省略（不要放进 rowValues）或保持原空白模板不动。
+3. 若材料中存在脱敏占位符（如 [公司主体A]、[当事人甲]、[身份证号1]），必须原样保留在输出值中，以便本机自动还原。
+4. 只输出一个合法 JSON 对象，格式如下：
 {
-  "courtName": "受诉人民法院名称（如未写填空）",
-  "customCause": "具体案由名称（通用版使用）",
-  "plaintiffs": [
-    {
-      "kind": "org 或 person",
-      "name": "", "gender": "", "birthDate": "", "ethnicity": "",
-      "workUnit": "", "jobTitle": "", "domicile": "", "residence": "",
-      "idNumber": "", "regAddress": "", "legalRep": "", "repTitle": "",
-      "creditCode": "", "orgType": "", "phone": ""
-    }
-  ],
-  "defendants": [ 同上结构 ],
-  "hasJurisdictionAgreement": "有 或 无",
-  "jurisdictionDetail": "",
-  "hasPrePreservation": "是 或 否",
-  "prePreservationDetail": "",
-  "applyPreservation": "是 或 否",
-  "preservationDetail": "",
-  "claims": {
-${claimSchemaHints}
+  "rowValues": {
+    "行id（如 r03）": "保留官方原行文字并填好内容、勾选☑后的完整单元格文本"
   },
-  "claimChoices": { "仅针对带选项的诉请字段 key 填入匹配的选项原文" },
-  "facts": {
-${factSchemaHints}
-  },
-  "factChoices": { "仅针对带选项的事实字段 key 填入匹配的选项原文" },
-  "evidenceSummary": "根据材料归纳的主要证据清单要点"
-}`;
+  "gridValues": {
+    "仅多列行id（如 r01 案号/案由）": ["案号", "具体案号", "案由", "具体案由"]
+  }
+}
+
+以下是当前最高法官方示范文本《${tpl.displayName}》的逐行原始结构（仅需在 rowValues/gridValues 中返回有提取内容的栏目）：
+${JSON.stringify(editableRowSpecs)}`;
 
     const userContent = promptMaterial
-      ? `请将以下传统起诉状/案件材料提取为「${causeTitle}」要素式起诉状 JSON：\n\n${promptMaterial}`
-      : `请识别所附起诉状/合同图片内容，提取为「${causeTitle}」要素式起诉状 JSON。`;
+      ? `请严格对照最高法官方《${tpl.displayName}》逐行结构，提取以下材料并输出 JSON：\n\n${promptMaterial}`
+      : `请识别所附材料图片，严格对照最高法官方《${tpl.displayName}》逐行结构提取并输出 JSON。`;
 
     let fullReply = '';
     try {
@@ -475,102 +937,52 @@ ${factSchemaHints}
         ],
         onChunk: (delta) => {
           fullReply += delta;
-          setExtractLog(`正在解析要素字段…（已接收 ${fullReply.length} 字）`);
+          setExtractLog(`正在按最高法官方表逐项填充…（已接收 ${fullReply.length} 字）`);
         },
       });
 
       const parsed = extractFirstJsonObject(fullReply);
       if (!parsed) {
-        throw new Error('模型未能返回标准 JSON 结构，请重试或改选更稳定的推理模型。');
+        throw new Error('模型未能返回标准 JSON 结构，请重试或改选推理能力更强的模型。');
       }
 
       const restored = restoreDeepStrings(parsed, mappings);
+      let updatedCount = 0;
 
       setDraft((prev) => {
-        const next = { ...prev };
-        if (typeof restored.courtName === 'string' && restored.courtName.trim()) {
-          next.courtName = restored.courtName.trim();
-        }
-        if (
-          tpl.id === 'general_civil' &&
-          typeof restored.customCause === 'string' &&
-          restored.customCause.trim()
-        ) {
-          next.customCause = restored.customCause.trim();
-        }
-        const extractedPlaintiffs = normalizePartyArray(restored.plaintiffs);
-        if (extractedPlaintiffs.length > 0) {
-          next.plaintiffs = extractedPlaintiffs.map((p, idx) =>
-            mergeExtractedParty(p, prev.plaintiffs[idx] || createEmptyParty('org'))
-          );
-        }
-        const extractedDefendants = normalizePartyArray(restored.defendants);
-        if (extractedDefendants.length > 0) {
-          next.defendants = extractedDefendants.map((d, idx) =>
-            mergeExtractedParty(d, prev.defendants[idx] || createEmptyParty('org'))
-          );
-        }
-        if (restored.hasJurisdictionAgreement === '有' || restored.hasJurisdictionAgreement === '无') {
-          next.hasJurisdictionAgreement = restored.hasJurisdictionAgreement;
-        }
-        if (typeof restored.jurisdictionDetail === 'string' && restored.jurisdictionDetail.trim()) {
-          next.jurisdictionDetail = restored.jurisdictionDetail.trim();
-          if (next.hasJurisdictionAgreement === '无') next.hasJurisdictionAgreement = '有';
-        }
-        if (restored.hasPrePreservation === '是' || restored.hasPrePreservation === '否') {
-          next.hasPrePreservation = restored.hasPrePreservation;
-        }
-        if (typeof restored.prePreservationDetail === 'string' && restored.prePreservationDetail.trim()) {
-          next.prePreservationDetail = restored.prePreservationDetail.trim();
-          if (next.hasPrePreservation === '否') next.hasPrePreservation = '是';
-        }
-        if (restored.applyPreservation === '是' || restored.applyPreservation === '否') {
-          next.applyPreservation = restored.applyPreservation;
-        }
-        if (typeof restored.preservationDetail === 'string' && restored.preservationDetail.trim()) {
-          next.preservationDetail = restored.preservationDetail.trim();
-          if (next.applyPreservation === '否') next.applyPreservation = '是';
-        }
-        if (restored.claims && typeof restored.claims === 'object') {
-          const nextClaims = { ...prev.claims };
-          for (const [k, v] of Object.entries(restored.claims as Record<string, unknown>)) {
-            if (typeof v === 'string' && v.trim()) nextClaims[k] = v.trim();
-          }
-          next.claims = nextClaims;
-        }
-        const rawClaimChoices = { ...prev.claimChoices };
-        if (restored.claimChoices && typeof restored.claimChoices === 'object') {
-          for (const [k, v] of Object.entries(restored.claimChoices as Record<string, unknown>)) {
-            if (typeof v === 'string' && v.trim()) rawClaimChoices[k] = v.trim();
-          }
-        }
-        next.claimChoices = reconcileFieldChoices(tpl.claimFields, next.claims, rawClaimChoices);
+        if (!prev) return prev;
+        const nextRowValues = { ...prev.rowValues };
+        const nextGridValues = { ...prev.gridValues };
+        const validIds = new Set(tpl.rows.map((r) => r.id));
 
-        if (restored.facts && typeof restored.facts === 'object') {
-          const nextFacts = { ...prev.facts };
-          for (const [k, v] of Object.entries(restored.facts as Record<string, unknown>)) {
-            if (typeof v === 'string' && v.trim()) nextFacts[k] = v.trim();
-          }
-          next.facts = nextFacts;
-        }
-        const rawFactChoices = { ...prev.factChoices };
-        if (restored.factChoices && typeof restored.factChoices === 'object') {
-          for (const [k, v] of Object.entries(restored.factChoices as Record<string, unknown>)) {
-            if (typeof v === 'string' && v.trim()) rawFactChoices[k] = v.trim();
+        if (restored.rowValues && typeof restored.rowValues === 'object') {
+          for (const [k, v] of Object.entries(restored.rowValues as Record<string, unknown>)) {
+            if (validIds.has(k) && typeof v === 'string' && v.trim()) {
+              nextRowValues[k] = v;
+              updatedCount++;
+            }
           }
         }
-        next.factChoices = reconcileFieldChoices(tpl.factFields, next.facts, rawFactChoices);
-        if (typeof restored.evidenceSummary === 'string' && restored.evidenceSummary.trim()) {
-          next.evidenceSummary = restored.evidenceSummary.trim();
+        if (restored.gridValues && typeof restored.gridValues === 'object') {
+          for (const [k, v] of Object.entries(restored.gridValues as Record<string, unknown>)) {
+            if (validIds.has(k) && Array.isArray(v)) {
+              nextGridValues[k] = v.map((cell) => String(cell ?? ''));
+              updatedCount++;
+            }
+          }
         }
-        return next;
+        return {
+          ...prev,
+          rowValues: nextRowValues,
+          gridValues: nextGridValues,
+        };
       });
 
       setActiveMode('form');
       showToast(
         mappings.length > 0
-          ? `提取完成并已本地自动还原 ${mappings.length} 项脱敏实体，请核对细节后导出 Word！`
-          : 'AI 要素提取完成，已自动灌入下方表格，请核对后导出 Word！'
+          ? `已按最高法官方原表填入 ${updatedCount} 项要素，并本地还原 ${mappings.length} 处脱敏实体！`
+          : `已按最高法官方原表精准填入 ${updatedCount} 项要素，请核对后导出 Word！`
       );
     } catch (err) {
       setExtractError(err instanceof Error ? err.message : 'AI 要素提取失败');
@@ -580,80 +992,25 @@ ${factSchemaHints}
     }
   };
 
-  const handleDownloadWord = () => {
-    const pName = (draft.plaintiffs[0]?.name || '').trim().slice(0, 12);
-    const dName = (draft.defendants[0]?.name || '').trim().slice(0, 12);
-    const partyTag = pName && dName ? `_${pName}诉${dName}` : '';
-    const fileName = `${docTitle}（${causeTitle}）${partyTag}.docx`;
-    downloadElementsComplaintDocx(
-      {
-        docTitle,
-        signerLabel,
-        causeTitle,
-        courtName: draft.courtName,
-        sections,
-        signerName: draft.signerName,
-        signDate: draft.signDate,
-      },
-      fileName
+  const handleDownloadWord = (blankMode = false) => {
+    if (!tpl || !draft) return;
+    const doc = buildResolvedSpcDocument(tpl, draft, { blankMode });
+    const suffix = blankMode ? '_最高法官方空白示范文本' : '_已填版';
+    const fileName = `${tpl.displayName}${suffix}.docx`;
+    downloadOfficialSpcDocx(doc, fileName);
+    showToast(
+      blankMode
+        ? `已下载最高法官方空白 Word 模板：${fileName}`
+        : `已按最高法《法〔2025〕82号》官方格式生成 Word：${fileName}`
     );
-    showToast(`已生成法院表格版 Word：${fileName}`);
   };
 
   const handlePrintPdf = () => {
-    const rowsHtml = sections
-      .map((sec) => {
-        const header = `<tr class="sec"><td colspan="2">${escapeHtml(sec.title)}</td></tr>`;
-        const items = sec.rows
-          .map(
-            (r) =>
-              `<tr><td class="lbl">${escapeHtml(r.label)}</td><td class="val">${escapeHtml(r.value).replace(/\n/g, '<br/>')}</td></tr>`
-          )
-          .join('');
-        return header + items;
-      })
-      .join('');
-
-    const htmlDoc = `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8" />
-<title>${escapeHtml(docTitle)}（${escapeHtml(causeTitle)}）</title>
-<style>
-  @page { size: A4; margin: 22mm 20mm; }
-  body { font-family: "FangSong", "STFangsong", "仿宋", "SimSun", serif; color: #000; margin: 0; padding: 20px; background: #fff; font-size: 14px; line-height: 1.7; }
-  h1 { text-align: center; font-family: "SimHei", "Heiti SC", sans-serif; font-size: 24px; margin: 0 0 4px; letter-spacing: 6px; }
-  .sub { text-align: center; font-family: "SimSun", serif; font-size: 16px; font-weight: 700; margin: 0 0 12px; }
-  .note { font-size: 12.5px; margin: 0 0 10px; line-height: 1.6; }
-  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-  td { border: 1px solid #000; padding: 6px 9px; vertical-align: middle; word-break: break-word; }
-  tr.sec td { background: #efefef; text-align: center; font-family: "SimHei", "Heiti SC", sans-serif; font-weight: 700; font-size: 14.5px; }
-  td.lbl { width: 27%; font-family: "SimSun", serif; font-weight: 700; }
-  td.val { width: 73%; }
-  .court { margin-top: 20px; font-size: 15px; }
-  .sign { margin-top: 24px; text-align: right; font-size: 15px; line-height: 2; }
-  .no-print { text-align: right; margin-bottom: 12px; }
-  .no-print button { padding: 7px 16px; background: #0E223D; color: #fff; border: 0; border-radius: 6px; cursor: pointer; font-size: 13px; }
-  @media print { body { padding: 0; } .no-print { display: none; } }
-</style>
-</head>
-<body>
-  <div class="no-print"><button onclick="window.print()">打印 / 另存为 PDF</button></div>
-  <h1>${escapeHtml(docTitle)}</h1>
-  <div class="sub">（${escapeHtml(causeTitle)}）</div>
-  <div class="note">说明：为了方便您参加诉讼，保护您的合法权利，请参照本表如实填写；有“☐”选项的，在对应项打“☑”；本表空间不足的，可另附页说明。</div>
-  <table>${rowsHtml}</table>
-  ${draft.courtName.trim() ? `<div class="court">此致<br/>${escapeHtml(draft.courtName.trim())}</div>` : ''}
-  <div class="sign">
-    ${escapeHtml(signerLabel)}：${escapeHtml(draft.signerName.trim()) || '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;'}<br/>
-    日期：${escapeHtml(draft.signDate || '')}
-  </div>
-</body>
-</html>`;
-
-    const win = window.open('', '_blank', 'width=880,height=960');
+    if (!resolvedDoc) return;
+    const htmlDoc = buildPrintableHtml(resolvedDoc);
+    const win = window.open('', '_blank', 'width=900,height=960');
     if (!win) {
-      showToast('浏览器拦截了打印窗口，请改点「下载 Word (.docx)」导出文件');
+      showToast('浏览器拦截了打印窗口，请改点「导出官方 Word (.docx)」');
       return;
     }
     win.document.open();
@@ -670,278 +1027,284 @@ ${factSchemaHints}
   };
 
   const handleCopyPlainText = async () => {
-    const txt = buildComplaintPlainText(tpl, draft);
-    await copyToClipboard(txt);
-    showToast('已复制要素式起诉状完整纯文本');
+    if (!resolvedDoc) return;
+    await copyToClipboard(buildOfficialSpcPlainText(resolvedDoc));
+    showToast('已复制最高法官方要素表完整纯文本');
   };
 
   const handleSaveHistory = () => {
-    const txt = buildComplaintPlainText(tpl, draft);
-    const summary = `要素式起诉状 · ${causeTitle}${draft.plaintiffs[0]?.name ? ` · ${draft.plaintiffs[0].name}` : ''}`;
-    recordCalculation('elements-complaint', '要素式起诉状', summary, txt);
-  };
-
-  const handleSendToDeAi = () => {
-    const txt = buildComplaintPlainText(tpl, draft);
-    sendToAi(
-      'de-ai-polish',
-      `${docTitle}（${causeTitle}）`,
-      `请帮我核查并润色以下要素式${docTitle}的诉讼请求与事实理由表述（保留全部核心事实、日期、金额与表格项号，使其更精炼专业、符合法院立案标准）：\n\n${txt}`
-    );
+    if (!resolvedDoc || !tpl) return;
+    const txt = buildOfficialSpcPlainText(resolvedDoc);
+    recordCalculation('elements-complaint', '要素式文书（最高法2025）', tpl.displayName, txt);
   };
 
   const handleAiFilingAudit = () => {
-    const txt = buildComplaintPlainText(tpl, draft);
+    if (!resolvedDoc || !tpl) return;
+    const txt = buildOfficialSpcPlainText(resolvedDoc);
     sendToAi(
       'legal-sandbox',
-      `${docTitle} · AI 立案退件预警核验`,
-      `请站在中国法院立案庭审查法官 + 资深诉讼律师的双重视角，对以下拟提交的要素式《${docTitle}（${causeTitle}）》做一次严格的「立案退件预警与实体风险体检」：\n\n重点排查：\n1. 【诉请与事实闭环】诉请金额、起算日期、利率基数与事实理由是否存在矛盾、漏项或不可执行表述；\n2. 【程序前置与时效红线】是否漏填劳动仲裁前置、2024 新《行政复议法》复议前置及 15 日/6 个月起诉期、普通 3 年诉讼时效或 2 年申请执行时效；\n3. 【管辖与适格主体】受诉法院管辖依据是否充分、有无漏列共同被告/连带保证人/复议维持双被告；\n4. 【立案必附证据清单】列出网上立案最容易被补正退件的缺失材料。\n\n以下为待核验诉状全文：\n\n${txt}`
+      `${tpl.displayName} · AI 立案退件预警核验`,
+      `请站在中国法院立案庭审查法官 + 资深诉讼律师的双重视角，对以下按最高人民法院《法〔2025〕82号》官方示范文本填写的《${tpl.displayName}》做一次严格的「立案退件预警与实体风险体检」：\n\n重点排查：\n1. 【诉请/答辩与事实闭环】金额、起算日、利率基数、勾选状态与事实理由是否存在遗漏或矛盾；\n2. 【程序前置与时效红线】劳动仲裁前置、行政复议前置与起诉期、普通 3 年诉讼时效或 2 年申请执行时效；\n3. 【主体与管辖】原被告/第三人适格性、约定管辖条款、担保/连带责任主体是否漏列；\n4. 【勾选与格式规范】是否存在应勾未勾项或自相矛盾的勾选项。\n\n以下为待核验文书全文：\n\n${txt}`
+    );
+  };
+
+  const handleSendToDeAi = () => {
+    if (!resolvedDoc || !tpl) return;
+    const txt = buildOfficialSpcPlainText(resolvedDoc);
+    sendToAi(
+      'de-ai-polish',
+      `${tpl.displayName} · 措辞润色`,
+      `请帮我核查并润色以下最高法官方要素式《${tpl.displayName}》中律师填写的诉请、事实与理由措辞（严格保留官方表格项号、所有 □/☑ 勾选状态与核心事实金额日期，使语言精炼克制、符合中国法院立案与庭审标准）：\n\n${txt}`
     );
   };
 
   const handleResetDraft = () => {
-    const fresh = createInitialComplaintDraft(draft.templateId);
-    setDraft(fresh);
+    if (!tpl) return;
+    setDraft(createInitialSpcDraft(tpl));
     setSourceText('');
     setSourceImages([]);
-    showToast('已清空当前起诉状草稿');
+    setOpenQuickFillRowId(null);
+    showToast(`已重置《${tpl.displayName}》为最高法官方空白初始模板`);
   };
 
-  const updateParty = (
-    listKey: 'plaintiffs' | 'defendants',
-    index: number,
-    patch: Partial<PartyEntity>
-  ) => {
-    setDraft((prev) => {
-      const nextList = prev[listKey].map((item, i) =>
-        i === index ? { ...item, ...patch } : item
-      );
-      return { ...prev, [listKey]: nextList };
-    });
+  const roleBadgeClass = (role: SpcDocRole) => {
+    if (role === 'defense') return 'bg-amber-100 text-amber-900 border-amber-200';
+    if (role === 'application') return 'bg-emerald-100 text-emerald-900 border-emerald-200';
+    if (role === 'statement') return 'bg-sky-100 text-sky-900 border-sky-200';
+    return 'bg-[#F3ECE0] text-[#7A5922] border-[#E0CEAE]';
   };
 
-  const renderPartyEditor = (
-    titleLabel: string,
-    party: PartyEntity,
-    onChange: (patch: Partial<PartyEntity>) => void,
-    onRemove?: () => void
-  ) => (
-    <div className="rounded-lg border border-[#E5DFD3] bg-[#FAF9F6] p-3.5 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="font-display text-xs font-bold text-[#0E223D]">{titleLabel}</span>
-          <div className="inline-flex rounded-md border border-[#D8D1C3] bg-white p-0.5 text-[11px]">
-            <button
-              type="button"
-              onClick={() => onChange({ kind: 'org' })}
-              className={`rounded px-2 py-0.5 font-semibold ${
-                party.kind === 'org' ? 'bg-[#0E223D] text-white' : 'text-slate-600'
-              }`}
-            >
-              公司 / 组织
-            </button>
-            <button
-              type="button"
-              onClick={() => onChange({ kind: 'person' })}
-              className={`rounded px-2 py-0.5 font-semibold ${
-                party.kind === 'person' ? 'bg-[#0E223D] text-white' : 'text-slate-600'
-              }`}
-            >
-              自然人
-            </button>
-          </div>
+  const roleShortTag = (role: SpcDocRole) => {
+    if (role === 'defense') return '答辩状';
+    if (role === 'application') return '申请书';
+    if (role === 'statement') return '意见陈述书';
+    return '起诉状';
+  };
+
+  if (loadError) {
+    return (
+      <div className="py-10 px-4 max-w-3xl mx-auto">
+        <div className="rounded-xl border border-red-200 bg-red-50 p-5 text-sm text-red-900 space-y-2">
+          <div className="font-bold">加载最高法官方示范文本库失败</div>
+          <div className="text-xs">{loadError}</div>
         </div>
-        {onRemove && (
-          <button
-            type="button"
-            onClick={onRemove}
-            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-50"
-          >
-            <Trash2 className="h-3 w-3" /> 移除
-          </button>
-        )}
       </div>
+    );
+  }
 
-      {party.kind === 'org' ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-          <input
-            type="text"
-            value={party.name}
-            onChange={(e) => onChange({ name: e.target.value })}
-            placeholder="公司 / 机构全称 *"
-            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-          <input
-            type="text"
-            value={party.creditCode}
-            onChange={(e) => onChange({ creditCode: e.target.value })}
-            placeholder="统一社会信用代码（18位）"
-            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2 font-mono"
-          />
-          <input
-            type="text"
-            value={party.domicile}
-            onChange={(e) => onChange({ domicile: e.target.value })}
-            placeholder="住所地 / 经营地址"
-            className="sm:col-span-2 rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-          <input
-            type="text"
-            value={party.legalRep}
-            onChange={(e) => onChange({ legalRep: e.target.value })}
-            placeholder="法定代表人 / 负责人姓名"
-            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-          <input
-            type="text"
-            value={party.phone}
-            onChange={(e) => onChange({ phone: e.target.value })}
-            placeholder="联系电话（被告未知可留空）"
-            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-          <div className="sm:col-span-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-600">
-            <span className="font-semibold">所有制性质：</span>
-            {['民营', '国有', '外资', ''].map((nat) => (
-              <button
-                key={nat || 'none'}
-                type="button"
-                onClick={() => onChange({ ownershipNature: nat })}
-                className={`rounded border px-2 py-0.5 font-semibold ${
-                  (party.ownershipNature || '') === nat
-                    ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                    : 'border-[#D8D1C3] bg-white text-slate-600'
-                }`}
-              >
-                {nat || '不注明'}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-          <input
-            type="text"
-            value={party.name}
-            onChange={(e) => onChange({ name: e.target.value })}
-            placeholder="姓名 *"
-            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-          <input
-            type="text"
-            value={party.gender}
-            onChange={(e) => onChange({ gender: e.target.value })}
-            placeholder="性别（男/女）"
-            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-          <input
-            type="text"
-            value={party.birthDate}
-            onChange={(e) => onChange({ birthDate: e.target.value })}
-            placeholder="出生日期（如1990-01-01）"
-            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-          <input
-            type="text"
-            value={party.idNumber}
-            onChange={(e) => onChange({ idNumber: e.target.value })}
-            placeholder="公民身份号码（18位）"
-            className="sm:col-span-2 rounded border border-[#D8D1C3] bg-white px-2.5 py-2 font-mono"
-          />
-          <input
-            type="text"
-            value={party.phone}
-            onChange={(e) => onChange({ phone: e.target.value })}
-            placeholder="联系电话"
-            className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-          <input
-            type="text"
-            value={party.domicile}
-            onChange={(e) => onChange({ domicile: e.target.value })}
-            placeholder="户籍地 / 住所地"
-            className="sm:col-span-3 rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-          />
-        </div>
-      )}
-    </div>
-  );
+  if (!corpus || !draft || !tpl || !resolvedDoc) {
+    return (
+      <div className="py-16 flex flex-col items-center justify-center text-slate-600 gap-2 text-xs">
+        <Loader2 className="h-6 w-6 animate-spin text-[#0E223D]" />
+        <span>正在本地加载最高人民法院《法〔2025〕82号》113 份官方示范文本…</span>
+      </div>
+    );
+  }
 
-  const renderElementField = (
-    f: ElementFieldDef,
-    values: Record<string, string>,
-    choices: Record<string, string>,
-    onValChange: (key: string, val: string) => void,
-    onChoiceChange: (key: string, val: string) => void
-  ) => (
-    <div key={f.key} className="space-y-1.5">
-      <label className="block text-xs font-bold text-[#11151C]">{f.label}</label>
-      {(f.kind === 'radio' || f.kind === 'radio_detail') && f.options && (
-        <div className="flex flex-wrap gap-1.5">
-          {f.options.map((opt) => {
-            const active = (choices[f.key] || f.defaultOption || f.options![0]) === opt;
+  // Render helper for official preview table (matching Word .docx 1:1)
+  const renderOfficialPreviewTable = () => {
+    const has4Col = resolvedDoc.rows.some((r) => r.kind === 'grid' && (r.cells?.length || 0) === 4);
+    const has3Col = resolvedDoc.rows.some((r) => r.kind === 'grid' && (r.cells?.length || 0) === 3);
+    const totalCols = has4Col && has3Col ? 6 : has4Col ? 5 : has3Col ? 3 : 2;
+    const twoSpans: [number, number] =
+      totalCols === 6 ? [2, 4] : totalCols === 5 ? [2, 3] : totalCols === 3 ? [1, 2] : [1, 1];
+    const fourSpans: [number, number, number, number] =
+      totalCols === 6 ? [1, 2, 2, 1] : [1, 2, 1, 1];
+    const threeSpans: [number, number, number] = totalCols === 6 ? [2, 2, 2] : [1, 1, 1];
+
+    return (
+      <table className="w-full border-collapse border border-black text-xs sm:text-[13px] leading-6 bg-white">
+        {totalCols === 2 && (
+          <colgroup>
+            <col className="w-[27.2%]" />
+            <col className="w-[72.8%]" />
+          </colgroup>
+        )}
+        {totalCols === 3 && (
+          <colgroup>
+            <col className="w-[27.2%]" />
+            <col className="w-[33%]" />
+            <col className="w-[39.8%]" />
+          </colgroup>
+        )}
+        {totalCols === 5 && (
+          <colgroup>
+            <col className="w-[16%]" />
+            <col className="w-[11.2%]" />
+            <col className="w-[22.8%]" />
+            <col className="w-[16%]" />
+            <col className="w-[34%]" />
+          </colgroup>
+        )}
+        {totalCols === 6 && (
+          <colgroup>
+            <col className="w-[16%]" />
+            <col className="w-[11.2%]" />
+            <col className="w-[22.8%]" />
+            <col className="w-[10.1%]" />
+            <col className="w-[5.9%]" />
+            <col className="w-[34%]" />
+          </colgroup>
+        )}
+        <tbody>
+          {resolvedDoc.rows.map((r, i) => {
+            if (r.kind === 'notice') {
+              return (
+                <tr key={r.id}>
+                  <td colSpan={totalCols} className="border border-black px-3 py-2.5 text-[11.5px] leading-5">
+                    {(r.value || '').split('\n').map((line, li) => {
+                      const t = line.trim();
+                      if (t.startsWith('★') && t.endsWith('★')) {
+                        return (
+                          <div key={li} className="text-center font-bold my-1">
+                            {t}
+                          </div>
+                        );
+                      }
+                      if (t === '说明：' || t === '说明:') {
+                        return (
+                          <div key={li} className="font-bold">
+                            {t}
+                          </div>
+                        );
+                      }
+                      return <div key={li}>{line}</div>;
+                    })}
+                  </td>
+                </tr>
+              );
+            }
+            if (r.kind === 'section') {
+              const lines = (r.value || '').split('\n').filter((x) => x.trim());
+              return (
+                <tr key={r.id}>
+                  <td colSpan={totalCols} className="border border-black px-3 py-2 text-center">
+                    {lines.map((l, li) => (
+                      <div key={li} className={li === 0 ? 'font-bold text-[13.5px]' : 'text-[11.5px] mt-0.5'}>
+                        {l}
+                      </div>
+                    ))}
+                  </td>
+                </tr>
+              );
+            }
+            if (r.kind === 'guide' || r.kind === 'full_input') {
+              return (
+                <tr key={r.id}>
+                  <td
+                    colSpan={totalCols}
+                    className={`border border-black px-3 py-2 whitespace-pre-wrap break-words ${
+                      r.kind === 'guide' ? 'min-h-[44px] align-top' : 'align-middle'
+                    }`}
+                  >
+                    {r.value}
+                  </td>
+                </tr>
+              );
+            }
+            if (r.kind === 'grid' && r.cells && r.cells.length === 4) {
+              return (
+                <tr key={r.id}>
+                  <td colSpan={fourSpans[0]} className="border border-black px-2 py-2 text-center font-bold">
+                    {r.cells[0]}
+                  </td>
+                  <td colSpan={fourSpans[1]} className="border border-black px-2.5 py-2 whitespace-pre-wrap">
+                    {r.cells[1]}
+                  </td>
+                  <td colSpan={fourSpans[2]} className="border border-black px-2 py-2 text-center font-bold">
+                    {r.cells[2]}
+                  </td>
+                  <td colSpan={fourSpans[3]} className="border border-black px-2.5 py-2 whitespace-pre-wrap">
+                    {r.cells[3]}
+                  </td>
+                </tr>
+              );
+            }
+            if (r.kind === 'grid' && r.cells && r.cells.length === 3) {
+              let rowSpan = 1;
+              if (!r.vMergeContinue) {
+                let j = i + 1;
+                while (j < resolvedDoc.rows.length && resolvedDoc.rows[j].vMergeContinue) {
+                  rowSpan++;
+                  j++;
+                }
+              }
+              return (
+                <tr key={r.id}>
+                  {!r.vMergeContinue && (
+                    <td
+                      colSpan={threeSpans[0]}
+                      rowSpan={rowSpan > 1 ? rowSpan : undefined}
+                      className="border border-black px-2 py-2 text-center whitespace-pre-wrap align-middle"
+                    >
+                      {r.cells[0]}
+                    </td>
+                  )}
+                  <td colSpan={threeSpans[1]} className="border border-black px-2.5 py-2 whitespace-pre-wrap break-words align-middle">
+                    {r.cells[1]}
+                  </td>
+                  <td colSpan={threeSpans[2]} className="border border-black px-2.5 py-2 whitespace-pre-wrap break-words align-middle">
+                    {r.cells[2]}
+                  </td>
+                </tr>
+              );
+            }
             return (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => onChoiceChange(f.key, opt)}
-                className={`rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors ${
-                  active
-                    ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                    : 'border-[#D8D1C3] bg-white text-slate-600 hover:border-[#0E223D]'
-                }`}
-              >
-                {active ? '☑ ' : '☐ '}
-                {opt}
-              </button>
+              <tr key={r.id}>
+                <td
+                  colSpan={twoSpans[0]}
+                  className="border border-black px-2.5 py-2 text-center whitespace-pre-wrap align-middle"
+                >
+                  {r.label}
+                </td>
+                <td
+                  colSpan={twoSpans[1]}
+                  className="border border-black px-2.5 py-2 whitespace-pre-wrap break-words align-middle"
+                >
+                  {r.value}
+                </td>
+              </tr>
             );
           })}
-        </div>
-      )}
-      {f.kind === 'text' && (
-        <input
-          type="text"
-          value={values[f.key] || ''}
-          onChange={(e) => onValChange(f.key, e.target.value)}
-          placeholder={f.placeholder}
-          className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs text-[#11151C] focus:border-[#0E223D] focus:outline-none"
-        />
-      )}
-      {(f.kind === 'textarea' || f.kind === 'radio_detail') && (
-        <textarea
-          rows={f.kind === 'radio_detail' ? 2 : 3}
-          value={values[f.key] || ''}
-          onChange={(e) => onValChange(f.key, e.target.value)}
-          placeholder={f.detailPlaceholder || f.placeholder}
-          className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs leading-5 text-[#11151C] focus:border-[#0E223D] focus:outline-none"
-        />
-      )}
-    </div>
-  );
+        </tbody>
+      </table>
+    );
+  };
 
   return (
     <div className="py-4 sm:py-6 px-3.5 sm:px-6 mx-auto max-w-5xl space-y-4">
-      {/* Header Card */}
-      <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 shadow-xs space-y-3">
+      {/* Header & Official 113-Template Browser */}
+      <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 shadow-xs space-y-3.5">
         <div className="flex flex-wrap items-start justify-between gap-2.5">
           <div>
-            <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-[#9A773E]">
+            <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-[#9A773E]">
               <FileSpreadsheet className="h-3.5 w-3.5 text-[#B89254]" />
-              <span>最高人民法院表格化示范文本 · 14 类高频案由（民事 / 行政 / 执行）</span>
+              <span>
+                最高人民法院《{corpus.standard}》官方示范文本 · 9 大领域 · 67 类纠纷 · {corpus.count} 份全量模板
+              </span>
             </div>
             <h1 className="mt-1 font-display text-xl sm:text-2xl font-bold text-[#11151C]">
-              要素式起诉状与申请书一键生成工作台
+              要素式起诉状 / 答辩状 / 申请书官方模板工作台
             </h1>
             <p className="mt-1 text-xs leading-5 text-slate-600">
-              既支持上传传统起诉状 / 案情材料通过您自己的 AI 一键提取转写为表格化要素诉状（支持本地脱敏 + 截图涂抹打码），也支持 100% 离线直接填表，一键导出法院提交级真 Word（.docx）与 A4 PDF。
+              100% 对照最高人民法院 2025 年 7 月 14 日起全国推广的官方示范文本原表生成（完整保留官方《说明》、全部表格要素行、多列案号/专利表、勾选项与知识产权证据清单附件）；支持离线直接勾选填表、下载空白官方模板，或 AI 转写传统诉状。
             </p>
           </div>
           <div className="flex flex-wrap gap-1.5">
             <button
               type="button"
-              onClick={handleDownloadWord}
+              onClick={() => handleDownloadWord(false)}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-3.5 py-2 text-xs font-bold text-[#F6F4EF] shadow-xs"
             >
-              <Download className="h-3.5 w-3.5 text-[#D1B27A]" /> 导出 Word (.docx)
+              <Download className="h-3.5 w-3.5 text-[#D1B27A]" /> 导出官方 Word (.docx)
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDownloadWord(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D1B27A] bg-[#FBF7EE] hover:bg-[#F3E9D2] px-3 py-2 text-xs font-semibold text-[#7A5922]"
+              title="直接下载该案由的最高法官方空白 Word 模板"
+            >
+              <FileText className="h-3.5 w-3.5" /> 下载官方空白表
             </button>
             <button
               type="button"
@@ -953,61 +1316,138 @@ ${factSchemaHints}
           </div>
         </div>
 
-        {/* Cause of Action Selector */}
-        <div className="pt-2 border-t border-[#EFECE5] space-y-2.5">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-xs font-bold text-[#0E223D]">
-              第一步：选择案件类型 / 要素示范文本（当前：{tpl.title}）
-            </span>
-            <div className="flex gap-1 overflow-x-auto pb-0.5 no-scrollbar">
-              {TEMPLATE_CATEGORIES.map((c) => (
+        {/* Official Template Search + 9 Domains + Role Filter */}
+        <div className="pt-3 border-t border-[#EFECE5] space-y-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="秒搜全部 113 份最高法示范文本（如：买卖、民间借贷、劳动、著作权、答辩状、执行异议、行政处罚…）"
+                className="w-full rounded-lg border border-[#D8D1C3] bg-[#FAF9F6] pl-8 pr-8 py-1.5 text-xs focus:border-[#0E223D] focus:bg-white focus:outline-none"
+              />
+              {searchQuery && (
                 <button
-                  key={c}
                   type="button"
-                  onClick={() => setCatFilter(c)}
-                  className={`flex-none rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${
-                    catFilter === c
-                      ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-1">
+              {(['all', 'claim', 'defense', 'application', 'statement'] as const).map((role) => (
+                <button
+                  key={role}
+                  type="button"
+                  onClick={() => setRoleFilter(role)}
+                  className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${
+                    roleFilter === role
+                      ? 'border-[#B89254] bg-[#B89254] text-[#11151C]'
                       : 'border-[#DED8CC] bg-[#FAF9F6] text-slate-600'
                   }`}
                 >
-                  {c}
+                  {SPC_DOC_ROLE_LABELS[role]}
                 </button>
               ))}
             </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+          {!searchQuery.trim() && (
+            <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
+              {SPC_DOMAINS.map((d) => (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => setDomainFilter(d.id)}
+                  className={`flex-none rounded-full border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                    domainFilter === d.id
+                      ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                      : 'border-[#DED8CC] bg-[#FAF9F6] text-slate-600 hover:border-[#0E223D]/50'
+                  }`}
+                >
+                  {d.label}
+                  <span className="ml-1 opacity-70">({domainCounts[d.id] || 0})</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <div className="max-h-48 overflow-y-auto pr-1 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5">
             {filteredTemplates.map((item) => {
               const active = item.id === tpl.id;
               return (
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => handleSelectTemplate(item.id)}
+                  onClick={() => handleSelectTemplate(item)}
                   className={`rounded-lg border px-2.5 py-2 text-left transition-all ${
                     active
                       ? 'border-[#0E223D] bg-[#0E223D] text-white shadow-xs'
                       : 'border-[#E5DFD3] bg-[#FAF9F6] text-[#11151C] hover:border-[#0E223D]/60'
                   }`}
                 >
-                  <div className="text-xs font-bold truncate">{item.shortTitle}</div>
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="text-xs font-bold truncate">{item.shortCause}</span>
+                    <span
+                      className={`flex-none rounded border px-1.5 py-0.2 text-[10px] font-semibold ${
+                        active
+                          ? 'bg-[#B89254] text-[#11151C] border-[#B89254]'
+                          : roleBadgeClass(item.docRole)
+                      }`}
+                    >
+                      {roleShortTag(item.docRole)}
+                    </span>
+                  </div>
                   <div
                     className={`mt-0.5 text-[10px] truncate ${
                       active ? 'text-[#D1B27A]' : 'text-slate-500'
                     }`}
                   >
-                    {item.badge}
+                    {item.domainName} · {item.rows.length} 行要素
+                    {item.attachments.length > 0 ? ` · 含 ${item.attachments.length} 份官方附件` : ''}
                   </div>
                 </button>
               );
             })}
+            {filteredTemplates.length === 0 && (
+              <div className="col-span-full py-4 text-center text-xs text-slate-500">
+                未找到匹配的示范文本，请清空筛选条件或更换关键词。
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#FAF9F6] border border-[#EAE5DA] px-3 py-1.5 text-[11px] text-slate-700">
+            <span>
+              当前启用官方原表：<strong className="text-[#0E223D]">{tpl.displayName}</strong>
+              {tpl.docSubtitle ? ` ${tpl.docSubtitle}` : ''}（共 {tpl.rows.length} 行官方表格结构
+              {tpl.attachments.length > 0 ? ` + ${tpl.attachments.length} 份官方附件` : ''}）
+            </span>
+            <span className="text-slate-500 font-mono text-[10px]">
+              依据：最高人民法院 {corpus.standard}（{corpus.effectiveDate} 起全国推广）
+            </span>
           </div>
         </div>
       </section>
 
       {/* 3-Tab Mode Switcher */}
       <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-[#DED8CC] bg-white p-1.5 shadow-xs">
+        <button
+          type="button"
+          onClick={() => setActiveMode('form')}
+          className={`flex items-center justify-center gap-1.5 rounded-lg py-2.5 px-2 text-xs font-bold transition-colors ${
+            activeMode === 'form'
+              ? 'bg-[#0E223D] text-[#F6F4EF] shadow-xs'
+              : 'text-slate-600 hover:bg-[#F6F4EF]'
+          }`}
+        >
+          <FileText className="h-3.5 w-3.5 text-[#D1B27A]" />
+          <span>官方原表逐项编辑</span>
+        </button>
         <button
           type="button"
           onClick={() => setActiveMode('ai')}
@@ -1022,18 +1462,6 @@ ${factSchemaHints}
         </button>
         <button
           type="button"
-          onClick={() => setActiveMode('form')}
-          className={`flex items-center justify-center gap-1.5 rounded-lg py-2.5 px-2 text-xs font-bold transition-colors ${
-            activeMode === 'form'
-              ? 'bg-[#0E223D] text-[#F6F4EF] shadow-xs'
-              : 'text-slate-600 hover:bg-[#F6F4EF]'
-          }`}
-        >
-          <FileText className="h-3.5 w-3.5 text-[#B89254]" />
-          <span>离线要素填表</span>
-        </button>
-        <button
-          type="button"
           onClick={() => setActiveMode('preview')}
           className={`flex items-center justify-center gap-1.5 rounded-lg py-2.5 px-2 text-xs font-bold transition-colors ${
             activeMode === 'preview'
@@ -1042,20 +1470,20 @@ ${factSchemaHints}
           }`}
         >
           <Eye className="h-3.5 w-3.5 text-[#B89254]" />
-          <span>A4 预览导出</span>
+          <span>官方 A4 预览导出</span>
         </button>
       </div>
 
-      {/* MODE 1: AI Convert Traditional Complaint -> Structured Elements */}
+      {/* MODE 1: AI Convert Traditional Doc -> Official SPC 2025 Rows */}
       {activeMode === 'ai' && (
         <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-4 shadow-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="font-display text-base font-bold text-[#11151C]">
-                上传传统起诉状 / 案情材料 → AI 一键转写为「{tpl.title}」要素表
+                导入传统诉状 / 案情材料 → AI 严格按最高法《{tpl.displayName}》原表逐行填充
               </h2>
               <p className="mt-0.5 text-xs text-slate-500">
-                支持本地导入 <code>.docx</code> / <code>.txt</code>、直接粘贴正文或上传诉状/合同截图；使用您个人配置的 API Key，全程不经律所留存。
+                自动保留最高法原始每一行标签、公式空位与勾选项，仅填入您材料中的真实事实并勾选对应 ☑；使用您个人 API Key，支持本地前置脱敏与截图涂抹打码。
               </p>
             </div>
             <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-800 cursor-pointer">
@@ -1074,7 +1502,7 @@ ${factSchemaHints}
             <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-2">
               <span>
                 您尚未绑定个人大模型 API Key。绑定后可一键 AI 转写，也可直接点击上方{' '}
-                <strong>「离线要素填表」</strong> 免费离线生成 Word。
+                <strong>「官方原表逐项编辑」</strong> 100% 免费离线生成官方格式 Word。
               </span>
               <button
                 type="button"
@@ -1121,7 +1549,7 @@ ${factSchemaHints}
               onClick={() => fileInputRef.current?.click()}
               className="inline-flex items-center gap-1.5 rounded-lg border border-[#D8D1C3] bg-[#FAF9F6] hover:border-[#0E223D] px-3 py-2 text-xs font-semibold text-[#11151C]"
             >
-              <FileUp className="h-3.5 w-3.5 text-[#0E223D]" /> 导入传统起诉状 (.docx / .txt)
+              <FileUp className="h-3.5 w-3.5 text-[#0E223D]" /> 导入传统诉状 / 答辩状 (.docx / .txt)
             </button>
             <button
               type="button"
@@ -1129,7 +1557,7 @@ ${factSchemaHints}
               disabled={sourceImages.length >= 6}
               className="inline-flex items-center gap-1.5 rounded-lg border border-[#D1B27A] bg-[#FBF7EE] hover:bg-[#F5ECD9] px-3 py-2 text-xs font-semibold text-[#7A5922] disabled:opacity-45"
             >
-              <ImagePlus className="h-3.5 w-3.5" /> 传诉状/合同截图 ({sourceImages.length}/6)
+              <ImagePlus className="h-3.5 w-3.5" /> 传诉状 / 合同截图 ({sourceImages.length}/6)
             </button>
             {sourceText && (
               <button
@@ -1201,12 +1629,12 @@ ${factSchemaHints}
                   added.push(await compressImageFileToAttachment(f));
                 }
                 setSourceImages((prev) => [...prev, ...added]);
-                showToast(`已从剪贴板粘贴 ${added.length} 张截图（可点「涂抹打码」）`);
+                showToast(`已从剪贴板粘贴 ${added.length} 张截图`);
               } catch {
                 showToast('粘贴图片失败');
               }
             }}
-            placeholder="请将传统民事/行政起诉状全文、案件事实或合同条款粘贴至此（支持导入 .docx/.txt，或直接 Ctrl+V / ⌘V 粘贴起诉状截图）…"
+            placeholder={`请粘贴传统诉状、答辩状、合同或裁判文书正文（支持导入 .docx/.txt，或直接 Ctrl+V / ⌘V 粘贴截图），AI 将严格按最高法官方《${tpl.displayName}》逐栏填充…`}
             className="w-full rounded-lg border border-[#D8D1C3] bg-[#FCFBF8] p-3 text-xs leading-6 text-[#11151C] focus:border-[#0E223D] focus:bg-white focus:outline-none"
           />
 
@@ -1215,7 +1643,6 @@ ${factSchemaHints}
               {extractError}
             </div>
           )}
-
           {extractLog && (
             <div className="rounded-lg border border-[#D1B27A]/50 bg-[#FBF7EE] p-3 text-xs text-[#7A5922] flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin flex-none" />
@@ -1227,7 +1654,7 @@ ${factSchemaHints}
             <button
               type="button"
               disabled={extracting}
-              onClick={handleAiExtractToForm}
+              onClick={handleAiExtractToOfficialForm}
               className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-5 py-2.5 text-xs sm:text-sm font-bold text-[#F6F4EF] shadow-xs disabled:opacity-50"
             >
               {extracting ? (
@@ -1235,440 +1662,547 @@ ${factSchemaHints}
               ) : (
                 <Sparkles className="h-4 w-4 text-[#D1B27A]" />
               )}
-              <span>{extracting ? 'AI 正在提取要素…' : 'AI 一键提取要素并填入表格'}</span>
+              <span>{extracting ? '正在按最高法官方表填充…' : 'AI 一键填入最高法官方表格'}</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveMode('form')}
               className="rounded-lg border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-4 py-2.5 text-xs font-semibold text-[#11151C]"
             >
-              跳过 AI，直接离线手动填表 →
+              直接离线手动编辑官方表格 →
             </button>
           </div>
         </section>
       )}
 
-      {/* MODE 2: Offline Structured Element Form */}
+      {/* MODE 2: Offline Official SPC Verbatim Table Editor */}
       {activeMode === 'form' && (
         <div className="space-y-4">
-          {tpl.id === 'general_civil' && (
-            <section className="rounded-xl border border-[#DED8CC] bg-white p-4 space-y-2 shadow-xs">
-              <label className="block text-xs font-bold text-[#0E223D]">
-                自定义案由名称（将显示在标题《民事起诉状（XX纠纷）》括号内）
-              </label>
-              <input
-                type="text"
-                value={draft.customCause}
-                onChange={(e) => setDraft((p) => ({ ...p, customCause: e.target.value }))}
-                placeholder="例如：服务合同纠纷 / 股权转让纠纷 / 不正当竞争纠纷"
-                className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs"
-              />
+          {/* Official SPC Notice Collapsible Box */}
+          {groupedSections.noticeRow && (
+            <section className="rounded-xl border border-[#DED8CC] bg-[#FCFBF8] p-3.5 shadow-xs">
+              <button
+                type="button"
+                onClick={() => setShowNoticeBox((v) => !v)}
+                className="flex w-full items-center justify-between text-left text-xs font-bold text-[#0E223D]"
+              >
+                <span>最高人民法院官方《说明》与★特别提示★（导出 Word 时自动原样置顶保留）</span>
+                {showNoticeBox ? (
+                  <ChevronUp className="h-4 w-4 text-slate-400" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-slate-400" />
+                )}
+              </button>
+              {showNoticeBox && (
+                <div className="mt-2.5 pt-2.5 border-t border-[#EAE5DA] text-[11.5px] leading-6 text-slate-700 whitespace-pre-wrap">
+                  {groupedSections.noticeRow.templateText}
+                </div>
+              )}
             </section>
           )}
 
-          {/* Section 1: Parties */}
-          <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3.5 shadow-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFECE5] pb-2.5">
-              <h2 className="font-display text-sm sm:text-base font-bold text-[#0E223D]">
-                一、当事人信息
-              </h2>
-              <div className="flex gap-1.5">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setDraft((p) => ({ ...p, plaintiffs: [...p.plaintiffs, createEmptyParty('org')] }))
-                  }
-                  className="inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2.5 py-1 text-[11px] font-semibold text-[#0E223D]"
-                >
-                  <Plus className="h-3 w-3" /> 添加原告
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setDraft((p) => ({ ...p, defendants: [...p.defendants, createEmptyParty('org')] }))
-                  }
-                  className="inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2.5 py-1 text-[11px] font-semibold text-[#0E223D]"
-                >
-                  <Plus className="h-3 w-3" /> 添加被告
-                </button>
-              </div>
-            </div>
-
-            {draft.plaintiffs.map((p, idx) =>
-              renderPartyEditor(
-                `${plaintiffRoleLabel}${draft.plaintiffs.length > 1 ? idx + 1 : ''}`,
-                p,
-                (patch) => updateParty('plaintiffs', idx, patch),
-                draft.plaintiffs.length > 1
-                  ? () =>
-                      setDraft((prev) => ({
-                        ...prev,
-                        plaintiffs: prev.plaintiffs.filter((_, i) => i !== idx),
-                      }))
-                  : undefined
-              )
-            )}
-
-            {/* Agent */}
-            <div className="rounded-lg border border-[#E5DFD3] bg-[#FAF9F6] p-3.5 space-y-2.5">
-              <label className="inline-flex items-center gap-2 text-xs font-bold text-[#0E223D] cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={draft.agent.enabled}
-                  onChange={(e) =>
-                    setDraft((p) => ({ ...p, agent: { ...p.agent, enabled: e.target.checked } }))
-                  }
-                  className="accent-[#0E223D]"
-                />
-                <span>填写委托诉讼代理人（选填，律师自行填写本人信息）</span>
-              </label>
-              {draft.agent.enabled && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
-                  <input
-                    type="text"
-                    value={draft.agent.name}
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, agent: { ...p.agent, name: e.target.value } }))
-                    }
-                    placeholder="代理律师姓名"
-                    className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-                  />
-                  <input
-                    type="text"
-                    value={draft.agent.firm}
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, agent: { ...p.agent, firm: e.target.value } }))
-                    }
-                    placeholder="律师事务所名称"
-                    className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-                  />
-                  <input
-                    type="text"
-                    value={draft.agent.phone}
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, agent: { ...p.agent, phone: e.target.value } }))
-                    }
-                    placeholder="代理人联系电话"
-                    className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-                  />
-                  <input
-                    type="text"
-                    value={draft.agent.licenseNo || ''}
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, agent: { ...p.agent, licenseNo: e.target.value } }))
-                    }
-                    placeholder="律师执业证号（选填）"
-                    className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2 font-mono"
-                  />
-                  <div className="sm:col-span-2 flex items-center gap-2">
-                    {(['特别授权', '一般授权'] as const).map((auth) => (
-                      <button
-                        key={auth}
-                        type="button"
-                        onClick={() =>
-                          setDraft((p) => ({ ...p, agent: { ...p.agent, authority: auth } }))
-                        }
-                        className={`flex-1 rounded border py-2 text-xs font-semibold ${
-                          draft.agent.authority === auth
-                            ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                            : 'border-[#D8D1C3] bg-white text-slate-600'
-                        }`}
-                      >
-                        {draft.agent.authority === auth ? '☑ ' : '☐ '}
-                        {auth}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {draft.defendants.map((d, idx) =>
-              renderPartyEditor(
-                `${defendantRoleLabel}${draft.defendants.length > 1 ? idx + 1 : ''}`,
-                d,
-                (patch) => updateParty('defendants', idx, patch),
-                draft.defendants.length > 1
-                  ? () =>
-                      setDraft((prev) => ({
-                        ...prev,
-                        defendants: prev.defendants.filter((_, i) => i !== idx),
-                      }))
-                  : undefined
-              )
-            )}
-
-            {/* Service address */}
-            <div className="rounded-lg border border-[#E5DFD3] bg-[#FAF9F6] p-3.5 space-y-2.5">
-              <div className="text-xs font-bold text-[#0E223D]">送达地址与电子送达确认</div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-                <input
-                  type="text"
-                  value={draft.serviceAddress}
-                  onChange={(e) => setDraft((p) => ({ ...p, serviceAddress: e.target.value }))}
-                  placeholder="文书送达地址（留空默认同原告住所地）"
-                  className="sm:col-span-3 rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-                />
-                <input
-                  type="text"
-                  value={draft.serviceRecipient}
-                  onChange={(e) => setDraft((p) => ({ ...p, serviceRecipient: e.target.value }))}
-                  placeholder="收件人"
-                  className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-                />
-                <input
-                  type="text"
-                  value={draft.servicePhone}
-                  onChange={(e) => setDraft((p) => ({ ...p, servicePhone: e.target.value }))}
-                  placeholder="收件联系电话"
-                  className="rounded border border-[#D8D1C3] bg-white px-2.5 py-2"
-                />
-                <div className="flex items-center gap-1.5">
-                  {(['同意', '不同意'] as const).map((opt) => (
-                    <button
-                      key={opt}
-                      type="button"
-                      onClick={() => setDraft((p) => ({ ...p, electronicService: opt }))}
-                      className={`flex-1 rounded border py-2 text-xs font-semibold ${
-                        draft.electronicService === opt
-                          ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                          : 'border-[#D8D1C3] bg-white text-slate-600'
-                      }`}
-                    >
-                      {opt}电子送达
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Section 2: Claims */}
-          <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3.5 shadow-xs">
-            <h2 className="font-display text-sm sm:text-base font-bold text-[#0E223D] border-b border-[#EFECE5] pb-2.5">
-              二、诉讼请求和依据（{tpl.title}）
-            </h2>
-            {tpl.claimFields.map((f) =>
-              renderElementField(
-                f,
-                draft.claims,
-                draft.claimChoices,
-                (key, val) => setDraft((p) => ({ ...p, claims: { ...p.claims, [key]: val } })),
-                (key, val) =>
-                  setDraft((p) => ({ ...p, claimChoices: { ...p.claimChoices, [key]: val } }))
-              )
-            )}
-          </section>
-
-          {/* Section 3: Jurisdiction & Preservation */}
-          <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3.5 shadow-xs">
-            <h2 className="font-display text-sm sm:text-base font-bold text-[#0E223D] border-b border-[#EFECE5] pb-2.5">
-              三、约定管辖和诉讼保全
-            </h2>
-            <div className="space-y-3 text-xs">
-              <div className="space-y-1.5">
-                <span className="font-bold text-[#11151C] block">1. 有无仲裁、法院管辖约定</span>
-                <div className="flex gap-2">
-                  {(['无', '有'] as const).map((opt) => (
-                    <button
-                      key={opt}
-                      type="button"
-                      onClick={() => setDraft((p) => ({ ...p, hasJurisdictionAgreement: opt }))}
-                      className={`rounded-md border px-3 py-1 font-semibold ${
-                        draft.hasJurisdictionAgreement === opt
-                          ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                          : 'border-[#D8D1C3] bg-white text-slate-600'
-                      }`}
-                    >
-                      {draft.hasJurisdictionAgreement === opt ? '☑ ' : '☐ '}
-                      {opt}
-                    </button>
-                  ))}
-                </div>
-                {draft.hasJurisdictionAgreement === '有' && (
-                  <input
-                    type="text"
-                    value={draft.jurisdictionDetail}
-                    onChange={(e) => setDraft((p) => ({ ...p, jurisdictionDetail: e.target.value }))}
-                    placeholder="写明合同第几条约定由 XX 人民法院管辖"
-                    className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2"
-                  />
+          {/* Render Each Official Section Verbatim */}
+          {groupedSections.groups.map((grp, gIdx) => (
+            <section
+              key={`${grp.title}-${gIdx}`}
+              className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3.5 shadow-xs"
+            >
+              <div className="border-b border-[#EFECE5] pb-2.5">
+                <h2 className="font-display text-sm sm:text-base font-bold text-[#0E223D]">
+                  {grp.title}
+                </h2>
+                {grp.subtitle && (
+                  <p className="mt-0.5 text-[11.5px] text-slate-600">{grp.subtitle}</p>
                 )}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <span className="font-bold text-[#11151C] block">2. 是否已申请诉前保全</span>
-                  <div className="flex gap-2">
-                    {(['否', '是'] as const).map((opt) => (
-                      <button
-                        key={opt}
-                        type="button"
-                        onClick={() => setDraft((p) => ({ ...p, hasPrePreservation: opt }))}
-                        className={`rounded-md border px-3 py-1 font-semibold ${
-                          draft.hasPrePreservation === opt
-                            ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                            : 'border-[#D8D1C3] bg-white text-slate-600'
-                        }`}
+              <div className="space-y-3.5">
+                {grp.rows.map((row) => {
+                  // Guide row: optional narrative overview
+                  if (row.kind === 'guide') {
+                    return (
+                      <div
+                        key={row.id}
+                        className="rounded-lg border border-dashed border-[#D1B27A] bg-[#FBF9F4] p-3 space-y-1.5"
                       >
-                        {draft.hasPrePreservation === opt ? '☑ ' : '☐ '}
-                        {opt}
-                      </button>
-                    ))}
-                  </div>
-                  {draft.hasPrePreservation === '是' && (
-                    <input
-                      type="text"
-                      value={draft.prePreservationDetail}
-                      onChange={(e) =>
-                        setDraft((p) => ({ ...p, prePreservationDetail: e.target.value }))
-                      }
-                      placeholder="保全法院及裁定案号"
-                      className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2"
-                    />
-                  )}
-                </div>
+                        <div className="text-[11.5px] font-semibold text-[#7A5922]">
+                          {row.templateText}
+                        </div>
+                        <textarea
+                          rows={2}
+                          value={draft.rowValues[row.id] || ''}
+                          onChange={(e) => updateRowValue(row.id, e.target.value)}
+                          placeholder="选填：可在此整体概括表述（留空则按最高法原表仅保留上方引导提示行）"
+                          className="w-full rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs leading-5 focus:border-[#0E223D] focus:outline-none"
+                        />
+                      </div>
+                    );
+                  }
 
-                <div className="space-y-1.5">
-                  <span className="font-bold text-[#11151C] block">3. 是否申请诉讼财产保全</span>
-                  <div className="flex gap-2">
-                    {(['否', '是'] as const).map((opt) => (
-                      <button
-                        key={opt}
-                        type="button"
-                        onClick={() => setDraft((p) => ({ ...p, applyPreservation: opt }))}
-                        className={`rounded-md border px-3 py-1 font-semibold ${
-                          draft.applyPreservation === opt
-                            ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                            : 'border-[#D8D1C3] bg-white text-slate-600'
-                        }`}
+                  // Grid row (4-col 案号/案由 or 3-col Patent rows)
+                  if (row.kind === 'grid' && row.cells) {
+                    const cells = draft.gridValues[row.id] || row.cells;
+                    if (cells.length === 4 && row.roleTag === 'case_meta') {
+                      return (
+                        <div
+                          key={row.id}
+                          className="grid grid-cols-1 sm:grid-cols-2 gap-3 rounded-lg border border-[#E5DFD3] bg-[#FAF9F6] p-3 text-xs"
+                        >
+                          <div>
+                            <label className="block font-bold text-[#0E223D] mb-1">{cells[0]}</label>
+                            <input
+                              type="text"
+                              value={cells[1] || ''}
+                              onChange={(e) => updateGridCell(row.id, 1, e.target.value, row.cells!)}
+                              placeholder="例：（2026）浙0106民初XXXX号"
+                              className="w-full rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+                            />
+                          </div>
+                          <div>
+                            <label className="block font-bold text-[#0E223D] mb-1">{cells[2]}</label>
+                            <input
+                              type="text"
+                              value={cells[3] || ''}
+                              onChange={(e) => updateGridCell(row.id, 3, e.target.value, row.cells!)}
+                              placeholder={`例：${tpl.causeName}`}
+                              className="w-full rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5"
+                            />
+                          </div>
+                        </div>
+                      );
+                    }
+                    // 3-col Patent/Admin grid row
+                    return (
+                      <div
+                        key={row.id}
+                        className="rounded-lg border border-[#E5DFD3] bg-[#FAF9F6] p-3 space-y-2 text-xs"
                       >
-                        {draft.applyPreservation === opt ? '☑ ' : '☐ '}
-                        {opt}
-                      </button>
-                    ))}
-                  </div>
-                  {draft.applyPreservation === '是' && (
-                    <input
-                      type="text"
-                      value={draft.preservationDetail}
-                      onChange={(e) =>
-                        setDraft((p) => ({ ...p, preservationDetail: e.target.value }))
-                      }
-                      placeholder="拟保全金额及银行账户/房产/股权线索"
-                      className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2"
-                    />
-                  )}
-                </div>
+                        <div className="font-bold text-[#0E223D]">
+                          {cells[0].replace(/\n/g, ' ')}
+                          {row.vMergeContinue ? '（续行）' : ''}
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                          {[1, 2].map((ci) => {
+                            const cVal = cells[ci] || '';
+                            const cTokens = parseCheckboxTokens(cVal);
+                            return (
+                              <div key={ci} className="space-y-1.5">
+                                {cTokens.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {cTokens.map((tk) => (
+                                      <button
+                                        key={tk.index}
+                                        type="button"
+                                        onClick={() =>
+                                          updateGridCell(
+                                            row.id,
+                                            ci,
+                                            toggleCheckboxAtIndex(cVal, tk.index),
+                                            row.cells!
+                                          )
+                                        }
+                                        className={`rounded border px-2 py-0.5 text-[11px] font-semibold ${
+                                          tk.checked
+                                            ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                                            : 'border-[#D8D1C3] bg-white text-slate-600'
+                                        }`}
+                                      >
+                                        {tk.checked ? '☑ ' : '☐ '}
+                                        {tk.label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                                <textarea
+                                  rows={Math.min(8, Math.max(3, cVal.split('\n').length + 1))}
+                                  value={cVal}
+                                  onChange={(e) => updateGridCell(row.id, ci, e.target.value, row.cells!)}
+                                  className="w-full rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs leading-5 focus:border-[#0E223D] focus:outline-none"
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  // Standard official 2-col field OR full_input row
+                  const val = draft.rowValues[row.id] ?? row.templateText ?? '';
+                  const tokens = parseCheckboxTokens(val);
+                  const lineCount = Math.max(2, val.split('\n').length);
+                  const isPartyQuickFillable = Boolean(
+                    row.roleTag &&
+                      [
+                        'plaintiff_person',
+                        'plaintiff_org',
+                        'defendant_person',
+                        'defendant_org',
+                        'third_person',
+                        'third_org',
+                        'agent',
+                      ].includes(row.roleTag)
+                  );
+                  const extrasForRow = row.repeatable
+                    ? draft.extraRows.filter((ex) => ex.sourceRowId === row.id)
+                    : [];
+
+                  return (
+                    <div key={row.id} className="space-y-2">
+                      <div className="rounded-lg border border-[#EAE5DA] bg-[#FCFBF8] p-3 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <label className="text-xs font-bold text-[#11151C]">
+                            {row.kind === 'full_input'
+                              ? '整行填写栏'
+                              : (row.label || '').replace(/\n/g, ' ')}
+                          </label>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {row.roleTag === 'mediation_benefit' && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateRowValue(row.id, setAllMediationBenefitChoices(val, true))
+                                }
+                                className="rounded border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800"
+                              >
+                                一键勾选 5 项“了解☑”
+                              </button>
+                            )}
+                            {isPartyQuickFillable && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setOpenQuickFillRowId((cur) => (cur === row.id ? null : row.id))
+                                }
+                                className="inline-flex items-center gap-1 rounded border border-[#D1B27A] bg-[#FBF7EE] hover:bg-[#F3E9D2] px-2 py-0.5 text-[11px] font-semibold text-[#7A5922]"
+                              >
+                                <Wand2 className="h-3 w-3" />
+                                {openQuickFillRowId === row.id ? '收起快速填表' : '快速结构化填入'}
+                              </button>
+                            )}
+                            {row.repeatable && (
+                              <button
+                                type="button"
+                                onClick={() => handleDuplicatePartyRow(row)}
+                                className="inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2 py-0.5 text-[11px] font-semibold text-[#0E223D]"
+                                title="按最高法《说明》第4条复制增加多主体行"
+                              >
+                                <Plus className="h-3 w-3" /> 复制新增一行
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {isPartyQuickFillable && openQuickFillRowId === row.id && row.roleTag && (
+                          <PartyQuickFillPanel
+                            roleTag={row.roleTag}
+                            templateText={row.templateText || val}
+                            onApply={(filled) => {
+                              updateRowValue(row.id, filled);
+                              setOpenQuickFillRowId(null);
+                              showToast(`已写入「${(row.label || '').replace(/\n/g, '')}」官方表格栏`);
+                            }}
+                          />
+                        )}
+
+                        {tokens.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {tokens.map((tk) => (
+                              <button
+                                key={tk.index}
+                                type="button"
+                                onClick={() =>
+                                  updateRowValue(row.id, toggleCheckboxAtIndex(val, tk.index))
+                                }
+                                className={`rounded-md border px-2 py-0.5 text-[11px] font-semibold transition-colors ${
+                                  tk.checked
+                                    ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                                    : 'border-[#D8D1C3] bg-white text-slate-600 hover:border-[#0E223D]'
+                                }`}
+                              >
+                                {tk.checked ? '☑ ' : '☐ '}
+                                {tk.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        <textarea
+                          rows={Math.min(11, Math.max(2, lineCount + 1))}
+                          value={val}
+                          onChange={(e) => updateRowValue(row.id, e.target.value)}
+                          placeholder="按最高法官方原表直接填写内容（可留空或填“无”）"
+                          className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs leading-6 text-[#11151C] focus:border-[#0E223D] focus:outline-none"
+                        />
+                      </div>
+
+                      {/* Render any duplicated extra party rows */}
+                      {extrasForRow.map((ex) => {
+                        const exTokens = parseCheckboxTokens(ex.value);
+                        return (
+                          <div
+                            key={ex.uid}
+                            className="ml-3 rounded-lg border border-[#D1B27A] bg-[#FBF9F4] p-3 space-y-2"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <input
+                                type="text"
+                                value={ex.label.replace(/\n/g, '')}
+                                onChange={(e) =>
+                                  setDraft((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          extraRows: prev.extraRows.map((x) =>
+                                            x.uid === ex.uid ? { ...x, label: e.target.value } : x
+                                          ),
+                                        }
+                                      : prev
+                                  )
+                                }
+                                className="rounded border border-[#D8D1C3] bg-white px-2 py-0.5 text-xs font-bold text-[#0E223D]"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setDraft((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          extraRows: prev.extraRows.filter((x) => x.uid !== ex.uid),
+                                        }
+                                      : prev
+                                  )
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 hover:underline"
+                              >
+                                <Trash2 className="h-3 w-3" /> 删除此新增行
+                              </button>
+                            </div>
+                            {exTokens.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {exTokens.map((tk) => (
+                                  <button
+                                    key={tk.index}
+                                    type="button"
+                                    onClick={() =>
+                                      setDraft((prev) =>
+                                        prev
+                                          ? {
+                                              ...prev,
+                                              extraRows: prev.extraRows.map((x) =>
+                                                x.uid === ex.uid
+                                                  ? {
+                                                      ...x,
+                                                      value: toggleCheckboxAtIndex(x.value, tk.index),
+                                                    }
+                                                  : x
+                                              ),
+                                            }
+                                          : prev
+                                      )
+                                    }
+                                    className={`rounded-md border px-2 py-0.5 text-[11px] font-semibold ${
+                                      tk.checked
+                                        ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                                        : 'border-[#D8D1C3] bg-white text-slate-600'
+                                    }`}
+                                  >
+                                    {tk.checked ? '☑ ' : '☐ '}
+                                    {tk.label}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            <textarea
+                              rows={Math.min(10, Math.max(3, ex.value.split('\n').length + 1))}
+                              value={ex.value}
+                              onChange={(e) =>
+                                setDraft((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        extraRows: prev.extraRows.map((x) =>
+                                          x.uid === ex.uid ? { ...x, value: e.target.value } : x
+                                        ),
+                                      }
+                                    : prev
+                                )
+                              }
+                              className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs leading-6"
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
               </div>
-            </div>
-          </section>
+            </section>
+          ))}
 
-          {/* Section 4: Facts and Reasons */}
+          {/* Official Post-Signature Attachments (IP Evidence Lists etc.) */}
+          {tpl.attachments.length > 0 && (
+            <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3 shadow-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFECE5] pb-2.5">
+                <h2 className="font-display text-sm sm:text-base font-bold text-[#0E223D]">
+                  官方附表（{tpl.attachments.map((a) => a.title).join(' / ')}）
+                </h2>
+                <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#0E223D] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draft.includeAttachments}
+                    onChange={(e) =>
+                      setDraft((p) => (p ? { ...p, includeAttachments: e.target.checked } : p))
+                    }
+                    className="accent-[#0E223D]"
+                  />
+                  导出 Word 时附带官方附件表
+                </label>
+              </div>
+              {draft.includeAttachments &&
+                tpl.attachments.map((att, aIdx) => {
+                  const rows = draft.attachmentRows[aIdx] || att.rows;
+                  return (
+                    <div key={aIdx} className="space-y-2 pt-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-[#7A5922]">
+                          {att.label}：{att.title}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDraft((prev) => {
+                              if (!prev) return prev;
+                              const cur = prev.attachmentRows[aIdx] || att.rows;
+                              return {
+                                ...prev,
+                                attachmentRows: {
+                                  ...prev.attachmentRows,
+                                  [aIdx]: [...cur, Array(att.columns.length).fill('')],
+                                },
+                              };
+                            })
+                          }
+                          className="inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2 py-0.5 text-[11px] font-semibold text-[#0E223D]"
+                        >
+                          <Plus className="h-3 w-3" /> 添加一行
+                        </button>
+                      </div>
+                      <div className="overflow-x-auto rounded border border-[#E5DFD3]">
+                        <table className="w-full text-[11px] border-collapse">
+                          <thead className="bg-[#FAF9F6]">
+                            <tr>
+                              {att.columns.map((c, ci) => (
+                                <th key={ci} className="border border-[#E5DFD3] px-2 py-1.5 text-left font-bold">
+                                  {c}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {rows.map((rCells, ri) =>
+                              rCells.length === 1 && att.columns.length > 1 ? (
+                                <tr key={ri} className="bg-[#F6F4EF]">
+                                  <td
+                                    colSpan={att.columns.length}
+                                    className="border border-[#E5DFD3] px-2 py-1 font-bold text-[#0E223D]"
+                                  >
+                                    {rCells[0]}
+                                  </td>
+                                </tr>
+                              ) : (
+                                <tr key={ri}>
+                                  {att.columns.map((_, ci) => (
+                                    <td key={ci} className="border border-[#E5DFD3] p-1">
+                                      <input
+                                        type="text"
+                                        value={rCells[ci] || ''}
+                                        onChange={(e) =>
+                                          setDraft((prev) => {
+                                            if (!prev) return prev;
+                                            const cur = (prev.attachmentRows[aIdx] || att.rows).map(
+                                              (x) => [...x]
+                                            );
+                                            cur[ri][ci] = e.target.value;
+                                            return {
+                                              ...prev,
+                                              attachmentRows: { ...prev.attachmentRows, [aIdx]: cur },
+                                            };
+                                          })
+                                        }
+                                        className="w-full bg-transparent px-1 py-0.5 text-[11px] focus:bg-white focus:outline-none"
+                                      />
+                                    </td>
+                                  ))}
+                                </tr>
+                              )
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })}
+            </section>
+          )}
+
+          {/* Official Sign-Off & Export Settings */}
           <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3.5 shadow-xs">
             <h2 className="font-display text-sm sm:text-base font-bold text-[#0E223D] border-b border-[#EFECE5] pb-2.5">
-              四、事实和理由（{tpl.title}要素清单）
-            </h2>
-            {tpl.factFields.map((f) =>
-              renderElementField(
-                f,
-                draft.facts,
-                draft.factChoices,
-                (key, val) => setDraft((p) => ({ ...p, facts: { ...p.facts, [key]: val } })),
-                (key, val) =>
-                  setDraft((p) => ({ ...p, factChoices: { ...p.factChoices, [key]: val } }))
-              )
-            )}
-            <div className="space-y-1.5">
-              <label className="block text-xs font-bold text-[#11151C]">
-                {tpl.factFields.length + 1}. 证据清单概要（可另附《证据目录》）
-              </label>
-              <textarea
-                rows={2}
-                value={draft.evidenceSummary}
-                onChange={(e) => setDraft((p) => ({ ...p, evidenceSummary: e.target.value }))}
-                placeholder="例：1. 合同原件；2. 银行转账回单；3. 微信对账记录；4. 催款律师函及签收凭证。"
-                className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs leading-5"
-              />
-            </div>
-          </section>
-
-          {/* Section 5: Mediation & Sign-off (Zero prefilled personal info!) */}
-          <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3.5 shadow-xs">
-            <h2 className="font-display text-sm sm:text-base font-bold text-[#0E223D] border-b border-[#EFECE5] pb-2.5">
-              五、先行调解意愿、受诉法院与落款（自行填写）
+              文书落款与导出设置
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="space-y-1.5">
-                <span className="font-bold text-[#11151C] block">是否了解先行调解的益处</span>
-                <div className="flex gap-2">
-                  {(['了解', '不了解'] as const).map((opt) => (
-                    <button
-                      key={opt}
-                      type="button"
-                      onClick={() => setDraft((p) => ({ ...p, mediationKnow: opt }))}
-                      className={`rounded-md border px-3 py-1 font-semibold ${
-                        draft.mediationKnow === opt
-                          ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                          : 'border-[#D8D1C3] bg-white text-slate-600'
-                      }`}
-                    >
-                      {draft.mediationKnow === opt ? '☑ ' : '☐ '}
-                      {opt}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <span className="font-bold text-[#11151C] block">是否考虑先行调解（最高法 2025 示范文本三选项）</span>
-                <div className="flex flex-wrap gap-1.5">
-                  {(['是', '否', '暂不确定，想要了解更多'] as const).map((opt) => {
-                    const currentNorm =
-                      draft.mediationAgree === '同意'
-                        ? '是'
-                        : draft.mediationAgree === '不同意'
-                        ? '否'
-                        : draft.mediationAgree;
-                    const active = currentNorm === opt;
-                    return (
-                      <button
-                        key={opt}
-                        type="button"
-                        onClick={() => setDraft((p) => ({ ...p, mediationAgree: opt }))}
-                        className={`rounded-md border px-2.5 py-1 font-semibold ${
-                          active
-                            ? 'border-[#0E223D] bg-[#0E223D] text-white'
-                            : 'border-[#D8D1C3] bg-white text-slate-600'
-                        }`}
-                      >
-                        {active ? '☑ ' : '☐ '}
-                        {opt}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
               <div className="space-y-1">
-                <label className="font-bold text-[#11151C] block">此致（受诉人民法院名称）</label>
-                <input
-                  type="text"
-                  value={draft.courtName}
-                  onChange={(e) => setDraft((p) => ({ ...p, courtName: e.target.value }))}
-                  placeholder="例：杭州市西湖区人民法院"
-                  className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2"
-                />
-              </div>
-              <div className="space-y-1">
-                <label className="font-bold text-[#11151C] block">具状人落款（选填，留空则导出空位供签字盖章）</label>
+                <label className="font-bold text-[#11151C] block">
+                  {tpl.signerLine}（选填，留空导出后直接签字盖章）
+                </label>
                 <input
                   type="text"
                   value={draft.signerName}
-                  onChange={(e) => setDraft((p) => ({ ...p, signerName: e.target.value }))}
-                  placeholder="留空导出后直接手写签名或加盖公章"
+                  onChange={(e) => setDraft((p) => (p ? { ...p, signerName: e.target.value } : p))}
+                  placeholder="留空则导出空位供本人手写签字或加盖公章"
+                  className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2"
+                />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-[#11151C]">{tpl.dateLine}</label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDraft((p) => (p ? { ...p, signDate: getTodayChinaDateCn() } : p))
+                    }
+                    className="text-[11px] font-semibold text-[#7A5922] hover:underline"
+                  >
+                    填入今日（{getTodayChinaDateCn()}）
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  value={draft.signDate}
+                  onChange={(e) => setDraft((p) => (p ? { ...p, signDate: e.target.value } : p))}
+                  placeholder="留空则导出“      年    月    日”"
                   className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2"
                 />
               </div>
             </div>
+
+            <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer pt-1">
+              <input
+                type="checkbox"
+                checked={draft.hideUntouchedPartyRows}
+                onChange={(e) =>
+                  setDraft((p) =>
+                    p ? { ...p, hideUntouchedPartyRows: e.target.checked } : p
+                  )
+                }
+                className="mt-0.5 accent-[#0E223D]"
+              />
+              <span>
+                精简导出：隐藏本案未填写的冗余主体行（例如仅填了公司原告时，隐藏空白的“自然人原告/第三人”行；<strong>默认不勾选 = 100% 严格保留最高法原表全部行</strong>）
+              </span>
+            </label>
 
             <div className="pt-2 flex flex-wrap items-center gap-2">
               <button
@@ -1676,14 +2210,14 @@ ${factSchemaHints}
                 onClick={() => setActiveMode('preview')}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-4 py-2.5 text-xs font-bold text-[#F6F4EF]"
               >
-                <CheckCircle2 className="h-4 w-4 text-[#D1B27A]" /> 预览 A4 表格并导出 Word
+                <CheckCircle2 className="h-4 w-4 text-[#D1B27A]" /> 预览官方 A4 表格并导出
               </button>
               <button
                 type="button"
-                onClick={handleDownloadWord}
+                onClick={() => handleDownloadWord(false)}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-[#B89254] hover:bg-[#C9A364] px-4 py-2.5 text-xs font-bold text-[#11151C]"
               >
-                <Download className="h-4 w-4" /> 直接下载 Word (.docx)
+                <Download className="h-4 w-4" /> 直接下载官方格式 Word (.docx)
               </button>
               <button
                 type="button"
@@ -1697,24 +2231,30 @@ ${factSchemaHints}
                 onClick={handleResetDraft}
                 className="ml-auto inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] px-3 py-2 text-xs text-slate-600 hover:text-red-700"
               >
-                <RotateCcw className="h-3.5 w-3.5" /> 清空草稿
+                <RotateCcw className="h-3.5 w-3.5" /> 恢复官方空白原表
               </button>
             </div>
           </section>
         </div>
       )}
 
-      {/* MODE 3: Live A4 Court Table Preview & Export */}
+      {/* MODE 3: Live Authentic SPC A4 Paper Preview & Export */}
       {activeMode === 'preview' && (
         <div className="space-y-3">
-          {/* Action Bar */}
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[#DED8CC] bg-white p-3 shadow-xs">
             <button
               type="button"
-              onClick={handleDownloadWord}
+              onClick={() => handleDownloadWord(false)}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-3.5 py-2 text-xs font-bold text-[#F6F4EF]"
             >
-              <Download className="h-3.5 w-3.5 text-[#D1B27A]" /> 下载 Word (.docx)
+              <Download className="h-3.5 w-3.5 text-[#D1B27A]" /> 下载官方格式 Word (.docx)
+            </button>
+            <button
+              type="button"
+              onClick={() => handleDownloadWord(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D1B27A] bg-[#FBF7EE] px-3 py-2 text-xs font-semibold text-[#7A5922]"
+            >
+              <FileText className="h-3.5 w-3.5" /> 下载官方空白表
             </button>
             <button
               type="button"
@@ -1742,73 +2282,108 @@ ${factSchemaHints}
               onClick={handleAiFilingAudit}
               className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-2 text-xs font-bold text-emerald-900"
             >
-              <ShieldCheck className="h-3.5 w-3.5 text-emerald-700" /> AI 立案退件预警核验
+              <ShieldCheck className="h-3.5 w-3.5 text-emerald-700" /> AI 立案退件预警
             </button>
             <button
               type="button"
               onClick={handleSendToDeAi}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[#B89254] px-3 py-2 text-xs font-bold text-[#11151C]"
             >
-              <Sparkles className="h-3.5 w-3.5" /> 送 AI 去AI味润色
+              <Sparkles className="h-3.5 w-3.5" /> 送 AI 润色
             </button>
           </div>
 
-          {/* A4 Paper Court Table */}
           <div className="rounded-xl border border-[#D6CFC2] bg-white p-5 sm:p-9 shadow-sm text-[#11151C] overflow-x-auto">
-            <div className="min-w-[300px] max-w-[740px] mx-auto font-serif">
-              <h2 className="text-center text-xl sm:text-2xl font-bold tracking-[0.28em]">
-                {docTitle}
+            <div className="min-w-[320px] max-w-[760px] mx-auto font-serif">
+              <h2 className="text-center text-2xl sm:text-[26px] font-bold tracking-[0.2em]">
+                {resolvedDoc.docTitle}
               </h2>
-              <div className="text-center text-sm sm:text-base font-bold mt-1 mb-3">
-                （{causeTitle}）
-              </div>
-              <p className="text-[11.5px] leading-5 text-slate-600 mb-3">
-                说明：为了方便您参加诉讼，保护您的合法权利，请参照本表如实填写；有“☐”选项的，在对应项打“☑”；本表空间不足的，可另附页说明。
-              </p>
-
-              <table className="w-full border-collapse border border-black text-xs sm:text-[13px] leading-6">
-                <tbody>
-                  {sections.map((sec) => (
-                    <React.Fragment key={sec.title}>
-                      <tr className="bg-[#EFEFEF]">
-                        <td
-                          colSpan={2}
-                          className="border border-black px-3 py-1.5 text-center font-bold"
-                        >
-                          {sec.title}
-                        </td>
-                      </tr>
-                      {sec.rows.map((row) => (
-                        <tr key={`${sec.title}-${row.label}`}>
-                          <td className="border border-black px-2.5 py-2 font-bold align-middle w-[30%] bg-[#FCFCFB]">
-                            {row.label}
-                          </td>
-                          <td className="border border-black px-2.5 py-2 whitespace-pre-wrap break-words align-middle w-[70%]">
-                            {row.value}
-                          </td>
-                        </tr>
-                      ))}
-                    </React.Fragment>
-                  ))}
-                </tbody>
-              </table>
-
-              {draft.courtName.trim() && (
-                <div className="mt-5 text-sm leading-7">
-                  <div>此致</div>
-                  <div className="pl-6">{draft.courtName.trim()}</div>
+              {resolvedDoc.docSubtitle && (
+                <div className="text-center text-base sm:text-lg font-bold mt-1 mb-4">
+                  {resolvedDoc.docSubtitle}
                 </div>
               )}
 
+              {renderOfficialPreviewTable()}
+
               <div className="mt-6 text-right text-sm leading-8">
                 <div>
-                  {signerLabel}：
+                  {resolvedDoc.signerLine}
                   <span className="inline-block min-w-[110px] border-b border-dashed border-slate-400 text-center">
-                    {draft.signerName.trim()}
+                    {resolvedDoc.signerName}
                   </span>
                 </div>
-                <div>日期：{draft.signDate}</div>
+                <div>
+                  {resolvedDoc.dateLine}
+                  {resolvedDoc.signDate || '      年    月    日'}
+                </div>
               </div>
+
+              {resolvedDoc.footnotes.length > 0 && (
+                <div className="mt-4 text-[11.5px] leading-5 text-slate-700 space-y-1">
+                  {resolvedDoc.footnotes.map((fn, fi) => (
+                    <div key={fi} className={fn.startsWith('注释') ? 'font-bold' : ''}>
+                      {fn}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {resolvedDoc.attachments.length > 0 && (
+                <div className="mt-8 pt-6 border-t-2 border-dashed border-slate-300 space-y-6">
+                  {resolvedDoc.attachments.map((att, ai) => (
+                    <div key={ai} className="space-y-2">
+                      <div className="text-xs font-bold">{att.label}</div>
+                      <div className="text-center text-base font-bold">{att.title}</div>
+                      {att.subtitle && (
+                        <div className="text-center text-xs text-slate-600">{att.subtitle}</div>
+                      )}
+                      <div className="overflow-x-auto">
+                        <table className="w-full border-collapse border border-black text-[11.5px] leading-5">
+                          <thead>
+                            <tr>
+                              {att.columns.map((c, ci) => (
+                                <th key={ci} className="border border-black px-2 py-1.5 text-center font-bold">
+                                  {c}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {att.rows.map((row, ri) =>
+                              row.length === 1 && att.columns.length > 1 ? (
+                                <tr key={ri}>
+                                  <td
+                                    colSpan={att.columns.length}
+                                    className="border border-black px-2 py-1 font-bold"
+                                  >
+                                    {row[0]}
+                                  </td>
+                                </tr>
+                              ) : (
+                                <tr key={ri}>
+                                  {att.columns.map((_, ci) => (
+                                    <td key={ci} className="border border-black px-2 py-1 whitespace-pre-wrap">
+                                      {row[ci] || ''}
+                                    </td>
+                                  ))}
+                                </tr>
+                              )
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                      {att.footerLines.length > 0 && (
+                        <div className="text-right text-xs leading-6 pt-1">
+                          {att.footerLines.map((fl, fi) => (
+                            <div key={fi}>{fl}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

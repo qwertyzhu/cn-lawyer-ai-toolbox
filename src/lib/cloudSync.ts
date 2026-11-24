@@ -269,6 +269,7 @@ export function resetLocalUserWorkspaceForAccountSwitch(): void {
     'cn_lawyer_box_pinned_tools_v1',
     'cn_lawyer_box_starred_laws_v1',
     'cn_lawyer_box_elements_complaint_draft_v1',
+    'spc2025_elements_doc_draft_v2',
     FEE_SHEET_KEY,
     'lf-sheet-author-manual',
     SYNC_META_KEY,

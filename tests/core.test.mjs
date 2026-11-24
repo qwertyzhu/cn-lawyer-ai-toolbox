@@ -22,10 +22,23 @@ import {
   buildComplaintSections,
   getResolvedCauseTitle,
 } from '../src/data/elementsComplaintTemplates.ts';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   buildElementsComplaintDocxBytes,
   buildMarkdownReportDocxBytes,
+  buildOfficialSpcDocxBytes,
 } from '../src/lib/docxBuilder.ts';
+import {
+  applyPartyQuickFillToCellText,
+  buildResolvedSpcDocument,
+  createEmptyPartyQuickFill,
+  createInitialSpcDraft,
+  parseCheckboxTokens,
+  setAllMediationBenefitChoices,
+  toggleCheckboxAtIndex,
+} from '../src/lib/spcOfficialTemplates.ts';
 import { extractLocalDocumentText, extractXmlTextFromWordDocument } from '../src/lib/docxReader.ts';
 import {
   dedupeNearDuplicateImaItems,
@@ -611,6 +624,89 @@ test('IMA smart search term extractor, Chinese authority ranker, and Node DOCX e
   const text = extractDocxTextFromBuffer(Buffer.from(bytes));
   assert.ok(text.includes('人民法院案例库参考案例测试'));
   assert.ok(text.includes('LPR 1.5 倍'));
+});
+
+test('Official SPC 法〔2025〕82号 113-template corpus, checkbox toggles, party quick-fill, and OOXML exact-format roundtrip', async () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const corpusPath = path.resolve(__dirname, '..', 'public', 'data', 'spc-2025-templates.json');
+  const corpus = JSON.parse(fs.readFileSync(corpusPath, 'utf8'));
+  assert.equal(corpus.standard, '法〔2025〕82号');
+  assert.equal(corpus.count, 113);
+  assert.equal(corpus.templates.length, 113);
+
+  for (const t of corpus.templates) {
+    assert.ok(t.docTitle && t.rows.length >= 8, `Invalid template ${t.displayName}`);
+    assert.equal(t.rows[0].kind, 'notice', `Template ${t.displayName} must start with official 说明 row`);
+    assert.ok(t.signerLine.includes('签字') || t.signerLine.includes('盖章'));
+    assert.ok(!JSON.stringify(t).includes('☑'), `Blank template ${t.displayName} must not have pre-checked ☑`);
+  }
+
+  const tSales = corpus.templates.find((t) => t.displayName === '买卖合同纠纷民事起诉状');
+  assert.ok(tSales);
+  const dSales = createInitialSpcDraft(tSales);
+  assert.equal(dSales.signerName, '', 'Default signerName must stay empty');
+  const pOrgRow = tSales.rows.find((r) => r.roleTag === 'plaintiff_org');
+  const quickOrg = createEmptyPartyQuickFill();
+  quickOrg.name = '杭州示例商贸有限公司';
+  quickOrg.creditCode = '91330106MA2EXAMPLE';
+  quickOrg.legalRep = '张示例';
+  quickOrg.orgType = '有限责任公司';
+  quickOrg.ownershipNature = '民营';
+  dSales.rowValues[pOrgRow.id] = applyPartyQuickFillToCellText(pOrgRow.templateText, 'plaintiff_org', quickOrg);
+
+  const medBenRow = tSales.rows.find((r) => r.roleTag === 'mediation_benefit');
+  dSales.rowValues[medBenRow.id] = setAllMediationBenefitChoices(medBenRow.templateText, true);
+  assert.equal((dSales.rowValues[medBenRow.id].match(/了解☑/g) || []).length, 5);
+
+  const medAgreeRow = tSales.rows.find((r) => r.roleTag === 'mediation_agree');
+  assert.equal(parseCheckboxTokens(medAgreeRow.templateText).length, 3);
+  dSales.rowValues[medAgreeRow.id] = toggleCheckboxAtIndex(medAgreeRow.templateText, 2);
+
+  const salesDocx = buildOfficialSpcDocxBytes(buildResolvedSpcDocument(tSales, dSales));
+  const salesExtracted = await extractLocalDocumentText({
+    name: '买卖合同纠纷民事起诉状.docx',
+    arrayBuffer: async () => salesDocx.buffer.slice(salesDocx.byteOffset, salesDocx.byteOffset + salesDocx.byteLength),
+    text: async () => '',
+  });
+  assert.ok(salesExtracted.includes('民事起诉状'));
+  assert.ok(salesExtracted.includes('★特别提示★'));
+  assert.ok(salesExtracted.includes('杭州示例商贸有限公司'));
+  assert.ok(salesExtracted.includes('有限责任公司☑'));
+  assert.ok(salesExtracted.includes('民营☑'));
+
+  const tDef = corpus.templates.find((t) => t.displayName === '买卖合同纠纷民事答辩状');
+  const dDef = createInitialSpcDraft(tDef);
+  const metaRow = tDef.rows.find((r) => r.roleTag === 'case_meta');
+  dDef.gridValues[metaRow.id] = ['案号', '（2026）浙0106民初8888号', '案由', '买卖合同纠纷'];
+  const defDocx = buildOfficialSpcDocxBytes(buildResolvedSpcDocument(tDef, dDef));
+  const defExtracted = await extractLocalDocumentText({
+    name: '买卖合同纠纷民事答辩状.docx',
+    arrayBuffer: async () => defDocx.buffer.slice(defDocx.byteOffset, defDocx.byteOffset + defDocx.byteLength),
+    text: async () => '',
+  });
+  assert.ok(defExtracted.includes('（2026）浙0106民初8888号'));
+
+  const tCopy = corpus.templates.find((t) => t.displayName === '侵害著作权及邻接权纠纷民事起诉状');
+  const copyDocx = buildOfficialSpcDocxBytes(buildResolvedSpcDocument(tCopy, createInitialSpcDraft(tCopy)));
+  const copyExtracted = await extractLocalDocumentText({
+    name: '侵害著作权及邻接权纠纷民事起诉状.docx',
+    arrayBuffer: async () => copyDocx.buffer.slice(copyDocx.byteOffset, copyDocx.byteOffset + copyDocx.byteLength),
+    text: async () => '',
+  });
+  assert.ok(copyExtracted.includes('原告证据清单'));
+
+  const tPat = corpus.templates.find((t) => t.displayName === '侵害发明专利权纠纷民事起诉状');
+  const patXml = Buffer.from(buildOfficialSpcDocxBytes(buildResolvedSpcDocument(tPat, createInitialSpcDraft(tPat)))).toString('utf8');
+  assert.ok(patXml.includes('<w:vMerge w:val="restart"/>') && patXml.includes('<w:vMerge/>'));
+
+  const tExec = corpus.templates.find((t) => t.displayName === '强制执行申请书');
+  const execDocx = buildOfficialSpcDocxBytes(buildResolvedSpcDocument(tExec, createInitialSpcDraft(tExec)));
+  const execExtracted = await extractLocalDocumentText({
+    name: '强制执行申请书.docx',
+    arrayBuffer: async () => execDocx.buffer.slice(execDocx.byteOffset, execDocx.byteOffset + execDocx.byteLength),
+    text: async () => '',
+  });
+  assert.ok(execExtracted.includes('执行依据信息'));
 });
 
 

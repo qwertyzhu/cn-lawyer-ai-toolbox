@@ -7,7 +7,8 @@
  * Apple Pages, and LibreOffice with clean A4 two-column bordered court tables.
  */
 
-import type { RenderedComplaintSection } from '../data/elementsComplaintTemplates';
+import type { RenderedComplaintSection } from '../data/elementsComplaintTemplates.ts';
+import type { ResolvedSpcAttachment, ResolvedSpcDocument } from './spcOfficialTemplates.ts';
 
 // ---- Pure-JS CRC32 & Minimal Standard PKZIP (STORE) Writer ----
 
@@ -158,6 +159,7 @@ function makeParagraph(
     spaceBefore?: number;
     spaceAfter?: number;
     line?: number;
+    keepNext?: boolean;
   }
 ): string {
   const align = opts?.align || 'left';
@@ -167,17 +169,30 @@ function makeParagraph(
   const sa = opts?.spaceAfter ?? 40;
   const line = opts?.line ?? 300;
   const boldXml = opts?.bold ? '<w:b/><w:bCs/>' : '';
+  const keepNextXml = opts?.keepNext ? '<w:keepNext/>' : '';
   const rPr = `<w:rPr><w:rFonts w:hint="eastAsia" w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="${font}" w:cs="Times New Roman"/>${boldXml}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/><w:lang w:val="en-US" w:eastAsia="zh-CN"/></w:rPr>`;
+  // Dedicated monochrome symbol run properties so □ / ☑ NEVER fall back to color emoji on macOS/iOS!
+  const boxRPr = `<w:rPr><w:rFonts w:hint="eastAsia" w:ascii="SimSun" w:hAnsi="SimSun" w:eastAsia="SimSun" w:cs="SimSun"/>${boldXml}<w:sz w:val="${size}"/><w:szCs w:val="${size}"/><w:lang w:val="en-US" w:eastAsia="zh-CN"/></w:rPr>`;
 
   const lines = String(text || '').split('\n');
   const runs = lines
     .map((lineText, idx) => {
-      const br = idx > 0 ? '<w:br/>' : '';
-      return `<w:r>${rPr}${br}<w:t xml:space="preserve">${escapeXml(lineText)}</w:t></w:r>`;
+      const br = idx > 0 ? `<w:r>${rPr}<w:br/></w:r>` : '';
+      if (!lineText.includes('☑') && !lineText.includes('□')) {
+        return `${br}<w:r>${rPr}<w:t xml:space="preserve">${escapeXml(lineText)}</w:t></w:r>`;
+      }
+      const segs = lineText.split(/([☑□])/g).filter((s) => s.length > 0);
+      const segRuns = segs
+        .map((seg) => {
+          const isBox = seg === '☑' || seg === '□';
+          return `<w:r>${isBox ? boxRPr : rPr}<w:t xml:space="preserve">${escapeXml(seg)}</w:t></w:r>`;
+        })
+        .join('');
+      return `${br}${segRuns}`;
     })
     .join('');
 
-  return `<w:p><w:pPr><w:jc w:val="${align}"/><w:spacing w:before="${sb}" w:after="${sa}" w:line="${line}" w:lineRule="auto"/></w:pPr>${runs}</w:p>`;
+  return `<w:p><w:pPr><w:jc w:val="${align}"/>${keepNextXml}<w:spacing w:before="${sb}" w:after="${sa}" w:line="${line}" w:lineRule="auto"/></w:pPr>${runs}</w:p>`;
 }
 
 export interface BuildElementsComplaintDocxInput {
@@ -438,6 +453,542 @@ export function downloadElementsComplaintDocx(
   filename: string
 ): void {
   const bytes = buildElementsComplaintDocxBytes(input);
+  triggerDocxDownload(bytes, filename);
+}
+
+// ---- Official Supreme People's Court (法〔2025〕82号) Exact-Format OOXML (.docx) Builder ----
+
+function makeSpcNoticeParagraphs(rawText: string): string {
+  const lines = String(rawText || '').split('\n');
+  return lines
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return '';
+      if (trimmed.startsWith('★') && trimmed.endsWith('★')) {
+        return makeParagraph(trimmed, {
+          align: 'center',
+          bold: true,
+          sizeHalfPt: 21,
+          font: '宋体',
+          spaceBefore: 60,
+          spaceAfter: 30,
+          line: 280,
+        });
+      }
+      if (trimmed === '说明：' || trimmed === '说明:') {
+        return makeParagraph(trimmed, {
+          align: 'left',
+          bold: true,
+          sizeHalfPt: 21,
+          font: '宋体',
+          spaceBefore: 20,
+          spaceAfter: 20,
+          line: 280,
+        });
+      }
+      return makeParagraph(trimmed, {
+        align: 'left',
+        bold: false,
+        sizeHalfPt: 20,
+        font: '仿宋',
+        spaceBefore: 10,
+        spaceAfter: 15,
+        line: 270,
+      });
+    })
+    .filter(Boolean)
+    .join('');
+}
+
+function makeSpcSectionParagraphs(rawText: string): string {
+  const lines = String(rawText || '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return makeParagraph('', { align: 'center', bold: true, sizeHalfPt: 22, font: '宋体', keepNext: true });
+  }
+  return lines
+    .map((line, idx) =>
+      makeParagraph(line, {
+        align: 'center',
+        bold: idx === 0,
+        sizeHalfPt: idx === 0 ? 22 : 19,
+        font: idx === 0 ? '宋体' : '仿宋',
+        spaceBefore: idx === 0 ? 30 : 10,
+        spaceAfter: idx === lines.length - 1 ? 30 : 10,
+        line: 270,
+        keepNext: true,
+      })
+    )
+    .join('');
+}
+
+function makeSpcCell(opts: {
+  widthDxa: number;
+  gridSpan?: number;
+  vMerge?: 'restart' | 'continue';
+  align?: 'left' | 'center' | 'right';
+  contentXml: string;
+  vAlign?: 'center' | 'top';
+}): string {
+  const gsXml = opts.gridSpan && opts.gridSpan > 1 ? `<w:gridSpan w:val="${opts.gridSpan}"/>` : '';
+  const vmXml =
+    opts.vMerge === 'restart'
+      ? '<w:vMerge w:val="restart"/>'
+      : opts.vMerge === 'continue'
+      ? '<w:vMerge/>'
+      : '';
+  const vAlign = opts.vAlign || 'center';
+  return (
+    `<w:tc><w:tcPr><w:tcW w:w="${opts.widthDxa}" w:type="dxa"/>${gsXml}${vmXml}` +
+    `<w:tcMar><w:top w:w="75" w:type="dxa"/><w:bottom w:w="75" w:type="dxa"/><w:left w:w="115" w:type="dxa"/><w:right w:w="115" w:type="dxa"/></w:tcMar>` +
+    `<w:vAlign w:val="${vAlign}"/></w:tcPr>` +
+    opts.contentXml +
+    `</w:tc>`
+  );
+}
+
+function buildSpcAttachmentXml(att: ResolvedSpcAttachment, totalW: number): string {
+  const parts: string[] = [
+    `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`,
+    makeParagraph(att.label || '附件', {
+      align: 'left',
+      bold: true,
+      sizeHalfPt: 22,
+      font: '黑体',
+      spaceBefore: 0,
+      spaceAfter: 40,
+      line: 280,
+    }),
+    makeParagraph(att.title || '', {
+      align: 'center',
+      bold: true,
+      sizeHalfPt: 28,
+      font: '宋体',
+      spaceBefore: 20,
+      spaceAfter: att.subtitle ? 40 : 100,
+      line: 300,
+    }),
+  ];
+
+  if (att.subtitle && att.subtitle.trim()) {
+    parts.push(
+      makeParagraph(att.subtitle.trim(), {
+        align: 'center',
+        bold: false,
+        sizeHalfPt: 20,
+        font: '仿宋',
+        spaceBefore: 0,
+        spaceAfter: 80,
+        line: 260,
+      })
+    );
+  }
+
+  const colCount = Math.max(1, att.columns.length, ...att.rows.map((r) => r.length));
+  // Smart proportional column widths for standard 5-col evidence list / 6-col cross-exam table / wide tables
+  let colWidths: number[] = [];
+  if (colCount === 5 && att.columns[0]?.includes('编号') && att.columns[1]?.includes('页码')) {
+    colWidths = [820, 820, 2600, 1772, 3400]; // sum = 9412
+  } else if (colCount === 6 && att.columns[0]?.includes('编号') && att.columns[2]?.includes('真实性')) {
+    colWidths = [760, 2252, 1300, 1300, 1300, 2500]; // sum = 9412
+  } else {
+    const baseW = Math.floor(totalW / colCount);
+    colWidths = Array.from({ length: colCount }, (_, idx) =>
+      idx === colCount - 1 ? totalW - baseW * (colCount - 1) : baseW
+    );
+  }
+
+  const fontSz = colCount >= 10 ? 15 : colCount >= 7 ? 17 : 19;
+  const gridXml = colWidths.map((w) => `<w:gridCol w:w="${w}"/>`).join('');
+  const trs: string[] = [];
+
+  if (att.columns.length > 0) {
+    const headerTds = Array.from({ length: colCount }, (_, ci) =>
+      makeSpcCell({
+        widthDxa: colWidths[ci],
+        contentXml: makeParagraph(att.columns[ci] || '', {
+          align: 'center',
+          bold: true,
+          sizeHalfPt: fontSz,
+          font: '宋体',
+          spaceBefore: 15,
+          spaceAfter: 15,
+          line: 240,
+        }),
+      })
+    ).join('');
+    trs.push(`<w:tr><w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>${headerTds}</w:tr>`);
+  }
+
+  for (const row of att.rows) {
+    if (row.length === 1 && colCount > 1) {
+      trs.push(
+        `<w:tr><w:trPr><w:cantSplit/></w:trPr>` +
+          makeSpcCell({
+            widthDxa: totalW,
+            gridSpan: colCount,
+            contentXml: makeParagraph(row[0] || '', {
+              align: 'left',
+              bold: true,
+              sizeHalfPt: fontSz,
+              font: '宋体',
+              spaceBefore: 15,
+              spaceAfter: 15,
+              line: 250,
+            }),
+          }) +
+          `</w:tr>`
+      );
+    } else {
+      const tds = Array.from({ length: colCount }, (_, ci) =>
+        makeSpcCell({
+          widthDxa: colWidths[ci],
+          contentXml: makeParagraph(row[ci] || '', {
+            align: ci === 0 ? 'center' : 'left',
+            bold: false,
+            sizeHalfPt: fontSz,
+            font: '仿宋',
+            spaceBefore: 15,
+            spaceAfter: 15,
+            line: 250,
+          }),
+        })
+      ).join('');
+      trs.push(`<w:tr><w:trPr><w:cantSplit/></w:trPr>${tds}</w:tr>`);
+    }
+  }
+
+  parts.push(
+    `<w:tbl><w:tblPr><w:tblW w:w="${totalW}" w:type="dxa"/><w:jc w:val="center"/>` +
+      `<w:tblBorders>` +
+      `<w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>` +
+      `<w:left w:val="single" w:sz="6" w:space="0" w:color="000000"/>` +
+      `<w:bottom w:val="single" w:sz="6" w:space="0" w:color="000000"/>` +
+      `<w:right w:val="single" w:sz="6" w:space="0" w:color="000000"/>` +
+      `<w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/>` +
+      `<w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/>` +
+      `</w:tblBorders><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid>${gridXml}</w:tblGrid>${trs.join('')}</w:tbl>`
+  );
+
+  for (const fl of att.footerLines) {
+    parts.push(
+      makeParagraph(fl, {
+        align: 'right',
+        bold: false,
+        sizeHalfPt: 21,
+        font: '宋体',
+        spaceBefore: 80,
+        spaceAfter: 20,
+        line: 280,
+      })
+    );
+  }
+
+  return parts.join('');
+}
+
+/**
+ * Generates an authentic Supreme People's Court (法〔2025〕82号) Word (.docx)
+ * preserving exact official structure: 说明 box, section headers, multi-column
+ * 案号/案由 & Patent 3-col vMerge grids, verbatim checkboxes (□/☑), official sign-off,
+ * and post-signature 附件 tables.
+ */
+export function buildOfficialSpcDocxBytes(doc: ResolvedSpcDocument): Uint8Array {
+  // A4 width 11906 dxa, margins left=1360 (~24mm), right=1134 (~20mm) => usable width 9412 dxa
+  const TOTAL_W = 9412;
+
+  const has4Col = doc.rows.some((r) => r.kind === 'grid' && (r.cells?.length || 0) === 4);
+  const has3Col = doc.rows.some((r) => r.kind === 'grid' && (r.cells?.length || 0) === 3);
+
+  // Exact twip-aligned column grid covering 1-col, 2-col, 3-col, and 4-col rows cleanly
+  // Left col = 2560 dxa (~27.2%) so "（法人、非法人组织）" fits cleanly on 1 centered line!
+  let gridCols: number[];
+  let fullSpan: number;
+  let twoColSpans: [number, number];
+  let threeColSpans: [number, number, number];
+  let fourColSpans: [number, number, number, number];
+
+  if (has4Col && has3Col) {
+    gridCols = [1500, 1060, 2146, 954, 546, 3206]; // sum = 9412
+    fullSpan = 6;
+    twoColSpans = [2, 4]; // 2560 + 6852
+    threeColSpans = [2, 2, 2]; // 2560 + 3100 + 3752
+    fourColSpans = [1, 2, 2, 1]; // 1500 + 3206 + 1500 + 3206
+  } else if (has4Col) {
+    gridCols = [1500, 1060, 2146, 1500, 3206]; // sum = 9412
+    fullSpan = 5;
+    twoColSpans = [2, 3]; // 2560 + 6852
+    threeColSpans = [2, 2, 1];
+    fourColSpans = [1, 2, 1, 1]; // 1500 + 3206 + 1500 + 3206
+  } else if (has3Col) {
+    gridCols = [2560, 3100, 3752]; // sum = 9412
+    fullSpan = 3;
+    twoColSpans = [1, 2]; // 2560 + 6852
+    threeColSpans = [1, 1, 1]; // 2560 + 3100 + 3752
+    fourColSpans = [1, 1, 1, 1];
+  } else {
+    gridCols = [2560, 6852]; // sum = 9412
+    fullSpan = 2;
+    twoColSpans = [1, 1];
+    threeColSpans = [1, 1, 1];
+    fourColSpans = [1, 1, 1, 1];
+  }
+
+  const trs: string[] = [];
+
+  for (let i = 0; i < doc.rows.length; i++) {
+    const r = doc.rows[i];
+
+    if (r.kind === 'notice') {
+      trs.push(
+        `<w:tr>` +
+          makeSpcCell({
+            widthDxa: TOTAL_W,
+            gridSpan: fullSpan,
+            vAlign: 'top',
+            contentXml: makeSpcNoticeParagraphs(r.value || ''),
+          }) +
+          `</w:tr>`
+      );
+      continue;
+    }
+
+    if (r.kind === 'section') {
+      trs.push(
+        `<w:tr><w:trPr><w:cantSplit/></w:trPr>` +
+          makeSpcCell({
+            widthDxa: TOTAL_W,
+            gridSpan: fullSpan,
+            contentXml: makeSpcSectionParagraphs(r.value || ''),
+          }) +
+          `</w:tr>`
+      );
+      continue;
+    }
+
+    if (r.kind === 'guide' || r.kind === 'full_input') {
+      const isGuideOnly = r.kind === 'guide' && !(r.value || '').includes('\n');
+      const trHeight = isGuideOnly ? '<w:trHeight w:val="680" w:hRule="atLeast"/>' : '';
+      trs.push(
+        `<w:tr><w:trPr>${trHeight}</w:trPr>` +
+          makeSpcCell({
+            widthDxa: TOTAL_W,
+            gridSpan: fullSpan,
+            vAlign: isGuideOnly ? 'top' : 'center',
+            contentXml: makeParagraph(r.value || '', {
+              align: 'left',
+              bold: false,
+              sizeHalfPt: 21,
+              font: '仿宋',
+              spaceBefore: 20,
+              spaceAfter: 20,
+              line: 290,
+            }),
+          }) +
+          `</w:tr>`
+      );
+      continue;
+    }
+
+    if (r.kind === 'grid' && r.cells && r.cells.length === 4) {
+      const widths = [1500, 3206, 1500, 3206];
+      const cellsXml = r.cells
+        .map((txt, ci) =>
+          makeSpcCell({
+            widthDxa: widths[ci],
+            gridSpan: fourColSpans[ci],
+            contentXml: makeParagraph(txt, {
+              align: ci === 0 || ci === 2 ? 'center' : 'left',
+              bold: ci === 0 || ci === 2,
+              sizeHalfPt: 21,
+              font: ci === 0 || ci === 2 ? '宋体' : '仿宋',
+              spaceBefore: 20,
+              spaceAfter: 20,
+              line: 280,
+            }),
+          })
+        )
+        .join('');
+      trs.push(`<w:tr><w:trPr><w:cantSplit/></w:trPr>${cellsXml}</w:tr>`);
+      continue;
+    }
+
+    if (r.kind === 'grid' && r.cells && r.cells.length === 3) {
+      const nextIsContinue = Boolean(doc.rows[i + 1]?.vMergeContinue);
+      const col0VMerge: 'restart' | 'continue' | undefined = r.vMergeContinue
+        ? 'continue'
+        : nextIsContinue
+        ? 'restart'
+        : undefined;
+      const widths = [2560, 3100, 3752];
+      const cellsXml = r.cells
+        .map((txt, ci) =>
+          makeSpcCell({
+            widthDxa: widths[ci],
+            gridSpan: threeColSpans[ci],
+            vMerge: ci === 0 ? col0VMerge : undefined,
+            contentXml: makeParagraph(ci === 0 && col0VMerge === 'continue' ? '' : txt, {
+              align: ci === 0 ? 'center' : 'left',
+              bold: ci === 0,
+              sizeHalfPt: 21,
+              font: ci === 0 ? '宋体' : '仿宋',
+              spaceBefore: 20,
+              spaceAfter: 20,
+              line: 280,
+            }),
+          })
+        )
+        .join('');
+      trs.push(`<w:tr>${cellsXml}</w:tr>`);
+      continue;
+    }
+
+    // Standard official 2-column element row
+    const leftXml = makeSpcCell({
+      widthDxa: 2560,
+      gridSpan: twoColSpans[0],
+      contentXml: makeParagraph(r.label || '', {
+        align: 'center',
+        bold: false,
+        sizeHalfPt: 21,
+        font: '宋体',
+        spaceBefore: 20,
+        spaceAfter: 20,
+        line: 280,
+      }),
+    });
+    const rightXml = makeSpcCell({
+      widthDxa: 6852,
+      gridSpan: twoColSpans[1],
+      contentXml: makeParagraph(r.value || '', {
+        align: 'left',
+        bold: false,
+        sizeHalfPt: 21,
+        font: '仿宋',
+        spaceBefore: 20,
+        spaceAfter: 20,
+        line: 290,
+      }),
+    });
+    // Allow very long party/mediation rows to flow cleanly across pages, keep short rows together
+    const rowLen = (r.value || '').length;
+    const trPr = rowLen < 320 ? '<w:trPr><w:cantSplit/></w:trPr>' : '';
+    trs.push(`<w:tr>${trPr}${leftXml}${rightXml}</w:tr>`);
+  }
+
+  const mainTableXml =
+    `<w:tbl>` +
+    `<w:tblPr>` +
+    `<w:tblW w:w="${TOTAL_W}" w:type="dxa"/>` +
+    `<w:jc w:val="center"/>` +
+    `<w:tblBorders>` +
+    `<w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>` +
+    `<w:left w:val="single" w:sz="6" w:space="0" w:color="000000"/>` +
+    `<w:bottom w:val="single" w:sz="6" w:space="0" w:color="000000"/>` +
+    `<w:right w:val="single" w:sz="6" w:space="0" w:color="000000"/>` +
+    `<w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/>` +
+    `<w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/>` +
+    `</w:tblBorders>` +
+    `<w:tblLayout w:type="fixed"/>` +
+    `</w:tblPr>` +
+    `<w:tblGrid>${gridCols.map((w) => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>` +
+    trs.join('') +
+    `</w:tbl>`;
+
+  const bodyParts: string[] = [
+    makeParagraph(doc.docTitle, {
+      align: 'center',
+      bold: true,
+      sizeHalfPt: 44, // 22pt 二号 (matches official SPC 22pt title)
+      font: '宋体',
+      spaceBefore: 0,
+      spaceAfter: doc.docSubtitle ? 40 : 140,
+      line: 320,
+    }),
+  ];
+
+  if (doc.docSubtitle) {
+    bodyParts.push(
+      makeParagraph(doc.docSubtitle, {
+        align: 'center',
+        bold: true,
+        sizeHalfPt: 32, // 16pt 三号 (matches official SPC 16-18pt subtitle)
+        font: '宋体',
+        spaceBefore: 0,
+        spaceAfter: 140,
+        line: 290,
+      })
+    );
+  }
+
+  bodyParts.push(
+    mainTableXml,
+    makeParagraph(`${doc.signerLine}${doc.signerName || '                    '}`, {
+      align: 'right',
+      bold: false,
+      sizeHalfPt: 24, // 小四 12pt
+      font: '宋体',
+      spaceBefore: 220,
+      spaceAfter: 60,
+      line: 300,
+    }),
+    makeParagraph(`${doc.dateLine}${doc.signDate || '      年    月    日'}`, {
+      align: 'right',
+      bold: false,
+      sizeHalfPt: 24,
+      font: '宋体',
+      spaceBefore: 20,
+      spaceAfter: 60,
+      line: 300,
+    })
+  );
+
+  for (const fnLine of doc.footnotes || []) {
+    bodyParts.push(
+      makeParagraph(fnLine, {
+        align: 'left',
+        bold: fnLine === '注释：' || fnLine === '注释:',
+        sizeHalfPt: 19,
+        font: fnLine === '注释：' || fnLine === '注释:' ? '宋体' : '仿宋',
+        spaceBefore: fnLine === '注释：' || fnLine === '注释:' ? 140 : 20,
+        spaceAfter: 30,
+        line: 270,
+      })
+    );
+  }
+
+  for (const att of doc.attachments || []) {
+    bodyParts.push(buildSpcAttachmentXml(att, TOTAL_W));
+  }
+
+  const documentXml =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+    `<w:body>` +
+    bodyParts.join('') +
+    `<w:sectPr>` +
+    `<w:pgSz w:w="11906" w:h="16838"/>` +
+    `<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1360" w:header="720" w:footer="720" w:gutter="0"/>` +
+    `</w:sectPr>` +
+    `</w:body></w:document>`;
+
+  const encoder = new TextEncoder();
+  return createZipStore([
+    { name: '[Content_Types].xml', content: encoder.encode(CONTENT_TYPES_XML) },
+    { name: '_rels/.rels', content: encoder.encode(ROOT_RELS_XML) },
+    { name: 'word/_rels/document.xml.rels', content: encoder.encode(DOC_RELS_XML) },
+    { name: 'word/styles.xml', content: encoder.encode(STYLES_XML) },
+    { name: 'word/settings.xml', content: encoder.encode(SETTINGS_XML) },
+    { name: 'word/fontTable.xml', content: encoder.encode(FONT_TABLE_XML) },
+    { name: 'word/document.xml', content: encoder.encode(documentXml) },
+  ]);
+}
+
+export function downloadOfficialSpcDocx(doc: ResolvedSpcDocument, filename: string): void {
+  const bytes = buildOfficialSpcDocxBytes(doc);
   triggerDocxDownload(bytes, filename);
 }
 
