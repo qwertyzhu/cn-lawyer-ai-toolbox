@@ -7,6 +7,7 @@ dist/
 !.env.example
 .ima-credentials.json
 .account-registry.json
+.telemetry-counts.json
 .user-vaults/
 .vault-master.key
 ops/.ssh/

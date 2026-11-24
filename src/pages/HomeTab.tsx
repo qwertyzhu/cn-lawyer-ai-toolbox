@@ -3,22 +3,26 @@ import {
   ArrowUpRight,
   BellRing,
   BookOpen,
+  Briefcase,
   Building2,
-  Clock,
   Copy,
+  Download,
   KeyRound,
+  Plus,
   Search,
   Smartphone,
   Sparkles,
   Trash2,
   Wifi,
   WifiOff,
+  X,
 } from 'lucide-react';
 import { ToolIcon } from '../components/ToolIcon';
 import { SITE_CONFIG } from '../config/siteConfig';
 import { useToolbox } from '../context/ToolboxContext';
 import { AI_SPECIALISTS_REGISTRY, OFFLINE_TOOLS_REGISTRY } from '../data/toolRegistry';
 import { copyToClipboard } from '../lib/clipboard';
+import { downloadMarkdownReportDocx } from '../lib/docxBuilder';
 import type { VerifiedLicenseInfo } from '../lib/licenseEngine';
 
 interface HomeTabProps {
@@ -32,8 +36,15 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
     byok,
     pinnedTools,
     deadlines,
+    scratchpads,
     history,
     clearHistory,
+    lawyerProfile,
+    casePockets,
+    activeCaseId,
+    setActiveCaseId,
+    addCasePocket,
+    deleteCasePocket,
     openTool,
     openLawsSearch,
     sendToAi,
@@ -45,6 +56,103 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
     byok.providers.find((p) => p.id === byok.activeProviderId) || byok.providers[0];
   const hasKey = Boolean(activeProvider?.apiKey || activeProvider?.apiKeyEncrypted);
   const [quickQuery, setQuickQuery] = useState('');
+  const [showNewCaseForm, setShowNewCaseForm] = useState(false);
+  const [newCaseTitle, setNewCaseTitle] = useState('');
+  const [newCaseNo, setNewCaseNo] = useState('');
+  const [newCaseCourt, setNewCaseCourt] = useState('');
+  const [newCaseParties, setNewCaseParties] = useState('');
+
+  const activeCase = casePockets.find((c) => c.id === activeCaseId) || null;
+  const visibleHistory = activeCase
+    ? history.filter((h) => h.caseId === activeCase.id)
+    : history;
+  const activeCaseDeadlines = activeCase
+    ? deadlines.filter(
+        (d) => d.caseId === activeCase.id || (activeCase.title && d.caseName.includes(activeCase.title))
+      )
+    : [];
+  const activeCaseNotes = activeCase
+    ? scratchpads.filter(
+        (n) => n.caseId === activeCase.id || (activeCase.title && n.title.includes(activeCase.title))
+      )
+    : [];
+
+  const handleCreateCase = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCaseTitle.trim()) {
+      showToast('请输入案件简称（如：某买卖合同纠纷）');
+      return;
+    }
+    addCasePocket({
+      title: newCaseTitle.trim(),
+      caseNo: newCaseNo.trim() || undefined,
+      court: newCaseCourt.trim() || undefined,
+      clientName: newCaseParties.trim() || undefined,
+    });
+    setNewCaseTitle('');
+    setNewCaseNo('');
+    setNewCaseCourt('');
+    setNewCaseParties('');
+    setShowNewCaseForm(false);
+  };
+
+  const handleExportCaseBrief = () => {
+    if (!activeCase) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const md: string[] = [
+      `## 一、案件基础档案`,
+      `- **案件简称**：${activeCase.title}`,
+      ...(activeCase.caseNo ? [`- **案号**：${activeCase.caseNo}`] : []),
+      ...(activeCase.court ? [`- **受案机关/法院**：${activeCase.court}`] : []),
+      ...(activeCase.clientName ? [`- **当事人信息**：${activeCase.clientName}`] : []),
+      ...(lawyerProfile.name
+        ? [
+            `- **承办律师**：${lawyerProfile.name}${lawyerProfile.firmName ? `（${lawyerProfile.firmName}）` : ''}${lawyerProfile.licenseNo ? ` ｜ 执业证号：${lawyerProfile.licenseNo}` : ''}${lawyerProfile.phone ? ` ｜ 电话：${lawyerProfile.phone}` : ''}`,
+          ]
+        : []),
+      '',
+      `## 二、关联测算与文书留痕（共 ${visibleHistory.length} 条）`,
+      ...(visibleHistory.length === 0
+        ? ['暂无已归入本案的测算记录（选中本案件口袋后，在任意计算器或诉状工具点击“存入本机记录”即可自动归档）。']
+        : visibleHistory.flatMap((h, i) => [
+            `### ${i + 1}. ${h.toolTitle}（${new Date(h.createdAt).toLocaleDateString('zh-CN')}）`,
+            `- **摘要**：${h.summary}`,
+            h.detailText.slice(0, 1200),
+            '',
+          ])),
+      '',
+      `## 三、保全续封与重要法定期限（共 ${activeCaseDeadlines.length} 项）`,
+      ...(activeCaseDeadlines.length === 0
+        ? ['暂无关联期限提醒。']
+        : activeCaseDeadlines.map(
+            (d, i) =>
+              `${i + 1}. **${d.title}**（${d.caseName}）｜ 届满日：${d.dueDate} ｜ 预警日：${d.warnDate}${d.notes ? ` ｜ 备注：${d.notes}` : ''}`
+          )),
+      '',
+      `## 四、会见 / 庭审 / 咨询速记摘要（共 ${activeCaseNotes.length} 篇）`,
+      ...(activeCaseNotes.length === 0
+        ? ['暂无关联速记笔录。']
+        : activeCaseNotes.flatMap((n, i) => [
+            `### ${i + 1}. ${n.title}`,
+            ...(n.facts ? [`- **核心事实**：${n.facts}`] : []),
+            ...(n.disputes ? [`- **争议焦点**：${n.disputes}`] : []),
+            ...(n.missingEvidence ? [`- **待补证据**：${n.missingEvidence}`] : []),
+            ...(n.todoItems ? [`- **待办事项**：${n.todoItems}`] : []),
+            '',
+          ])),
+    ];
+    const safeName = activeCase.title.replace(/[\\/:*?"<>|]/g, '_');
+    const fname = `案件初评估简报_${safeName}_${today}.docx`;
+    downloadMarkdownReportDocx(
+      {
+        title: `案件初评估简报 — ${activeCase.title}`,
+        subtitle: `导出日期：${today}${lawyerProfile.name ? ` ｜ 承办律师：${lawyerProfile.name}` : ''} ｜ 纯本地离线归档`,
+        markdownBody: md.join('\n'),
+      },
+      fname
+    );
+    showToast(`已导出《${fname}》`);
+  };
 
   const pinnedMetaList = OFFLINE_TOOLS_REGISTRY.filter((t) => pinnedTools.includes(t.id));
   const activeDeadlines = deadlines
@@ -174,7 +282,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
                 <Building2 className="h-3.5 w-3.5 text-[#D1B27A] flex-none" />
                 要素式起诉状
               </span>
-              <span className="text-[10px] text-[#D1B27A]">14类</span>
+              <span className="text-[10px] text-[#D1B27A]">113份</span>
             </button>
           )}
 
@@ -361,58 +469,209 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
         </div>
       </section>
 
-      {/* Recent Offline Calculation History */}
-      <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5">
-        <div className="flex items-center justify-between border-b border-[#EFECE5] pb-2.5">
-          <div className="flex items-center gap-1.5">
-            <Clock className="h-4 w-4 text-[#B89254]" />
+      {/* Lightweight Local Case Pocket + Recent Calculation History */}
+      <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFECE5] pb-3">
+          <div className="flex items-center gap-2">
+            <Briefcase className="h-4 w-4 text-[#B89254]" />
             <h3 className="font-display text-sm sm:text-base font-bold text-[#11151C]">
-              最近本机测算与脱敏记录（仅存手机本地）
+              轻案件口袋 & 本机测算留痕
             </h3>
+            <span className="rounded-full bg-[#F6F3EB] border border-[#E5DEC9] px-2 py-0.5 text-[10px] font-semibold text-[#7A5922]">
+              纯本地零上传
+            </span>
           </div>
-          {history.length > 0 && (
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={clearHistory}
-              className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-red-600"
+              onClick={() => setShowNewCaseForm((v) => !v)}
+              className="inline-flex items-center gap-1 rounded-lg border border-[#C9A463] bg-[#FAF6EC] hover:bg-[#F3ECE0] px-2.5 py-1 text-xs font-bold text-[#7A5922] transition-colors"
             >
-              <Trash2 className="h-3.5 w-3.5" /> 清空
+              {showNewCaseForm ? <X className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+              {showNewCaseForm ? '收起' : '新建案件口袋'}
             </button>
-          )}
+            {!activeCase && history.length > 0 && (
+              <button
+                type="button"
+                onClick={clearHistory}
+                className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-red-600"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> 清空
+              </button>
+            )}
+          </div>
         </div>
 
-        {history.length === 0 ? (
-          <p className="py-6 text-center text-xs text-slate-500">
-            暂无最近记录。使用任意计算器点击「存入本机测算记录」后，可在开庭或见客户时离线随时翻看。
+        {/* Inline New Case Form */}
+        {showNewCaseForm && (
+          <form
+            onSubmit={handleCreateCase}
+            className="rounded-xl border border-[#E5DEC9] bg-[#FAF8F3] p-3.5 space-y-2.5"
+          >
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <input
+                type="text"
+                value={newCaseTitle}
+                onChange={(e) => setNewCaseTitle(e.target.value)}
+                placeholder="案件简称（必填，如：甲公司买卖合同货款案）"
+                className="rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs text-[#11151C] focus:border-[#0E223D] focus:outline-none"
+              />
+              <input
+                type="text"
+                value={newCaseParties}
+                onChange={(e) => setNewCaseParties(e.target.value)}
+                placeholder="委托人 / 对方当事人（选填）"
+                className="rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs text-[#11151C] focus:border-[#0E223D] focus:outline-none"
+              />
+              <input
+                type="text"
+                value={newCaseCourt}
+                onChange={(e) => setNewCaseCourt(e.target.value)}
+                placeholder="受案法院 / 仲裁委（选填）"
+                className="rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs text-[#11151C] focus:border-[#0E223D] focus:outline-none"
+              />
+              <input
+                type="text"
+                value={newCaseNo}
+                onChange={(e) => setNewCaseNo(e.target.value)}
+                placeholder="案号（选填，如：（2026）浙01民初...）"
+                className="rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs text-[#11151C] focus:border-[#0E223D] focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-slate-500">
+                选中案件口袋后，所有新保存的诉讼费/LPR/律师费/诉状测算会自动归入该案。
+              </span>
+              <button
+                type="submit"
+                className="rounded-lg bg-[#0E223D] hover:bg-[#17345D] px-3.5 py-1.5 text-xs font-bold text-[#F6F4EF]"
+              >
+                创建并选中
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* Case Switcher Pills */}
+        {casePockets.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setActiveCaseId('')}
+              className={`rounded-full px-3 py-1 text-xs font-semibold border transition-colors ${
+                !activeCaseId
+                  ? 'border-[#0E223D] bg-[#0E223D] text-white'
+                  : 'border-[#DED8CC] bg-[#FAF9F6] text-slate-600 hover:border-[#B89254]'
+              }`}
+            >
+              全部记录 ({history.length})
+            </button>
+            {casePockets.map((cp) => {
+              const isSelected = cp.id === activeCaseId;
+              const cnt = history.filter((h) => h.caseId === cp.id).length;
+              return (
+                <button
+                  key={cp.id}
+                  type="button"
+                  onClick={() => setActiveCaseId(cp.id)}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold border transition-colors ${
+                    isSelected
+                      ? 'border-[#B89254] bg-gradient-to-r from-[#0E223D] to-[#17345D] text-[#E5CB96] shadow-xs'
+                      : 'border-[#DED8CC] bg-white text-[#11151C] hover:border-[#B89254]'
+                  }`}
+                >
+                  📁 {cp.title}
+                  {cnt > 0 ? ` (${cnt})` : ''}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Active Case Dossier Bar */}
+        {activeCase && (
+          <div className="rounded-xl border border-[#DFD2B8] bg-gradient-to-r from-[#FDFBF6] to-[#F7F2E6] p-3 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="min-w-0 space-y-0.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-display text-sm font-bold text-[#0E223D]">
+                  当前在办：{activeCase.title}
+                </span>
+                {activeCase.caseNo && (
+                  <span className="rounded bg-white border border-[#E2DAC7] px-2 py-0.5 font-mono text-[10.5px] text-slate-600">
+                    {activeCase.caseNo}
+                  </span>
+                )}
+              </div>
+              <div className="text-[11px] text-slate-600 flex flex-wrap gap-x-3 gap-y-0.5">
+                {activeCase.court && <span>机关：{activeCase.court}</span>}
+                {activeCase.clientName && <span>当事人：{activeCase.clientName}</span>}
+                <span>
+                  归档统计：{visibleHistory.length} 条测算 · {activeCaseDeadlines.length} 条期限 · {activeCaseNotes.length} 篇速记
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 flex-none">
+              <button
+                type="button"
+                onClick={handleExportCaseBrief}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345D] px-3 py-1.5 text-xs font-bold text-[#E5CB96] shadow-xs transition-colors"
+              >
+                <Download className="h-3.5 w-3.5" /> 导出《案件初评估简报.docx》
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteCasePocket(activeCase.id)}
+                className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-400 hover:border-red-300 hover:text-red-600"
+                title="移除此案件口袋"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {visibleHistory.length === 0 ? (
+          <p className="py-5 text-center text-xs text-slate-500">
+            {activeCase
+              ? `「${activeCase.title}」口袋内暂无测算留痕。保持本口袋选中状态，在诉讼费/LPR/要素式诉状中点“存入本机记录”将自动归档至此。`
+              : '暂无最近记录。使用任意计算器点击「存入本机测算记录」后，可在开庭或见客户时离线随时翻看，也可新建「案件口袋」按案归组导出简报。'}
           </p>
         ) : (
-          <div className="mt-3 divide-y divide-[#EFECE5]">
-            {history.slice(0, 5).map((item) => (
-              <div key={item.id} className="py-2.5 flex items-center justify-between gap-3">
-                <div
-                  onClick={() => openTool(item.toolId)}
-                  className="min-w-0 flex-1 cursor-pointer"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-[#0E223D]">{item.toolTitle}</span>
-                    <span className="text-[11px] text-slate-400">
-                      {new Date(item.createdAt).toLocaleDateString('zh-CN')}
-                    </span>
+          <div className="divide-y divide-[#EFECE5]">
+            {visibleHistory.slice(0, 6).map((item) => {
+              const linkedCase = item.caseId ? casePockets.find((c) => c.id === item.caseId) : null;
+              return (
+                <div key={item.id} className="py-2.5 flex items-center justify-between gap-3">
+                  <div
+                    onClick={() => openTool(item.toolId)}
+                    className="min-w-0 flex-1 cursor-pointer"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-bold text-[#0E223D]">{item.toolTitle}</span>
+                      {linkedCase && !activeCase && (
+                        <span className="rounded bg-[#F3ECE0] px-1.5 py-0.5 text-[10px] font-semibold text-[#7A5922]">
+                          {linkedCase.title}
+                        </span>
+                      )}
+                      <span className="text-[11px] text-slate-400">
+                        {new Date(item.createdAt).toLocaleDateString('zh-CN')}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-xs text-slate-600 truncate">{item.summary}</div>
                   </div>
-                  <div className="mt-0.5 text-xs text-slate-600 truncate">{item.summary}</div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await copyToClipboard(item.detailText);
+                      showToast('已复制该条测算完整明细');
+                    }}
+                    className="flex-none inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2.5 py-1 text-xs font-medium text-slate-700 hover:border-[#0E223D]"
+                  >
+                    <Copy className="h-3 w-3" /> 复制
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    await copyToClipboard(item.detailText);
-                    showToast('已复制该条测算完整明细');
-                  }}
-                  className="flex-none inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2.5 py-1 text-xs font-medium text-slate-700 hover:border-[#0E223D]"
-                >
-                  <Copy className="h-3 w-3" /> 复制
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>

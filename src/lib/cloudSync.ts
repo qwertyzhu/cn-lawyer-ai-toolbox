@@ -3,7 +3,9 @@ import type {
   CalculationHistoryItem,
   ChecklistInstance,
   DeadlineReminderItem,
+  LawyerProfile,
   OfflineToolId,
+  SavedAiPrompt,
   ScratchpadNote,
 } from '../types/toolbox';
 import { exportEncryptedSyncCode, importEncryptedSyncCode } from './cryptoVault.ts';
@@ -41,6 +43,8 @@ export interface CloudSyncSnapshot {
     checklists: ChecklistInstance[];
     scratchpads: ScratchpadNote[];
     history: CalculationHistoryItem[];
+    lawyerProfile?: LawyerProfile;
+    savedPrompts?: SavedAiPrompt[];
     feeSheetRaw?: string | null;
     feeMineRaw?: string | null;
   };
@@ -162,6 +166,8 @@ export function hasMeaningfulLocalConfig(): boolean {
     if (toolboxStorage.getChecklists().length > 0) return true;
     if (toolboxStorage.getScratchpads().length > 0) return true;
     if (toolboxStorage.getHistory().length > 0) return true;
+    const lp = toolboxStorage.getLawyerProfile();
+    if (lp.name || lp.licenseNo || lp.phone || lp.firmName) return true;
     const feeRaw = localStorage.getItem(FEE_SHEET_KEY);
     if (feeRaw) {
       const fee = JSON.parse(feeRaw);
@@ -198,6 +204,8 @@ export function buildLocalSyncSnapshot(prefs: CloudSyncPrefs): CloudSyncSnapshot
       checklists: toolboxStorage.getChecklists(),
       scratchpads: toolboxStorage.getScratchpads(),
       history: toolboxStorage.getHistory(),
+      lawyerProfile: toolboxStorage.getLawyerProfile(),
+      savedPrompts: toolboxStorage.getSavedPrompts(),
       feeSheetRaw,
       feeMineRaw,
     };
@@ -243,6 +251,12 @@ export function applyCloudSyncSnapshot(
         // ignore
       }
     }
+    if (ws.lawyerProfile && typeof ws.lawyerProfile === 'object') {
+      toolboxStorage.saveLawyerProfile(ws.lawyerProfile);
+    }
+    if (Array.isArray(ws.savedPrompts)) {
+      toolboxStorage.saveSavedPrompts(ws.savedPrompts);
+    }
     try {
       if (typeof ws.feeSheetRaw === 'string' && ws.feeSheetRaw.trim()) {
         localStorage.setItem(FEE_SHEET_KEY, ws.feeSheetRaw);
@@ -268,6 +282,10 @@ export function resetLocalUserWorkspaceForAccountSwitch(): void {
     'cn_lawyer_box_scratchpads_v1',
     'cn_lawyer_box_pinned_tools_v1',
     'cn_lawyer_box_starred_laws_v1',
+    'cn_lawyer_box_lawyer_profile_v1',
+    'cn_lawyer_box_saved_prompts_v1',
+    'cn_lawyer_box_case_pockets_v1',
+    'cn_lawyer_box_active_case_id_v1',
     'cn_lawyer_box_elements_complaint_draft_v1',
     'spc2025_elements_doc_draft_v2',
     FEE_SHEET_KEY,
@@ -381,5 +399,27 @@ export async function deleteCloudVault(licenseRawCode: string): Promise<void> {
   const data = await resp.json().catch(() => null);
   if (!resp.ok || !data?.ok) {
     throw new Error(data?.error || `清空云端同步副本失败 (HTTP ${resp.status})`);
+  }
+}
+
+/**
+ * Privacy-preserving anonymous tool-open counter (count-only, zero user/case/keyword payload).
+ * Strictly disabled in AUTH_MODE=open (never sends network traffic without a firm-issued TR1- license).
+ */
+export function pingAnonymousToolHit(toolId: string, licenseRawCode: string): void {
+  if (!toolId || !licenseRawCode || !licenseRawCode.startsWith('TR1-')) return;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+  try {
+    void fetch('/api/telemetry/tool-hit', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Toolbox-License': licenseRawCode,
+      },
+      body: JSON.stringify({ toolId }),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // non-fatal best effort
   }
 }

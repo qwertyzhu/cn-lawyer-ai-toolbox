@@ -20,8 +20,104 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DIST_DIR = path.join(ROOT_DIR, 'dist');
 const ACCOUNT_REGISTRY_PATH = path.join(ROOT_DIR, '.account-registry.json');
+const TELEMETRY_COUNTS_PATH = path.join(ROOT_DIR, '.telemetry-counts.json');
 const USER_VAULTS_DIR = path.join(ROOT_DIR, '.user-vaults');
 const VAULT_MASTER_KEY_PATH = path.join(ROOT_DIR, '.vault-master.key');
+
+const ALLOWED_TELEMETRY_TOOL_IDS = new Set([
+  'elements-complaint',
+  'litigation-fee-calculator',
+  'lpr-interest-calculator',
+  'date-calculator',
+  'labor-compensation',
+  'injury-compensation',
+  'evidence-pdf-toolkit',
+  'local-redactor',
+  'lawyer-fee-quote',
+  'preservation-deadline',
+  'rmb-debt-offset',
+  'meeting-scratchpad',
+  'ai:contract-review',
+  'ai:de-ai-polish',
+  'ai:timeline-elements',
+  'ai:cross-exam-questions',
+  'ai:client-wechat-reply',
+  'ai:legal-sandbox',
+  'ima-cloud-qa',
+]);
+
+function loadTelemetryCounts() {
+  try {
+    if (fs.existsSync(TELEMETRY_COUNTS_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(TELEMETRY_COUNTS_PATH, 'utf8'));
+      if (parsed && typeof parsed === 'object') {
+        return {
+          updatedAt: String(parsed.updatedAt || ''),
+          totals: parsed.totals && typeof parsed.totals === 'object' ? parsed.totals : {},
+          daily: parsed.daily && typeof parsed.daily === 'object' ? parsed.daily : {},
+        };
+      }
+    }
+  } catch {
+    // ignore corrupt cache
+  }
+  return { updatedAt: '', totals: {}, daily: {} };
+}
+
+let telemetryCache = loadTelemetryCounts();
+
+function recordAnonymousToolHit(toolId) {
+  if (!ALLOWED_TELEMETRY_TOOL_IDS.has(toolId)) return false;
+  const today = getTodayChinaYmd();
+  const nextTotals = { ...telemetryCache.totals, [toolId]: (Number(telemetryCache.totals[toolId]) || 0) + 1 };
+  const todayBucket = { ...(telemetryCache.daily[today] || {}) };
+  todayBucket[toolId] = (Number(todayBucket[toolId]) || 0) + 1;
+  const nextDaily = { ...telemetryCache.daily, [today]: todayBucket };
+  const sortedDays = Object.keys(nextDaily).sort();
+  while (sortedDays.length > 60) {
+    const oldest = sortedDays.shift();
+    if (oldest) delete nextDaily[oldest];
+  }
+  telemetryCache = {
+    updatedAt: new Date().toISOString(),
+    totals: nextTotals,
+    daily: nextDaily,
+  };
+  try {
+    const tmp = `${TELEMETRY_COUNTS_PATH}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(telemetryCache, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, TELEMETRY_COUNTS_PATH);
+    fs.chmodSync(TELEMETRY_COUNTS_PATH, 0o600);
+  } catch {
+    // best-effort persistence
+  }
+  return true;
+}
+
+function summarizeTelemetryStats() {
+  const todayMs = Date.now() + 8 * 3600 * 1000;
+  const cutoffYmd = new Date(todayMs - 30 * 86400 * 1000).toISOString().slice(0, 10);
+  const last30Days = {};
+  let last30Total = 0;
+  for (const [ymd, bucket] of Object.entries(telemetryCache.daily || {})) {
+    if (ymd < cutoffYmd || !bucket || typeof bucket !== 'object') continue;
+    for (const [id, count] of Object.entries(bucket)) {
+      const n = Number(count) || 0;
+      if (n <= 0) continue;
+      last30Days[id] = (last30Days[id] || 0) + n;
+      last30Total += n;
+    }
+  }
+  const totals = { ...(telemetryCache.totals || {}) };
+  const totalHits = Object.values(totals).reduce((sum, v) => sum + (Number(v) || 0), 0);
+  return {
+    updatedAt: telemetryCache.updatedAt || '',
+    totalHits,
+    last30Total,
+    totals,
+    last30Days,
+  };
+}
 
 // Lightweight built-in .env loader (zero external dependencies; existing process.env takes precedence)
 try {
@@ -938,6 +1034,27 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 405, { ok: false, error: '不支持的请求方法' });
     }
 
+    // =========================================================================
+    // 0c. Privacy-Preserving Anonymous Tool-Open Counter (AUTH_MODE=license only)
+    // =========================================================================
+    if (pathname === '/api/telemetry/tool-hit' && req.method === 'POST') {
+      if (AUTH_MODE !== 'license') {
+        return sendJson(res, 200, { ok: true, skipped: true });
+      }
+      const licenseHeader = req.headers['x-toolbox-license'] || '';
+      const auth = await verifyTianranLicenseDetailed(String(licenseHeader));
+      if (!auth.valid || !auth.active) {
+        return sendJson(res, 403, { ok: false, error: '无效激活凭证' });
+      }
+      const body = await readJsonBody(req, 4096);
+      const toolId = String(body?.toolId || '').trim();
+      if (!ALLOWED_TELEMETRY_TOOL_IDS.has(toolId)) {
+        return sendJson(res, 400, { ok: false, error: '不支持的统计模块标识' });
+      }
+      recordAnonymousToolHit(toolId);
+      return sendJson(res, 200, { ok: true });
+    }
+
     if (pathname.startsWith('/api/admin/')) {
       const rawBody = req.method === 'POST' ? await readRawBody(req, 512 * 1024) : '';
       const auth = await verifyAdminSignedRequest(req, pathname, rawBody);
@@ -946,6 +1063,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       const body = rawBody ? JSON.parse(rawBody) : {};
+
+      if (req.method === 'GET' && pathname === '/api/admin/telemetry') {
+        return sendJson(res, 200, { ok: true, ...summarizeTelemetryStats() });
+      }
 
       if (req.method === 'GET' && pathname === '/api/admin/accounts') {
         const list = Object.values(accountRegistryCache.accounts || {}).sort((a, b) => {

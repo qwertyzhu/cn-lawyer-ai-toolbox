@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   FileText,
   FileUp,
+  FolderOutput,
   ImagePlus,
   KeyRound,
   Loader2,
@@ -22,6 +23,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  UserCheck,
   Wand2,
   X,
 } from 'lucide-react';
@@ -29,6 +31,12 @@ import { ImageRedactModal } from '../../components/ImageRedactModal';
 import { useToolbox } from '../../context/ToolboxContext';
 import { resolveVisionModel, streamAiCompletion } from '../../lib/aiClient';
 import { copyToClipboard } from '../../lib/clipboard';
+import {
+  COMPANION_DOCS_CATALOG,
+  downloadCompanionDocx,
+  extractCompanionContextFromSpcDraft,
+  type CompanionDocKind,
+} from '../../lib/companionDocsBuilder';
 import { decryptWithPassphrase } from '../../lib/cryptoVault';
 import { downloadOfficialSpcDocx } from '../../lib/docxBuilder';
 import { extractLocalDocumentText } from '../../lib/docxReader';
@@ -617,6 +625,7 @@ export const ElementsComplaintTool: React.FC = () => {
     sessionUnlockedPin,
     setSessionUnlockedPin,
     recordCalculation,
+    lawyerProfile,
     sendToAi,
     navigateTab,
     showToast,
@@ -632,6 +641,13 @@ export const ElementsComplaintTool: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showNoticeBox, setShowNoticeBox] = useState(false);
   const [openQuickFillRowId, setOpenQuickFillRowId] = useState<string | null>(null);
+
+  // Companion 5-doc filing bundle state
+  const [showCompanionPanel, setShowCompanionPanel] = useState(false);
+  const [companionCourt, setCompanionCourt] = useState('');
+  const [companionAuthScope, setCompanionAuthScope] = useState<'special' | 'general'>('special');
+  const [companionPreserveAmt, setCompanionPreserveAmt] = useState('');
+  const [companionInvestigateOrg, setCompanionInvestigateOrg] = useState('');
 
   // AI Convert state
   const [sourceText, setSourceText] = useState('');
@@ -1056,6 +1072,19 @@ ${JSON.stringify(editableRowSpecs)}`;
       `${tpl.displayName} · 措辞润色`,
       `请帮我核查并润色以下最高法官方要素式《${tpl.displayName}》中律师填写的诉请、事实与理由措辞（严格保留官方表格项号、所有 □/☑ 勾选状态与核心事实金额日期，使语言精炼克制、符合中国法院立案与庭审标准）：\n\n${txt}`
     );
+  };
+
+  const handleDownloadCompanionDoc = (kind: CompanionDocKind) => {
+    if (!tpl || !draft) return;
+    const baseCtx = extractCompanionContextFromSpcDraft(tpl, draft, lawyerProfile);
+    const fname = downloadCompanionDocx(kind, {
+      ...baseCtx,
+      courtName: companionCourt.trim() || baseCtx.courtName,
+      authScope: companionAuthScope,
+      preservationAmount: companionPreserveAmt.trim(),
+      targetEvidenceOrg: companionInvestigateOrg.trim(),
+    });
+    showToast(`已复用当前主体与执业档案生成配套 Word：${fname}`);
   };
 
   const handleResetDraft = () => {
@@ -1868,6 +1897,37 @@ ${JSON.stringify(editableRowSpecs)}`;
                                 一键勾选 5 项“了解☑”
                               </button>
                             )}
+                            {row.roleTag === 'agent' && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!lawyerProfile.name && !lawyerProfile.firmName) {
+                                    showToast('请先在「我的配置 → 个人执业与落款档案」填一次姓名与律所，即可永久一键带入');
+                                    return;
+                                  }
+                                  const quick = createEmptyPartyQuickFill();
+                                  quick.agentHas = true;
+                                  quick.name = lawyerProfile.name;
+                                  quick.workUnit = lawyerProfile.firmName;
+                                  quick.jobTitle = lawyerProfile.licenseNo
+                                    ? `专职律师（执业证号：${lawyerProfile.licenseNo}）`
+                                    : '专职律师';
+                                  quick.phone = lawyerProfile.phone;
+                                  quick.agentAuthority = '特别授权';
+                                  const filled = applyPartyQuickFillToCellText(
+                                    row.templateText || val,
+                                    'agent',
+                                    quick
+                                  );
+                                  updateRowValue(row.id, filled);
+                                  showToast(`已从个人执业档案带入「${lawyerProfile.name || lawyerProfile.firmName}」代理信息`);
+                                }}
+                                className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800"
+                                title="自动带入您在「我的配置」保存的律师姓名、律所、执业证号与电话"
+                              >
+                                <UserCheck className="h-3 w-3" /> 一键带入我的执业档案
+                              </button>
+                            )}
                             {isPartyQuickFillable && (
                               <button
                                 type="button"
@@ -2228,6 +2288,14 @@ ${JSON.stringify(editableRowSpecs)}`;
               </button>
               <button
                 type="button"
+                onClick={() => setShowCompanionPanel((v) => !v)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-[#C9A463] bg-[#FAF6EC] hover:bg-[#F3ECE0] px-3.5 py-2.5 text-xs font-bold text-[#7A5922]"
+              >
+                <FolderOutput className="h-4 w-4" />
+                {showCompanionPanel ? '收起立案配套 5 件套' : '联出立案配套文书（5 份 Word）'}
+              </button>
+              <button
+                type="button"
                 onClick={handleResetDraft}
                 className="ml-auto inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] px-3 py-2 text-xs text-slate-600 hover:text-red-700"
               >
@@ -2235,6 +2303,120 @@ ${JSON.stringify(editableRowSpecs)}`;
               </button>
             </div>
           </section>
+
+          {/* 5-Doc Court Filing Companion Bundle Generator */}
+          {showCompanionPanel && (
+            <section className="rounded-xl border border-[#D9C7A3] bg-gradient-to-br from-[#FDFBF6] via-white to-[#F7F2E6] p-4 sm:p-5 space-y-3.5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EAE2D0] pb-2.5">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <FolderOutput className="h-4 w-4 text-[#9A7538]" />
+                    <h3 className="font-display text-sm sm:text-base font-bold text-[#0E223D]">
+                      立案前序配套文书一键联出（填一次主体，出全套 Word）
+                    </h3>
+                  </div>
+                  <p className="mt-0.5 text-[11.5px] text-slate-600">
+                    自动复用上方已填的当事人、案由/案号及「我的配置 → 个人执业档案」（{lawyerProfile.name ? `已绑定：${lawyerProfile.name}` : '未填执业档案时保留下划线空位'}），纯本地生成 `.docx`。
+                  </p>
+                </div>
+                {!lawyerProfile.name && (
+                  <button
+                    type="button"
+                    onClick={() => navigateTab('settings')}
+                    className="rounded-lg border border-[#B89254] bg-white px-2.5 py-1 text-[11px] font-bold text-[#7A5922] hover:bg-[#FBF7EE]"
+                  >
+                    去完善执业档案 →
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
+                <div>
+                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">受案法院（选填）</label>
+                  <input
+                    type="text"
+                    value={companionCourt}
+                    onChange={(e) => setCompanionCourt(e.target.value)}
+                    placeholder="例：杭州市西湖区人民法院"
+                    className="w-full rounded-lg border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">委托授权范围</label>
+                  <div className="grid grid-cols-2 gap-1 rounded-lg bg-[#EFEAE0] p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setCompanionAuthScope('special')}
+                      className={`rounded-md py-1 text-[11px] font-bold ${
+                        companionAuthScope === 'special'
+                          ? 'bg-[#0E223D] text-white'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      特别授权
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCompanionAuthScope('general')}
+                      className={`rounded-md py-1 text-[11px] font-bold ${
+                        companionAuthScope === 'general'
+                          ? 'bg-[#0E223D] text-white'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      一般代理
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">保全标的额（选填）</label>
+                  <input
+                    type="text"
+                    value={companionPreserveAmt}
+                    onChange={(e) => setCompanionPreserveAmt(e.target.value)}
+                    placeholder="例：人民币 500,000 元"
+                    className="w-full rounded-lg border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#0E223D] mb-1">协助调查单位（选填）</label>
+                  <input
+                    type="text"
+                    value={companionInvestigateOrg}
+                    onChange={(e) => setCompanionInvestigateOrg(e.target.value)}
+                    placeholder="例：某银行 / 市场监管局"
+                    className="w-full rounded-lg border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                {COMPANION_DOCS_CATALOG.map((item) => (
+                  <button
+                    key={item.kind}
+                    type="button"
+                    onClick={() => handleDownloadCompanionDoc(item.kind)}
+                    className="group rounded-xl border border-[#E2DAC7] bg-white hover:border-[#0E223D] hover:shadow-sm p-3 text-left transition-all flex flex-col justify-between gap-2"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-display text-xs font-bold text-[#0E223D]">
+                          《{item.title}》
+                        </span>
+                        <span className="rounded bg-[#F5F0E4] px-1.5 py-0.5 text-[9.5px] font-bold text-[#7A5922]">
+                          {item.badge}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[10.5px] leading-4 text-slate-500">{item.desc}</p>
+                    </div>
+                    <div className="inline-flex items-center gap-1 text-[11px] font-bold text-[#0E223D] group-hover:text-[#9A7538]">
+                      <Download className="h-3 w-3" /> 下载 Word (.docx)
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       )}
 

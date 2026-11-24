@@ -78,12 +78,14 @@ export interface CalculationHistoryItem {
   toolTitle: string;
   summary: string;
   detailText: string;
+  caseId?: string;
   createdAt: string;
 }
 
 export interface DeadlineReminderItem {
   id: string;
   caseName: string;
+  caseId?: string;
   title: string;
   category: 'preservation' | 'execution' | 'appeal' | 'evidence' | 'arbitration' | 'custom';
   startDate: string;
@@ -105,12 +107,42 @@ export interface ChecklistInstance {
 export interface ScratchpadNote {
   id: string;
   title: string;
+  caseId?: string;
   scene: 'meeting_client' | 'detention_visit' | 'court_trial' | 'phone_consult';
   facts: string;
   disputes: string;
   missingEvidence: string;
   todoItems: string;
   durationSec: number;
+  updatedAt: string;
+}
+
+export interface LawyerProfile {
+  name: string;
+  licenseNo: string;
+  firmName: string;
+  phone: string;
+  address: string;
+  email: string;
+}
+
+export interface SavedAiPrompt {
+  id: string;
+  label: string;
+  content: string;
+  specialistId?: AiSpecialistId;
+  createdAt: string;
+}
+
+export interface CasePocket {
+  id: string;
+  title: string;
+  caseNo?: string;
+  court?: string;
+  clientName?: string;
+  opponentName?: string;
+  notes?: string;
+  createdAt: string;
   updatedAt: string;
 }
 

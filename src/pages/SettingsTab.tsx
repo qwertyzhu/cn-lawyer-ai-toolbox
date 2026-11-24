@@ -1,6 +1,7 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Award,
+  BarChart3,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -23,9 +24,11 @@ import {
   Sparkles,
   Trash2,
   Upload,
+  UserCheck,
 } from 'lucide-react';
 import { SITE_CONFIG } from '../config/siteConfig';
 import { useToolbox } from '../context/ToolboxContext';
+import { AI_SPECIALISTS_REGISTRY, OFFLINE_TOOLS_REGISTRY } from '../data/toolRegistry';
 import {
   AI_PROVIDER_PRESETS,
   fetchAvailableModels,
@@ -53,7 +56,21 @@ import {
 import { TIANRAN_OFFICIAL_ROSTER } from '../data/firmRoster';
 import { resetLocalUserWorkspaceForAccountSwitch } from '../lib/cloudSync';
 import { toolboxStorage } from '../lib/storage';
-import type { AiProviderConfig } from '../types/toolbox';
+import type { AiProviderConfig, LawyerProfile } from '../types/toolbox';
+
+interface TelemetrySummary {
+  updatedAt: string;
+  totalHits: number;
+  last30Total: number;
+  totals: Record<string, number>;
+  last30Days: Record<string, number>;
+}
+
+const TELEMETRY_LABELS: Record<string, string> = {
+  ...Object.fromEntries(OFFLINE_TOOLS_REGISTRY.map((t) => [t.id, `离线工具 · ${t.shortTitle}`])),
+  ...Object.fromEntries(AI_SPECIALISTS_REGISTRY.map((s) => [`ai:${s.id}`, `AI 专席 · ${s.shortTitle}`])),
+  'ima-cloud-qa': '法典与案例 · IMA 知识库问答',
+};
 
 interface SettingsTabProps {
   license: VerifiedLicenseInfo;
@@ -121,9 +138,16 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     triggerCloudPush,
     triggerCloudPull,
     clearCloudVaultBackup,
+    lawyerProfile,
+    updateLawyerProfile,
     refreshAllFromDisk,
     showToast,
   } = useToolbox();
+
+  const [profileDraft, setProfileDraft] = useState<LawyerProfile>(lawyerProfile);
+  useEffect(() => {
+    setProfileDraft(lawyerProfile);
+  }, [lawyerProfile]);
 
   const [e2eePassInput, setE2eePassInput] = useState(sessionSyncPassphrase);
   const [showE2eePanel, setShowE2eePanel] = useState(false);
@@ -147,7 +171,11 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   // Admin Mobile License Issuer & Real-Time Account Console (Visible ONLY for 主任 / 主任律师)
   const [showIssuerDrawer, setShowIssuerDrawer] = useState(false);
-  const [adminSubTab, setAdminSubTab] = useState<'accounts' | 'issuer'>('accounts');
+  const [adminSubTab, setAdminSubTab] = useState<'accounts' | 'telemetry' | 'issuer'>('accounts');
+  const [telemetryStats, setTelemetryStats] = useState<TelemetrySummary | null>(null);
+  const [telemetryLoading, setTelemetryLoading] = useState(false);
+  const [telemetryError, setTelemetryError] = useState<string | null>(null);
+  const [telemetryRange, setTelemetryRange] = useState<'30d' | 'all'>('30d');
   const [masterToken, setMasterToken] = useState<string>(() => getSavedAdminMasterToken());
   const [batchNamesInput, setBatchNamesInput] = useState('');
   const [issueRole, setIssueRole] = useState<LawyerRoleLabel>('专职律师');
@@ -518,6 +546,39 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     }
   };
 
+  const fetchAdminTelemetry = async () => {
+    setTelemetryError(null);
+    if (!masterToken.trim()) {
+      setTelemetryError('请先在上方填入主任主密钥（TR-MASTER-...），再加载团队工具热度统计');
+      return;
+    }
+    setTelemetryLoading(true);
+    try {
+      const headers = await buildSignedAdminHeaders(
+        masterToken,
+        license.rawCode,
+        'GET',
+        '/api/admin/telemetry',
+        ''
+      );
+      const resp = await fetch('/api/admin/telemetry', { headers, cache: 'no-store' });
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || '加载工具热度统计失败');
+      saveAdminMasterToken(masterToken);
+      setTelemetryStats({
+        updatedAt: data.updatedAt || '',
+        totalHits: Number(data.totalHits) || 0,
+        last30Total: Number(data.last30Total) || 0,
+        totals: data.totals || {},
+        last30Days: data.last30Days || {},
+      });
+    } catch (err) {
+      setTelemetryError(err instanceof Error ? err.message : '加载工具热度统计失败');
+    } finally {
+      setTelemetryLoading(false);
+    }
+  };
+
   const ensureAccountCode = async (acct: CloudLawyerAccount): Promise<string> => {
     if (acct.activationCode && acct.activationCode.startsWith('TR1-')) {
       return acct.activationCode;
@@ -785,6 +846,100 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <div className="text-[10px] text-slate-400">ECDSA 数字防伪指纹</div>
             <div className="mt-0.5 font-mono text-[#D1B27A]">{license.fingerprint}</div>
           </div>
+        </div>
+      </section>
+
+      {/* Section 0.5: Unified Personal Lawyer Profile & Signature Defaults */}
+      <section className="rounded-lg border border-[#DED8CC] bg-white p-4 sm:p-6 space-y-3.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFECE5] pb-3">
+          <div className="flex items-center gap-2">
+            <UserCheck className="h-4 w-4 text-[#B89254]" />
+            <h2 className="font-display text-base sm:text-lg font-bold text-[#11151C]">
+              个人执业与落款档案（填一次，全工具联动带入）
+            </h2>
+          </div>
+          <span className="rounded-full bg-[#F5F0E4] px-2.5 py-0.5 text-[10.5px] font-semibold text-[#7A5922]">
+            默认留空 · 仅存本机/激活码加密同步
+          </span>
+        </div>
+        <p className="text-xs leading-5 text-slate-600">
+          填写后仅保存在您个人本机（团队激活码模式下支持加密跨端同步），自动联动至：<strong>「要素式起诉状/答辩状」委托诉讼代理人一键带入</strong>、<strong>5 份立案配套文书（授权委托书/送达地址确认书/调查令等）</strong>、<strong>律师费报价单落款</strong>及 <strong>AI 导出 Word 副标题</strong>。
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <div>
+            <label className="block font-bold text-[#11151C] mb-1">律师姓名</label>
+            <input
+              type="text"
+              value={profileDraft.name}
+              onChange={(e) => setProfileDraft((p) => ({ ...p, name: e.target.value }))}
+              placeholder="例：张某某"
+              className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 focus:border-[#0E223D] focus:bg-white focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="block font-bold text-[#11151C] mb-1">律师执业证号</label>
+            <input
+              type="text"
+              value={profileDraft.licenseNo}
+              onChange={(e) => setProfileDraft((p) => ({ ...p, licenseNo: e.target.value }))}
+              placeholder="17 位执业证号（选填）"
+              className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono focus:border-[#0E223D] focus:bg-white focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="block font-bold text-[#11151C] mb-1">所在律师事务所</label>
+            <input
+              type="text"
+              value={profileDraft.firmName}
+              onChange={(e) => setProfileDraft((p) => ({ ...p, firmName: e.target.value }))}
+              placeholder="例：某某律师事务所"
+              className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 focus:border-[#0E223D] focus:bg-white focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="block font-bold text-[#11151C] mb-1">办公联系电话</label>
+            <input
+              type="text"
+              value={profileDraft.phone}
+              onChange={(e) => setProfileDraft((p) => ({ ...p, phone: e.target.value }))}
+              placeholder="手机或办公座机"
+              className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono focus:border-[#0E223D] focus:bg-white focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="block font-bold text-[#11151C] mb-1">常用送达 / 办公地址</label>
+            <input
+              type="text"
+              value={profileDraft.address}
+              onChange={(e) => setProfileDraft((p) => ({ ...p, address: e.target.value }))}
+              placeholder="用于《送达地址确认书》自动填入"
+              className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 focus:border-[#0E223D] focus:bg-white focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="block font-bold text-[#11151C] mb-1">电子送达邮箱（选填）</label>
+            <input
+              type="email"
+              value={profileDraft.email}
+              onChange={(e) => setProfileDraft((p) => ({ ...p, email: e.target.value }))}
+              placeholder="name@lawfirm.com"
+              className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono focus:border-[#0E223D] focus:bg-white focus:outline-none"
+            />
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+          <span className="text-[11px] text-slate-500">
+            {lawyerProfile.name
+              ? `当前已生效档案：${lawyerProfile.name}${lawyerProfile.firmName ? ` · ${lawyerProfile.firmName}` : ''}`
+              : '提示：留空时所有文书自动保持标准下划线空位，绝不预填他人信息。'}
+          </span>
+          <button
+            type="button"
+            onClick={() => updateLawyerProfile(profileDraft)}
+            className="inline-flex items-center gap-1.5 rounded-md bg-[#0E223D] hover:bg-[#17345C] px-4 py-2 text-xs font-bold text-[#F6F4EF]"
+          >
+            <CheckCircle2 className="h-3.5 w-3.5 text-[#D1B27A]" /> 保存执业档案
+          </button>
         </div>
       </section>
 
@@ -1627,8 +1782,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </div>
             </div>
 
-            {/* Admin Sub-Tabs: Live Account Enable/Disable vs License Batch Issuer */}
-            <div className="grid grid-cols-2 rounded-lg border border-[#DED8CC] bg-white p-1 gap-1">
+            {/* Admin Sub-Tabs: Live Account Enable/Disable vs Anonymous Tool Heat vs License Batch Issuer */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 rounded-lg border border-[#DED8CC] bg-white p-1 gap-1">
               <button
                 type="button"
                 onClick={() => setAdminSubTab('accounts')}
@@ -1638,7 +1793,24 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                     : 'text-slate-600 hover:text-[#11151C]'
                 }`}
               >
-                账户实时启用 / 关闭（{cloudAccounts.length || '点同步'}）
+                账户实时启停（{cloudAccounts.length || '点同步'}）
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminSubTab('telemetry');
+                  if (masterToken.trim() && !telemetryStats) {
+                    setTimeout(() => fetchAdminTelemetry(), 40);
+                  }
+                }}
+                className={`inline-flex items-center justify-center gap-1 rounded-md py-2 text-xs font-bold transition-colors ${
+                  adminSubTab === 'telemetry'
+                    ? 'bg-[#0E223D] text-[#F6F4EF]'
+                    : 'text-slate-600 hover:text-[#11151C]'
+                }`}
+              >
+                <BarChart3 className="h-3.5 w-3.5 text-[#D1B27A]" />
+                工具热度看板（匿名）
               </button>
               <button
                 type="button"
@@ -2000,6 +2172,110 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                     );
                   })()
                 )}
+              </div>
+            ) : adminSubTab === 'telemetry' ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E4DFD4] bg-white p-3">
+                  <div className="text-xs text-slate-600">
+                    <span className="font-bold text-[#0E223D]">隐私边界承诺：</span>
+                    仅匿名累计各工具模块打开次数，<strong>绝不记录</strong>任何律师姓名、IP、案情、搜索词或对话文本（开放模式零上报）。
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="inline-flex rounded border border-[#D8D1C3] bg-[#FAF9F6] p-0.5 text-[11px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => setTelemetryRange('30d')}
+                        className={`rounded px-2 py-0.5 ${
+                          telemetryRange === '30d' ? 'bg-[#0E223D] text-white' : 'text-slate-600'
+                        }`}
+                      >
+                        近 30 天
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTelemetryRange('all')}
+                        className={`rounded px-2 py-0.5 ${
+                          telemetryRange === 'all' ? 'bg-[#0E223D] text-white' : 'text-slate-600'
+                        }`}
+                      >
+                        历史累计
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={telemetryLoading || !masterToken.trim()}
+                      onClick={fetchAdminTelemetry}
+                      className="inline-flex items-center gap-1 rounded bg-[#0E223D] px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-45"
+                    >
+                      <RefreshCw className={`h-3 w-3 text-[#D1B27A] ${telemetryLoading ? 'animate-spin' : ''}`} />
+                      刷新热度
+                    </button>
+                  </div>
+                </div>
+
+                {telemetryError && (
+                  <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900">
+                    {telemetryError}
+                  </div>
+                )}
+
+                {!telemetryStats ? (
+                  <div className="rounded-lg border border-dashed border-[#D8D1C3] bg-white py-8 px-4 text-center text-xs text-slate-500">
+                    点击右上角「刷新热度」即可查看团队高频工具与 AI 专席的匿名使用排行。
+                  </div>
+                ) : (() => {
+                  const sourceMap = telemetryRange === '30d' ? telemetryStats.last30Days : telemetryStats.totals;
+                  const rows = Object.entries(sourceMap)
+                    .filter(([, cnt]) => cnt > 0)
+                    .sort((a, b) => b[1] - a[1]);
+                  const maxVal = rows.length > 0 ? rows[0][1] : 1;
+                  const sumVal = telemetryRange === '30d' ? telemetryStats.last30Total : telemetryStats.totalHits;
+
+                  return (
+                    <div className="rounded-lg border border-[#DED8CC] bg-white p-4 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs border-b border-[#EFECE5] pb-2">
+                        <span className="font-bold text-[#0E223D]">
+                          {telemetryRange === '30d' ? '近 30 天匿名打开总计' : '历史累计匿名打开总计'}：
+                          <span className="font-num text-sm text-[#9A7538] ml-1">{sumVal} 次</span>
+                        </span>
+                        {telemetryStats.updatedAt && (
+                          <span className="text-[11px] text-slate-400">
+                            最近更新：{new Date(telemetryStats.updatedAt).toLocaleString('zh-CN', { hour12: false })}
+                          </span>
+                        )}
+                      </div>
+
+                      {rows.length === 0 ? (
+                        <div className="py-6 text-center text-xs text-slate-400">
+                          当前周期暂无使用记录，成员联网使用各工具后将自动匿名累计。
+                        </div>
+                      ) : (
+                        <div className="space-y-2.5">
+                          {rows.map(([id, cnt], idx) => {
+                            const pct = Math.max(6, Math.round((cnt / maxVal) * 100));
+                            return (
+                              <div key={id} className="space-y-1">
+                                <div className="flex items-center justify-between text-xs">
+                                  <span className="font-medium text-[#11151C]">
+                                    <span className="font-num text-[#9A7538] mr-1.5">{idx + 1}.</span>
+                                    {TELEMETRY_LABELS[id] || id}
+                                  </span>
+                                  <span className="font-num font-bold text-[#0E223D]">{cnt} 次</span>
+                                </div>
+                                <div className="h-2 w-full rounded-full bg-[#F3EFE6] overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full bg-gradient-to-r from-[#0E223D] to-[#B89254]"
+                                    style={{ width: `${pct}%` }}
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             ) : (
               <div className="space-y-4">

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
+  Bookmark,
   BookOpen,
   BrainCircuit,
   Camera,
@@ -135,6 +136,11 @@ export const AiHubTab: React.FC = () => {
     activeSpecialistId,
     aiHandoff,
     clearAiHandoff,
+    lawyerProfile,
+    savedPrompts,
+    addSavedPrompt,
+    deleteSavedPrompt,
+    recordToolHit,
     navigateTab,
     openLawsSearch,
     showToast,
@@ -442,6 +448,9 @@ export const AiHubTab: React.FC = () => {
       : [{ role: 'system', content: specialist.systemPrompt }, newUserTurn];
 
     setStreaming(true);
+    if (!isFollowUp) {
+      recordToolHit(`ai:${specialist.id}`);
+    }
     setStreamingUserText(effectiveText);
     setStreamingUserImages(attachedImgs);
     setStreamingOutput('');
@@ -843,13 +852,61 @@ export const AiHubTab: React.FC = () => {
                   </select>
                   <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#8C6E3B]" />
                 </div>
-                <input
-                  type="text"
-                  value={customSceneNote}
-                  onChange={(e) => setCustomSceneNote(e.target.value)}
-                  placeholder="选填：补充具体文书名、审级或特别要求（如：二审上诉状 / 发给公安经侦 / 1500 字内）"
-                  className="w-full rounded-lg border border-[#E6DFCE] bg-white/90 px-3 py-2 text-[11.5px] text-[#11151C] placeholder:text-slate-400 transition-colors focus:bg-white focus:border-[#0E223D] focus:ring-2 focus:ring-[#B89254]/15 focus:outline-none"
-                />
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={customSceneNote}
+                    onChange={(e) => setCustomSceneNote(e.target.value)}
+                    placeholder="选填：补充具体文书名、审级或特别要求（如：二审上诉状 / 发给公安经侦 / 1500 字内）"
+                    className="flex-1 min-w-0 rounded-lg border border-[#E6DFCE] bg-white/90 px-3 py-2 text-[11.5px] text-[#11151C] placeholder:text-slate-400 transition-colors focus:bg-white focus:border-[#0E223D] focus:ring-2 focus:ring-[#B89254]/15 focus:outline-none"
+                  />
+                  {customSceneNote.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => addSavedPrompt('', customSceneNote.trim(), specialist.id)}
+                      className="flex-none inline-flex items-center gap-1 rounded-lg border border-[#D4B47C] bg-[#FBF6EA] hover:bg-[#F2E7CF] px-2.5 py-2 text-[11px] font-semibold text-[#7A5922] whitespace-nowrap transition-colors"
+                      title="把当前补充要求存入我的常用指令收藏夹（同步随激活码跨端保存）"
+                    >
+                      <Bookmark className="h-3 w-3" /> 收藏
+                    </button>
+                  )}
+                </div>
+                {savedPrompts.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                    <span className="text-[10px] font-semibold text-[#9A7538]">常用指令：</span>
+                    {savedPrompts.slice(0, 8).map((sp) => (
+                      <span
+                        key={sp.id}
+                        className="group inline-flex items-center gap-1 rounded-full border border-[#E2DAC7] bg-white hover:border-[#B89254] pl-2.5 pr-1.5 py-0.5 text-[10.5px] text-slate-600 transition-colors"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (chatHistory.length > 0 && !streaming) {
+                              setFollowUpInput(sp.content);
+                              showToast(`已填入追问指令「${sp.label}」`);
+                            } else {
+                              setCustomSceneNote(sp.content);
+                              showToast(`已填入特别要求「${sp.label}」`);
+                            }
+                          }}
+                          className="hover:text-[#0E223D] font-medium"
+                          title={sp.content}
+                        >
+                          {sp.label}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => deleteSavedPrompt(sp.id)}
+                          className="rounded-full p-0.5 text-slate-300 hover:bg-slate-100 hover:text-slate-600"
+                          title="移除该收藏指令"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1121,10 +1178,13 @@ export const AiHubTab: React.FC = () => {
                     const visible = renderVisibleText(raw);
                     const dateTag = new Date().toISOString().slice(0, 10);
                     const fname = `${specialist.shortTitle}_${dateTag}.docx`;
+                    const lawyerTag = lawyerProfile.name
+                      ? ` ｜ 承办律师：${lawyerProfile.name}${lawyerProfile.firmName ? `（${lawyerProfile.firmName}）` : ''}`
+                      : '';
                     downloadMarkdownReportDocx(
                       {
                         title: specialist.title,
-                        subtitle: `生成日期：${dateTag} ｜ 供承办律师复核定稿使用`,
+                        subtitle: `生成日期：${dateTag}${lawyerTag} ｜ 供承办律师复核定稿使用`,
                         markdownBody: visible,
                       },
                       fname

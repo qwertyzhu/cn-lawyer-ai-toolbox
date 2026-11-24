@@ -18,6 +18,11 @@ import {
 import { buildIcsContent } from '../src/lib/icsGenerator.ts';
 import { AI_SPECIALISTS_REGISTRY } from '../src/data/toolRegistry.ts';
 import {
+  COMPANION_DOCS_CATALOG,
+  buildCompanionDocxBytes,
+  extractCompanionContextFromSpcDraft,
+} from '../src/lib/companionDocsBuilder.ts';
+import {
   ELEMENTS_COMPLAINT_TEMPLATES,
   createInitialComplaintDraft,
   buildComplaintSections,
@@ -726,6 +731,50 @@ test('AI Hub 6 specialists cover full practice domains (civil/commercial/IP/crim
   assert.ok(deAi.systemPrompt.includes('固定程序性表述与司法引述语一字不动'));
   assert.ok(deAi.systemPrompt.includes('可能影响法律含义的修改清单'));
 });
+
+test('5-doc filing companion bundle reuses SPC draft parties + lawyer profile and builds valid OOXML .docx', async () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const corpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/spc-2025-templates.json'), 'utf8')
+  );
+  const tpl = corpus.templates.find((t) => t.displayName === '买卖合同纠纷民事起诉状');
+  const draft = createInitialSpcDraft(tpl);
+  const pOrg = tpl.rows.find((r) => r.roleTag === 'plaintiff_org');
+  const dOrg = tpl.rows.find((r) => r.roleTag === 'defendant_org');
+  draft.rowValues[pOrg.id] = '名称：示例甲方科技公司\n统一社会信用代码：91330100MA0000001A\n住所地：杭州市西湖区测试路1号';
+  draft.rowValues[dOrg.id] = '名称：示例乙方贸易公司\n住所地：上海市浦东新区测试路2号';
+
+  const ctx = extractCompanionContextFromSpcDraft(tpl, draft, {
+    name: '示例律师',
+    licenseNo: '13301202010000001',
+    firmName: '示例律师事务所',
+    phone: '13800000000',
+    address: '杭州市西湖区文三路100号',
+    email: 'lawyer@example.com',
+  });
+  assert.equal(ctx.clientName, '示例甲方科技公司');
+  assert.equal(ctx.opponentName, '示例乙方贸易公司');
+  assert.equal(ctx.lawyerName, '示例律师');
+  assert.equal(COMPANION_DOCS_CATALOG.length, 5);
+
+  for (const item of COMPANION_DOCS_CATALOG) {
+    const out = buildCompanionDocxBytes(item.kind, {
+      ...ctx,
+      courtName: '杭州市西湖区人民法院',
+      preservationAmount: '人民币 500,000 元',
+      targetEvidenceOrg: '中国工商银行杭州分行',
+    });
+    assert.ok(out.bytes.length > 1500, `${item.kind} docx should be non-empty`);
+    const extracted = await extractLocalDocumentText({
+      name: out.fileName,
+      arrayBuffer: async () => out.bytes.buffer.slice(out.bytes.byteOffset, out.bytes.byteOffset + out.bytes.byteLength),
+      text: async () => '',
+    });
+    assert.ok(extracted.includes('示例甲方科技公司'), `${item.kind} missing client name`);
+    assert.ok(extracted.includes('示例律师'), `${item.kind} missing lawyer name`);
+  }
+});
+
 
 
 

@@ -4,10 +4,13 @@ import type {
   AiSpecialistId,
   ByokSettings,
   CalculationHistoryItem,
+  CasePocket,
   ChecklistInstance,
   DeadlineReminderItem,
+  LawyerProfile,
   MainTabId,
   OfflineToolId,
+  SavedAiPrompt,
   ScratchpadNote,
 } from '../types/toolbox';
 import type { VerifiedLicenseInfo } from '../lib/licenseEngine';
@@ -19,6 +22,7 @@ import {
   getCloudSyncMeta,
   getCloudSyncPrefs,
   hasMeaningfulLocalConfig,
+  pingAnonymousToolHit,
   pullCloudVault,
   pushCloudVault,
   saveCloudSyncMeta,
@@ -80,6 +84,22 @@ interface ToolboxContextValue {
   starredLaws: string[];
   toggleStarLaw: (key: string) => void;
 
+  lawyerProfile: LawyerProfile;
+  updateLawyerProfile: (profile: LawyerProfile) => void;
+
+  savedPrompts: SavedAiPrompt[];
+  addSavedPrompt: (label: string, content: string, specialistId?: AiSpecialistId) => void;
+  deleteSavedPrompt: (id: string) => void;
+
+  casePockets: CasePocket[];
+  activeCaseId: string;
+  setActiveCaseId: (caseId: string) => void;
+  addCasePocket: (input: Omit<CasePocket, 'id' | 'createdAt' | 'updatedAt'>) => CasePocket;
+  updateCasePocket: (id: string, patch: Partial<Omit<CasePocket, 'id' | 'createdAt'>>) => void;
+  deleteCasePocket: (id: string) => void;
+
+  recordToolHit: (toolId: string) => void;
+
   aiHandoff: AiHandoffPayload | null;
   clearAiHandoff: () => void;
 
@@ -120,6 +140,10 @@ export const ToolboxProvider: React.FC<{
   const [scratchpads, setScratchpadsState] = useState<ScratchpadNote[]>(() => toolboxStorage.getScratchpads());
   const [pinnedTools, setPinnedToolsState] = useState<OfflineToolId[]>(() => toolboxStorage.getPinnedTools());
   const [starredLaws, setStarredLawsState] = useState<string[]>(() => toolboxStorage.getStarredLaws());
+  const [lawyerProfile, setLawyerProfileState] = useState<LawyerProfile>(() => toolboxStorage.getLawyerProfile());
+  const [savedPrompts, setSavedPromptsState] = useState<SavedAiPrompt[]>(() => toolboxStorage.getSavedPrompts());
+  const [casePockets, setCasePocketsState] = useState<CasePocket[]>(() => toolboxStorage.getCasePockets());
+  const [activeCaseId, setActiveCaseIdState] = useState<string>(() => toolboxStorage.getActiveCaseId());
   const [aiHandoff, setAiHandoff] = useState<AiHandoffPayload | null>(null);
 
   const [syncPrefs, setSyncPrefs] = useState<CloudSyncPrefs>(() => getCloudSyncPrefs());
@@ -176,6 +200,10 @@ export const ToolboxProvider: React.FC<{
     setScratchpadsState(toolboxStorage.getScratchpads());
     setPinnedToolsState(toolboxStorage.getPinnedTools());
     setStarredLawsState(toolboxStorage.getStarredLaws());
+    setLawyerProfileState(toolboxStorage.getLawyerProfile());
+    setSavedPromptsState(toolboxStorage.getSavedPrompts());
+    setCasePocketsState(toolboxStorage.getCasePockets());
+    setActiveCaseIdState(toolboxStorage.getActiveCaseId());
   }, []);
 
   const triggerCloudPush = useCallback(
@@ -409,13 +437,16 @@ export const ToolboxProvider: React.FC<{
     }, 1500);
   }, [triggerCloudPush]);
 
-  const updateSyncPrefs = useCallback((patch: Partial<CloudSyncPrefs>) => {
-    setSyncPrefs((prev) => {
-      const next = { ...prev, ...patch };
-      saveCloudSyncPrefs(next);
-      return next;
-    });
-  }, []);
+  const updateSyncPrefs = useCallback(
+    (patch: Partial<CloudSyncPrefs>) => {
+      setSyncPrefs((prev) => {
+        const next = { ...prev, ...patch };
+        saveCloudSyncPrefs(next);
+        return next;
+      });
+    },
+    []
+  );
 
   const clearCloudVaultBackup = useCallback(async () => {
     const lic = licenseRef.current;
@@ -481,12 +512,18 @@ export const ToolboxProvider: React.FC<{
 
   const recordCalculation = useCallback(
     (toolId: OfflineToolId, toolTitle: string, summary: string, detailText: string) => {
-      const updated = toolboxStorage.addHistory({ toolId, toolTitle, summary, detailText });
+      const updated = toolboxStorage.addHistory({
+        toolId,
+        toolTitle,
+        summary,
+        detailText,
+        ...(activeCaseId ? { caseId: activeCaseId } : {}),
+      });
       setHistory(updated);
       scheduleAutoPush();
-      showToast('已存入手机离线测算记录');
+      showToast(activeCaseId ? '已存入当前案件口袋与离线记录' : '已存入手机离线测算记录');
     },
-    [scheduleAutoPush, showToast]
+    [activeCaseId, scheduleAutoPush, showToast]
   );
 
   const clearHistory = useCallback(() => {
@@ -549,6 +586,122 @@ export const ToolboxProvider: React.FC<{
     [scheduleAutoPush]
   );
 
+  const updateLawyerProfile = useCallback(
+    (profile: LawyerProfile) => {
+      toolboxStorage.saveLawyerProfile(profile);
+      setLawyerProfileState(toolboxStorage.getLawyerProfile());
+      scheduleAutoPush();
+      showToast('个人执业与落款档案已保存，并已同步关联至各文书与报价工具');
+    },
+    [scheduleAutoPush, showToast]
+  );
+
+  const addSavedPrompt = useCallback(
+    (label: string, content: string, specialistId?: AiSpecialistId) => {
+      const cleanContent = content.trim();
+      if (!cleanContent) return;
+      const cleanLabel = label.trim() || (cleanContent.length > 14 ? `${cleanContent.slice(0, 14)}…` : cleanContent);
+      setSavedPromptsState((prev) => {
+        const next: SavedAiPrompt[] = [
+          {
+            id: `prompt-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            label: cleanLabel,
+            content: cleanContent,
+            ...(specialistId ? { specialistId } : {}),
+            createdAt: new Date().toISOString(),
+          },
+          ...prev,
+        ].slice(0, 30);
+        toolboxStorage.saveSavedPrompts(next);
+        return next;
+      });
+      scheduleAutoPush();
+      showToast(`已收藏常用指令「${cleanLabel}」`);
+    },
+    [scheduleAutoPush, showToast]
+  );
+
+  const deleteSavedPrompt = useCallback(
+    (id: string) => {
+      setSavedPromptsState((prev) => {
+        const next = prev.filter((p) => p.id !== id);
+        toolboxStorage.saveSavedPrompts(next);
+        return next;
+      });
+      scheduleAutoPush();
+    },
+    [scheduleAutoPush]
+  );
+
+  const setActiveCaseId = useCallback((caseId: string) => {
+    setActiveCaseIdState(caseId);
+    toolboxStorage.saveActiveCaseId(caseId);
+  }, []);
+
+  const addCasePocket = useCallback(
+    (input: Omit<CasePocket, 'id' | 'createdAt' | 'updatedAt'>): CasePocket => {
+      const now = new Date().toISOString();
+      const item: CasePocket = {
+        ...input,
+        id: `case-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        title: input.title.trim() || '未命名案件',
+        createdAt: now,
+        updatedAt: now,
+      };
+      setCasePocketsState((prev) => {
+        const next = [item, ...prev].slice(0, 80);
+        toolboxStorage.saveCasePockets(next);
+        return next;
+      });
+      setActiveCaseIdState(item.id);
+      toolboxStorage.saveActiveCaseId(item.id);
+      showToast(`已创建本地案件口袋「${item.title}」并设为当前办理案件`);
+      return item;
+    },
+    [showToast]
+  );
+
+  const updateCasePocket = useCallback(
+    (id: string, patch: Partial<Omit<CasePocket, 'id' | 'createdAt'>>) => {
+      setCasePocketsState((prev) => {
+        const next = prev.map((c) =>
+          c.id === id ? { ...c, ...patch, updatedAt: new Date().toISOString() } : c
+        );
+        toolboxStorage.saveCasePockets(next);
+        return next;
+      });
+    },
+    []
+  );
+
+  const deleteCasePocket = useCallback(
+    (id: string) => {
+      setCasePocketsState((prev) => {
+        const next = prev.filter((c) => c.id !== id);
+        toolboxStorage.saveCasePockets(next);
+        return next;
+      });
+      setActiveCaseIdState((prev) => {
+        if (prev === id) {
+          toolboxStorage.saveActiveCaseId('');
+          return '';
+        }
+        return prev;
+      });
+      showToast('已删除该本地案件口袋（原测算记录仍保留在全部记录中）');
+    },
+    [showToast]
+  );
+
+  const recordToolHit = useCallback((toolId: string) => {
+    if (!toolId) return;
+    toolboxStorage.incrementLocalToolHit(toolId);
+    const lic = licenseRef.current;
+    if (lic && lic.rawCode.startsWith('TR1-')) {
+      pingAnonymousToolHit(toolId, lic.rawCode);
+    }
+  }, []);
+
   const navigateTab = useCallback((tab: MainTabId) => {
     setActiveTab(tab);
     if (tab !== 'tools') {
@@ -557,15 +710,19 @@ export const ToolboxProvider: React.FC<{
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
-  const openTool = useCallback((toolId: OfflineToolId | null) => {
-    if (toolId === null) {
-      setActiveToolId(null);
-      return;
-    }
-    setActiveTab('tools');
-    setActiveToolId(toolId);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, []);
+  const openTool = useCallback(
+    (toolId: OfflineToolId | null) => {
+      if (toolId === null) {
+        setActiveToolId(null);
+        return;
+      }
+      recordToolHit(toolId);
+      setActiveTab('tools');
+      setActiveToolId(toolId);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [recordToolHit]
+  );
 
   const openLawsSearch = useCallback(
     (
@@ -573,6 +730,7 @@ export const ToolboxProvider: React.FC<{
       subView: 'statutes' | 'ima_cloud' | 'checklists' = 'statutes',
       checklistId = ''
     ) => {
+      if (subView === 'ima_cloud') recordToolHit('ima-cloud-qa');
       setActiveToolId(null);
       setLawsInitialQuery(query);
       setLawsSubView(subView);
@@ -580,11 +738,12 @@ export const ToolboxProvider: React.FC<{
       setActiveTab('laws');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    []
+    [recordToolHit]
   );
 
   const sendToAi = useCallback(
     (specialistId: AiSpecialistId, sourceTitle: string, promptContext: string) => {
+      recordToolHit(`ai:${specialistId}`);
       setActiveToolId(null);
       setActiveSpecialistId(specialistId);
       setAiHandoff({
@@ -597,7 +756,7 @@ export const ToolboxProvider: React.FC<{
       window.scrollTo({ top: 0, behavior: 'smooth' });
       showToast(`已将「${sourceTitle}」结果载入 AI 智囊舱`);
     },
-    [showToast]
+    [recordToolHit, showToast]
   );
 
   const clearAiHandoff = useCallback(() => setAiHandoff(null), []);
@@ -638,6 +797,18 @@ export const ToolboxProvider: React.FC<{
         togglePinTool,
         starredLaws,
         toggleStarLaw,
+        lawyerProfile,
+        updateLawyerProfile,
+        savedPrompts,
+        addSavedPrompt,
+        deleteSavedPrompt,
+        casePockets,
+        activeCaseId,
+        setActiveCaseId,
+        addCasePocket,
+        updateCasePocket,
+        deleteCasePocket,
+        recordToolHit,
         aiHandoff,
         clearAiHandoff,
         navigateTab,
