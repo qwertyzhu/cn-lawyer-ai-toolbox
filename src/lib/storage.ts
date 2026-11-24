@@ -6,7 +6,7 @@ import type {
   OfflineToolId,
   ScratchpadNote,
 } from '../types/toolbox';
-import { AI_PROVIDER_PRESETS } from './aiClient';
+import { AI_PROVIDER_PRESETS } from './aiClient.ts';
 
 const KEYS = {
   BYOK: 'cn_lawyer_box_byok_v1',

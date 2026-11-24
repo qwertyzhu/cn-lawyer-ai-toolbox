@@ -116,6 +116,8 @@ def test_no_forbidden_secret_files_present():
         ".env",
         ".account-registry.json",
         ".ima-credentials.json",
+        ".user-vaults",
+        ".vault-master.key",
     ]
     found = [p for p in forbidden_paths if (ROOT / p).exists()]
     for html in ROOT.glob("*激活码生成器*.html"):

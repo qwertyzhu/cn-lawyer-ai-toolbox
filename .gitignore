@@ -7,6 +7,8 @@ dist/
 !.env.example
 .ima-credentials.json
 .account-registry.json
+.user-vaults/
+.vault-master.key
 ops/.ssh/
 ops/.keys/
 *发码器*.html

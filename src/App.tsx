@@ -24,6 +24,7 @@ import {
   verifyActivationCode,
   type VerifiedLicenseInfo,
 } from './lib/licenseEngine';
+import { resetLocalUserWorkspaceForAccountSwitch } from './lib/cloudSync';
 import { AiHubTab } from './pages/AiHubTab';
 import { HomeTab } from './pages/HomeTab';
 import { LawsAndChecklistsTab } from './pages/LawsAndChecklistsTab';
@@ -439,6 +440,7 @@ export function App() {
             <button
               type="button"
               onClick={() => {
+                resetLocalUserWorkspaceForAccountSwitch();
                 clearSavedLicense();
                 setSuspendedReason(null);
                 setLicense(null);
@@ -454,7 +456,7 @@ export function App() {
   }
 
   return (
-    <ToolboxProvider>
+    <ToolboxProvider key={effectiveLicense.holderName} license={isLicenseMode ? effectiveLicense : null}>
       <ToolboxShell
         license={effectiveLicense}
         onLicenseChanged={(next) => setLicense(next)}
@@ -502,6 +504,7 @@ export function App() {
               <button
                 type="button"
                 onClick={() => {
+                  resetLocalUserWorkspaceForAccountSwitch();
                   saveVerifiedLicense(pendingSwitchLicense);
                   setLicense(pendingSwitchLicense);
                   setSuspendedReason(null);

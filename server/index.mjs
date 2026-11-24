@@ -20,6 +20,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DIST_DIR = path.join(ROOT_DIR, 'dist');
 const ACCOUNT_REGISTRY_PATH = path.join(ROOT_DIR, '.account-registry.json');
+const USER_VAULTS_DIR = path.join(ROOT_DIR, '.user-vaults');
+const VAULT_MASTER_KEY_PATH = path.join(ROOT_DIR, '.vault-master.key');
 
 // Lightweight built-in .env loader (zero external dependencies; existing process.env takes precedence)
 try {
@@ -374,6 +376,108 @@ function checkAndTouchAccount(wire, rawToken = '') {
   return { active: true };
 }
 
+function getSyncVaultMasterKey() {
+  if (process.env.SYNC_VAULT_SECRET && process.env.SYNC_VAULT_SECRET.trim()) {
+    return crypto.createHash('sha256').update(process.env.SYNC_VAULT_SECRET.trim()).digest();
+  }
+  try {
+    if (fs.existsSync(VAULT_MASTER_KEY_PATH)) {
+      const raw = fs.readFileSync(VAULT_MASTER_KEY_PATH, 'utf8').trim();
+      if (raw.length >= 32) {
+        return crypto.createHash('sha256').update(raw).digest();
+      }
+    }
+  } catch {
+    // regenerate if unreadable
+  }
+  const secret = crypto.randomBytes(32).toString('base64url');
+  try {
+    const tmp = `${VAULT_MASTER_KEY_PATH}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, `${secret}\n`, { mode: 0o600 });
+    fs.renameSync(tmp, VAULT_MASTER_KEY_PATH);
+    fs.chmodSync(VAULT_MASTER_KEY_PATH, 0o600);
+  } catch (err) {
+    console.error('[sync-vault] Failed to persist master key:', err instanceof Error ? err.message : err);
+  }
+  return crypto.createHash('sha256').update(secret).digest();
+}
+
+function getUserVaultFilePath(canonicalAccountKey) {
+  const hash = crypto.createHash('sha256').update(`vault-v1:${canonicalAccountKey}`).digest('hex');
+  return path.join(USER_VAULTS_DIR, `${hash}.json`);
+}
+
+function readEncryptedUserVault(canonicalAccountKey) {
+  const fp = getUserVaultFilePath(canonicalAccountKey);
+  if (!fs.existsSync(fp)) return null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(fp, 'utf8'));
+    if (!raw || !raw.iv || !raw.tag || !raw.ciphertext) return null;
+    const key = getSyncVaultMasterKey();
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm',
+      key,
+      Buffer.from(raw.iv, 'base64url')
+    );
+    decipher.setAuthTag(Buffer.from(raw.tag, 'base64url'));
+    const plainStr = Buffer.concat([
+      decipher.update(Buffer.from(raw.ciphertext, 'base64url')),
+      decipher.final(),
+    ]).toString('utf8');
+    const parsed = JSON.parse(plainStr);
+    return {
+      revision: Number(raw.revision) || 1,
+      updatedAt: Number(raw.updatedAt) || 0,
+      clientEncrypted: Boolean(raw.clientEncrypted),
+      deviceLabel: String(raw.deviceLabel || ''),
+      payload: parsed,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeEncryptedUserVault(canonicalAccountKey, record) {
+  fs.mkdirSync(USER_VAULTS_DIR, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(USER_VAULTS_DIR, 0o700);
+  } catch {
+    // ignore
+  }
+  const key = getSyncVaultMasterKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const plainBytes = Buffer.from(JSON.stringify(record.payload), 'utf8');
+  const enc = Buffer.concat([cipher.update(plainBytes), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  const envelope = {
+    version: 1,
+    revision: record.revision,
+    updatedAt: record.updatedAt,
+    clientEncrypted: Boolean(record.clientEncrypted),
+    deviceLabel: String(record.deviceLabel || '').slice(0, 64),
+    iv: iv.toString('base64url'),
+    tag: tag.toString('base64url'),
+    ciphertext: enc.toString('base64url'),
+  };
+
+  const fp = getUserVaultFilePath(canonicalAccountKey);
+  const tmp = `${fp}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(envelope), { mode: 0o600 });
+  fs.renameSync(tmp, fp);
+  fs.chmodSync(fp, 0o600);
+}
+
+function deleteEncryptedUserVault(canonicalAccountKey) {
+  const fp = getUserVaultFilePath(canonicalAccountKey);
+  if (fs.existsSync(fp)) {
+    fs.unlinkSync(fp);
+    return true;
+  }
+  return false;
+}
+
 function loadImaCredentials() {
   let clientId = process.env.IMA_OPENAPI_CLIENTID || process.env.IMA_CLIENT_ID || '';
   let apiKey = process.env.IMA_OPENAPI_APIKEY || process.env.IMA_API_KEY || '';
@@ -721,6 +825,117 @@ const server = http.createServer(async (req, res) => {
         serialNo: result.wire?.s || '',
         reason: result.active ? '' : result.reason || '账号已停用',
       });
+    }
+
+    // =========================================================================
+    // 0b. Per-License Encrypted Cross-Device Cloud Sync Vault API (AUTH_MODE=license)
+    // =========================================================================
+    if (pathname === '/api/sync/vault') {
+      if (AUTH_MODE !== 'license') {
+        return sendJson(res, 200, {
+          ok: true,
+          supported: false,
+          exists: false,
+          revision: 0,
+          updatedAt: 0,
+          clientEncrypted: false,
+          deviceLabel: '',
+          payload: null,
+        });
+      }
+
+      const licenseHeader = req.headers['x-toolbox-license'] || '';
+      const auth = await verifyTianranLicenseDetailed(String(licenseHeader));
+      if (!auth.valid || !auth.active || !auth.wire) {
+        return sendJson(res, 403, {
+          ok: false,
+          error: auth.reason || '未检测到有效的团队激活凭证，无法使用跨端云同步',
+        });
+      }
+
+      const canonKey = makeAccountKey(String(auth.wire.s || '').trim(), String(auth.wire.n || '').trim());
+      if (!canonKey) {
+        return sendJson(res, 400, { ok: false, error: '无法识别当前激活码所属账户标识' });
+      }
+
+      if (req.method === 'GET') {
+        const existing = readEncryptedUserVault(canonKey);
+        if (!existing) {
+          return sendJson(res, 200, {
+            ok: true,
+            supported: true,
+            exists: false,
+            revision: 0,
+            updatedAt: 0,
+            clientEncrypted: false,
+            deviceLabel: '',
+            payload: null,
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          supported: true,
+          exists: true,
+          revision: existing.revision,
+          updatedAt: existing.updatedAt,
+          clientEncrypted: existing.clientEncrypted,
+          deviceLabel: existing.deviceLabel,
+          payload: existing.payload,
+        });
+      }
+
+      if (req.method === 'POST' || req.method === 'PUT') {
+        const body = await readJsonBody(req, 2 * 1024 * 1024);
+        if (!body || body.payload === undefined || body.payload === null) {
+          return sendJson(res, 400, { ok: false, error: '缺少同步配置载荷 payload' });
+        }
+        const incomingUpdatedAt = Number(body.updatedAt) || Date.now();
+        const baseRevision = Number(body.baseRevision) || 0;
+        const force = Boolean(body.force);
+        const clientEncrypted = Boolean(body.clientEncrypted);
+        const deviceLabel = String(body.deviceLabel || '').slice(0, 64);
+
+        const existing = readEncryptedUserVault(canonKey);
+        if (
+          !force &&
+          existing &&
+          existing.revision > baseRevision &&
+          existing.updatedAt > incomingUpdatedAt
+        ) {
+          return sendJson(res, 409, {
+            ok: false,
+            conflict: true,
+            error: '云端存在更新版本的配置，请先拉取合并或选择强制覆盖',
+            serverRevision: existing.revision,
+            serverUpdatedAt: existing.updatedAt,
+            clientEncrypted: existing.clientEncrypted,
+            deviceLabel: existing.deviceLabel,
+            payload: existing.payload,
+          });
+        }
+
+        const nextRevision = (existing?.revision || 0) + 1;
+        writeEncryptedUserVault(canonKey, {
+          revision: nextRevision,
+          updatedAt: incomingUpdatedAt,
+          clientEncrypted,
+          deviceLabel,
+          payload: body.payload,
+        });
+
+        return sendJson(res, 200, {
+          ok: true,
+          revision: nextRevision,
+          updatedAt: incomingUpdatedAt,
+        });
+      }
+
+      if (req.method === 'DELETE') {
+        const deleted = deleteEncryptedUserVault(canonKey);
+        return sendJson(res, 200, { ok: true, deleted });
+      }
+
+      return sendJson(res, 405, { ok: false, error: '不支持的请求方法' });
     }
 
     if (pathname.startsWith('/api/admin/')) {

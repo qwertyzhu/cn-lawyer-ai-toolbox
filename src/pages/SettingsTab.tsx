@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Cloud,
   Copy,
   Download,
   ExternalLink,
@@ -13,6 +14,7 @@ import {
   KeyRound,
   Link2,
   Loader2,
+  Lock,
   LogOut,
   RefreshCw,
   Share2,
@@ -49,6 +51,7 @@ import {
   type VerifiedLicenseInfo,
 } from '../lib/licenseEngine';
 import { TIANRAN_OFFICIAL_ROSTER } from '../data/firmRoster';
+import { resetLocalUserWorkspaceForAccountSwitch } from '../lib/cloudSync';
 import { toolboxStorage } from '../lib/storage';
 import type { AiProviderConfig } from '../types/toolbox';
 
@@ -105,7 +108,25 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   onOpenInstallGuide,
   onLicenseChanged,
 }) => {
-  const { byok, updateByok, sessionUnlockedPin, setSessionUnlockedPin, refreshAllFromDisk, showToast } = useToolbox();
+  const {
+    byok,
+    updateByok,
+    sessionUnlockedPin,
+    setSessionUnlockedPin,
+    syncPrefs,
+    updateSyncPrefs,
+    syncState,
+    sessionSyncPassphrase,
+    setSessionSyncPassphrase,
+    triggerCloudPush,
+    triggerCloudPull,
+    clearCloudVaultBackup,
+    refreshAllFromDisk,
+    showToast,
+  } = useToolbox();
+
+  const [e2eePassInput, setE2eePassInput] = useState(sessionSyncPassphrase);
+  const [showE2eePanel, setShowE2eePanel] = useState(false);
 
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -724,12 +745,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               <button
                 type="button"
                 onClick={() => {
+                  resetLocalUserWorkspaceForAccountSwitch();
                   clearSavedLicense();
-                  try {
-                    localStorage.removeItem('lf-sheet-author-manual');
-                  } catch {
-                    // ignore
-                  }
                   onLicenseChanged(null);
                 }}
                 className="inline-flex items-center gap-1 rounded-md border border-white/20 bg-white/5 hover:bg-white/15 px-2.5 py-1.5 text-xs text-slate-300"
@@ -1173,6 +1190,237 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           </div>
         )}
       </section>
+
+      {/* Section 1b: Activation-Code Automatic Cross-Device Cloud Sync (Team License Mode Only) */}
+      {SITE_CONFIG.authMode === 'license' && (
+        <section className="rounded-lg border border-[#D1B27A]/70 bg-gradient-to-br from-white to-[#FAF8F2] p-4 sm:p-6 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFECE5] pb-3">
+            <div className="flex items-center gap-2">
+              <Cloud className="h-4 w-4 text-[#B89254]" />
+              <h2 className="font-display text-base sm:text-lg font-bold text-[#11151C]">
+                激活码跨端自动同步（激活码即账号）
+              </h2>
+            </div>
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold ${
+                syncState.status === 'synced'
+                  ? 'bg-emerald-100 text-emerald-800'
+                  : syncState.status === 'syncing'
+                  ? 'bg-sky-100 text-sky-800'
+                  : syncState.status === 'locked' || syncState.status === 'conflict'
+                  ? 'bg-amber-100 text-amber-900'
+                  : syncState.status === 'error'
+                  ? 'bg-red-100 text-red-700'
+                  : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              {syncState.status === 'syncing' && <Loader2 className="h-3 w-3 animate-spin" />}
+              {syncState.status === 'synced'
+                ? `● 已同步${syncState.lastSyncedAt ? ` · ${new Date(syncState.lastSyncedAt).toLocaleTimeString('zh-CN', { hour12: false })}` : ''}`
+                : syncState.status === 'syncing'
+                ? '同步中…'
+                : syncState.status === 'locked'
+                ? '🔒 需输入同步口令解锁'
+                : syncState.status === 'conflict'
+                ? '⚠ 检测到多端版本冲突'
+                : syncState.status === 'offline'
+                ? '离线暂存本地'
+                : syncState.status === 'error'
+                ? '同步异常'
+                : syncPrefs.enabled
+                ? '○ 待首次同步'
+                : '已暂停云同步'}
+            </span>
+          </div>
+
+          <p className="text-xs leading-5 text-slate-600">
+            在任意一台电脑或手机配好大模型密钥与常用偏好后，系统按您的专属激活码（<strong>{license.holderName} · {license.serialNo}</strong>）自动以 <code className="bg-white px-1">AES-256-GCM</code> 密文同步至自建服务器独立空间；换其他浏览器或手机微信打开您的专属链接即可<strong>自动恢复配置，免重新填写</strong>（团队成员之间物理隔离、互不可见；证据 PDF 与原件绝不上传）。
+          </p>
+
+          {syncState.errorMsg && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+              {syncState.errorMsg}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+            <label className="flex items-start gap-2 rounded-md border border-[#E4DFD4] bg-white p-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={syncPrefs.enabled}
+                onChange={(e) => updateSyncPrefs({ enabled: e.target.checked })}
+                className="mt-0.5 rounded accent-[#0E223D]"
+              />
+              <span>
+                <strong className="block text-[#11151C]">开启跨端自动同步</strong>
+                <span className="text-[11px] text-slate-500">登录自动拉取、修改 1.5 秒自动上传</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 rounded-md border border-[#E4DFD4] bg-white p-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={syncPrefs.syncByok}
+                onChange={(e) => updateSyncPrefs({ syncByok: e.target.checked })}
+                className="mt-0.5 rounded accent-[#0E223D]"
+              />
+              <span>
+                <strong className="block text-[#11151C]">同步大模型 API 配置</strong>
+                <span className="text-[11px] text-slate-500">含接口地址、API Key 与已选模型</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 rounded-md border border-[#E4DFD4] bg-white p-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={syncPrefs.syncWorkspace}
+                onChange={(e) => updateSyncPrefs({ syncWorkspace: e.target.checked })}
+                className="mt-0.5 rounded accent-[#0E223D]"
+              />
+              <span>
+                <strong className="block text-[#11151C]">同步偏好与办案台账</strong>
+                <span className="text-[11px] text-slate-500">置顶、收藏法条、保全预警、速记与报价落款</span>
+              </span>
+            </label>
+          </div>
+
+          {/* Optional Zero-Knowledge Client E2EE Sync Passphrase */}
+          <div className="rounded-md border border-[#E4DFD4] bg-white p-3 space-y-2">
+            <button
+              type="button"
+              onClick={() => setShowE2eePanel((v) => !v)}
+              className="flex w-full items-center justify-between text-left text-xs font-bold text-[#0E223D]"
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Lock className="h-3.5 w-3.5 text-[#B89254]" />
+                高级隐私：独立同步口令（可选真·零知识端到端加密）
+                {(syncPrefs.useE2eePassphrase || syncState.clientEncrypted) && (
+                  <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] text-emerald-800">
+                    已启用
+                  </span>
+                )}
+              </span>
+              {showE2eePanel || syncState.status === 'locked' ? (
+                <ChevronUp className="h-3.5 w-3.5 text-slate-400" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+              )}
+            </button>
+
+            {(showE2eePanel || syncState.status === 'locked') && (
+              <div className="space-y-2 pt-1 border-t border-[#EFECE5] text-xs">
+                <p className="text-[11px] leading-5 text-slate-600">
+                  默认无需设置口令（换设备点激活链接即可无感恢复）。如果您希望<strong>连自建服务器管理员也完全无法解密您的配置</strong>，可设置一段独立口令，数据在离开浏览器前即完成端到端加密；换新设备时输入一次口令即可解锁同步。
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <input
+                    type="password"
+                    value={e2eePassInput}
+                    onChange={(e) => setE2eePassInput(e.target.value)}
+                    placeholder="输入至少 4 位独立同步口令"
+                    className="flex-1 min-w-[180px] rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2.5 py-1.5 text-xs"
+                  />
+                  {syncState.status === 'locked' ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const p = e2eePassInput.trim();
+                        if (p.length < 4) {
+                          showToast('请输入至少 4 位同步口令');
+                          return;
+                        }
+                        setSessionSyncPassphrase(p);
+                        updateSyncPrefs({ useE2eePassphrase: true });
+                        await triggerCloudPull(false, p);
+                      }}
+                      className="rounded bg-[#0E223D] px-3 py-1.5 text-xs font-bold text-white"
+                    >
+                      解锁并拉取云端配置
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const p = e2eePassInput.trim();
+                          if (p.length < 4) {
+                            showToast('请设置至少 4 位独立同步口令');
+                            return;
+                          }
+                          setSessionSyncPassphrase(p);
+                          updateSyncPrefs({ useE2eePassphrase: true });
+                          await triggerCloudPush(true, false, p);
+                        }}
+                        className="rounded bg-[#0E223D] px-3 py-1.5 text-xs font-bold text-white"
+                      >
+                        启用口令加密并上传
+                      </button>
+                      {syncPrefs.useE2eePassphrase && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            setSessionSyncPassphrase('');
+                            setE2eePassInput('');
+                            updateSyncPrefs({ useE2eePassphrase: false });
+                            await triggerCloudPush(true, false, '');
+                          }}
+                          className="rounded border border-[#D8D1C3] bg-white px-3 py-1.5 text-xs font-semibold text-slate-600"
+                        >
+                          关闭口令（切回免口令同步）
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={syncState.status === 'syncing'}
+                onClick={() => triggerCloudPush(syncState.status === 'conflict', false)}
+                className="inline-flex items-center gap-1.5 rounded bg-[#0E223D] px-3.5 py-2 text-xs font-bold text-white disabled:opacity-45"
+              >
+                <Upload className="h-3.5 w-3.5 text-[#D1B27A]" />
+                {syncState.status === 'conflict' ? '强制以本机覆盖云端' : '立即上传本机配置'}
+              </button>
+              <button
+                type="button"
+                disabled={syncState.status === 'syncing'}
+                onClick={() => triggerCloudPull(false)}
+                className="inline-flex items-center gap-1.5 rounded border border-[#D1B27A] bg-[#FAF6EC] hover:bg-[#F3ECE0] px-3.5 py-2 text-xs font-bold text-[#7A5922] disabled:opacity-45"
+              >
+                <Download className="h-3.5 w-3.5" />
+                立即从云端拉取
+              </button>
+              {syncState.revision > 0 && (
+                <span className="text-[11px] text-slate-500">
+                  版本 v{syncState.revision}
+                  {syncState.deviceLabel ? ` · 来源：${syncState.deviceLabel}` : ''}
+                </span>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={async () => {
+                if (!window.confirm('确定清空云端同步副本吗？（不影响本机当前配置，仅删除服务器上的加密备份）')) {
+                  return;
+                }
+                try {
+                  await clearCloudVaultBackup();
+                } catch (err) {
+                  showToast(err instanceof Error ? err.message : '清空失败');
+                }
+              }}
+              className="text-[11px] text-slate-400 hover:text-red-600"
+            >
+              清空云端副本
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* Section 2: Web Crypto PIN Vault & Phone <-> PC Encrypted Sync */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">

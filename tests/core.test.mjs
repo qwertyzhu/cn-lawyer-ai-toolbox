@@ -40,6 +40,10 @@ import {
   importEncryptedSyncCode,
 } from '../src/lib/cryptoVault.ts';
 import {
+  encodeSyncSnapshotForUpload,
+  decodeSyncSnapshotFromCloud,
+} from '../src/lib/cloudSync.ts';
+import {
   verifyActivationCode,
   signActivationCodeWithMasterToken,
   formatWeChatInvitationCard,
@@ -147,6 +151,31 @@ test('Web Crypto AES-GCM PIN Vault & Cross-Device Sync encrypt/decrypt roundtrip
   const syncStr = await exportEncryptedSyncCode('{"providers":[]}', 'pass1234');
   assert.ok(syncStr.startsWith('TRSYNC1:'));
   assert.equal(await importEncryptedSyncCode(syncStr, 'pass1234'), '{"providers":[]}');
+
+  // Cloud Sync snapshot encode/decode (both standard mode and optional E2EE passphrase mode)
+  const sampleSnap = {
+    schemaVersion: 1,
+    syncedAt: 1795514000000,
+    deviceLabel: 'Mac 桌面端',
+    byok: {
+      activeProviderId: 'ds',
+      defaultModelSlot: 'fast',
+      autoRedactPrompt: true,
+      pinEnabled: false,
+      providers: [],
+    },
+  };
+  const plainEncoded = await encodeSyncSnapshotForUpload(sampleSnap, '');
+  assert.equal(plainEncoded.clientEncrypted, false);
+  const plainDecoded = await decodeSyncSnapshotFromCloud(false, plainEncoded.payload, '');
+  assert.equal(plainDecoded.deviceLabel, 'Mac 桌面端');
+
+  const e2eeEncoded = await encodeSyncSnapshotForUpload(sampleSnap, 'my-secret-pass');
+  assert.equal(e2eeEncoded.clientEncrypted, true);
+  assert.equal(typeof e2eeEncoded.payload, 'string');
+  await assert.rejects(() => decodeSyncSnapshotFromCloud(true, e2eeEncoded.payload, ''), /E2EE_LOCKED/);
+  const e2eeDecoded = await decodeSyncSnapshotFromCloud(true, e2eeEncoded.payload, 'my-secret-pass');
+  assert.equal(e2eeDecoded.syncedAt, 1795514000000);
 });
 
 test('ICS Calendar generator emits valid RFC 5545 VCALENDAR with VALARM triggers', () => {
