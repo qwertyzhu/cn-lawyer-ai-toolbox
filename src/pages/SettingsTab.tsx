@@ -24,7 +24,12 @@ import {
 } from 'lucide-react';
 import { SITE_CONFIG } from '../config/siteConfig';
 import { useToolbox } from '../context/ToolboxContext';
-import { AI_PROVIDER_PRESETS, testProviderConnectivity } from '../lib/aiClient';
+import {
+  AI_PROVIDER_PRESETS,
+  fetchAvailableModels,
+  suggestModelSlots,
+  testProviderConnectivity,
+} from '../lib/aiClient';
 import { copyToClipboard } from '../lib/clipboard';
 import {
   decryptWithPassphrase,
@@ -105,6 +110,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [showKey, setShowKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchedModelsMap, setFetchedModelsMap] = useState<Record<string, string[]>>({});
+  const [modelsFetchResult, setModelsFetchResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [modelSearch, setModelSearch] = useState('');
   const [showBeginnerGuide, setShowBeginnerGuide] = useState(false);
 
   // PIN Vault
@@ -171,6 +180,48 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       providers: [...byok.providers, created],
     });
     showToast(`已新增「${preset.name}」配置槽`);
+  };
+
+  const handleFetchModels = async (overwriteSlots = false) => {
+    setFetchingModels(true);
+    setModelsFetchResult(null);
+    try {
+      let keyToUse = activeProvider.apiKey.trim();
+      if (!keyToUse && activeProvider.apiKeyEncrypted) {
+        if (!sessionUnlockedPin) {
+          throw new Error('当前密钥受 PIN 加密保护，请先在「AI 智囊」解锁 PIN 或下方解除 PIN 锁后再拉取');
+        }
+        keyToUse = await decryptWithPassphrase(activeProvider.apiKeyEncrypted, sessionUnlockedPin);
+      }
+      const models = await fetchAvailableModels({ ...activeProvider, apiKey: keyToUse });
+      setFetchedModelsMap((prev) => ({ ...prev, [activeProvider.id]: models }));
+      setModelSearch('');
+      const rec = suggestModelSlots(models);
+      const patch: Partial<AiProviderConfig> = {};
+      if (overwriteSlots || !activeProvider.fastModel.trim()) {
+        if (rec.fastModel) patch.fastModel = rec.fastModel;
+      }
+      if (overwriteSlots || !activeProvider.reasoningModel.trim()) {
+        if (rec.reasoningModel) patch.reasoningModel = rec.reasoningModel;
+      }
+      if (overwriteSlots || !(activeProvider.visionModel || '').trim()) {
+        if (rec.visionModel) patch.visionModel = rec.visionModel;
+      }
+      if (Object.keys(patch).length > 0) {
+        patchActiveProvider(patch);
+      }
+      setModelsFetchResult({
+        ok: true,
+        msg: `已成功拉取 ${models.length} 个可用模型，可在下方三项直接下拉选用（仍支持随时手填）`,
+      });
+    } catch (err) {
+      setModelsFetchResult({
+        ok: false,
+        msg: err instanceof Error ? err.message : '拉取模型列表失败（可继续手动输入模型名）',
+      });
+    } finally {
+      setFetchingModels(false);
+    }
   };
 
   const handleTest = async () => {
@@ -764,7 +815,12 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <button
               key={prov.id}
               type="button"
-              onClick={() => updateByok({ ...byok, activeProviderId: prov.id })}
+              onClick={() => {
+                updateByok({ ...byok, activeProviderId: prov.id });
+                setTestResult(null);
+                setModelsFetchResult(null);
+                setModelSearch('');
+              }}
               className={`max-w-full truncate rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
                 prov.id === activeProvider.id
                   ? 'border-[#0E223D] bg-[#0E223D] text-white'
@@ -874,48 +930,190 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-              <div>
-                <label className="block text-xs font-bold text-[#11151C] mb-1">
-                  ⚡ 日常极速模型标识（用于去AI味/微信回复）
-                </label>
-                <input
-                  type="text"
-                  value={activeProvider.fastModel}
-                  onChange={(e) => patchActiveProvider({ fastModel: e.target.value })}
-                  placeholder="如 deepseek-chat 或 qwen-plus"
-                  className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono text-xs"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-[#11151C] mb-1">
-                  🧠 深度推理模型标识（用于审合同/拆解要件）
-                </label>
-                <input
-                  type="text"
-                  value={activeProvider.reasoningModel}
-                  onChange={(e) => patchActiveProvider({ reasoningModel: e.target.value })}
-                  placeholder="如 deepseek-reasoner 或 qwq-plus"
-                  className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono text-xs"
-                />
-              </div>
-            </div>
+            {(() => {
+              const allFetched = fetchedModelsMap[activeProvider.id] || [];
+              const filteredFetched = modelSearch.trim()
+                ? allFetched.filter((m) =>
+                    m.toLowerCase().includes(modelSearch.trim().toLowerCase())
+                  )
+                : allFetched;
+              const recSlots = suggestModelSlots(allFetched);
 
-            <div>
-              <label className="block text-xs font-bold text-[#11151C] mb-1">
-                👁️ 视觉识图模型标识（在 AI 智囊上传截图 / 拍照时自动启用，选填）
-              </label>
-              <input
-                type="text"
-                value={activeProvider.visionModel ?? ''}
-                onChange={(e) => patchActiveProvider({ visionModel: e.target.value })}
-                placeholder="如 qwen-vl-max-latest、Qwen/Qwen2.5-VL-72B-Instruct、glm-4v-plus-0111（DeepSeek 官方暂仅支持纯文本，可留空）"
-                className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono text-xs"
-              />
-              <p className="mt-1 text-[11px] text-slate-500">
-                纯文字问答仍走上方极速/深度模型；当您上传合同照片、聊天记录或裁判文书截图时，系统会自动切换至本视觉模型。
-              </p>
-            </div>
+              return (
+                <>
+                  {/* Auto-Fetch Models Toolbar & Filter */}
+                  <div className="rounded-md border border-[#E4DFD4] bg-[#FAF9F6] p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-[11px] font-bold text-[#0E223D]">
+                        自动拉取该接口可用模型（填入 Base URL 与 API Key 后点击即可）
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleFetchModels(false)}
+                          disabled={
+                            fetchingModels ||
+                            !activeProvider.baseUrl.trim() ||
+                            (!activeProvider.apiKey.trim() && !activeProvider.apiKeyEncrypted)
+                          }
+                          className="inline-flex items-center gap-1 rounded bg-[#B89254] hover:bg-[#C7A265] px-3 py-1.5 text-[11px] font-bold text-[#11151C] disabled:opacity-45"
+                        >
+                          {fetchingModels ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Sparkles className="h-3 w-3" />
+                          )}
+                          {fetchingModels ? '正在拉取模型…' : '自动拉取模型列表'}
+                        </button>
+                        {allFetched.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              patchActiveProvider({
+                                fastModel: recSlots.fastModel || activeProvider.fastModel,
+                                reasoningModel: recSlots.reasoningModel || activeProvider.reasoningModel,
+                                visionModel: recSlots.visionModel || activeProvider.visionModel,
+                              });
+                              showToast('已按拉取结果一键智能填入极速 / 推理 / 视觉推荐模型');
+                            }}
+                            className="rounded border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2.5 py-1.5 text-[11px] font-semibold text-[#0E223D]"
+                          >
+                            一键智能填入推荐
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {modelsFetchResult && (
+                      <div
+                        className={`rounded px-2.5 py-1.5 text-[11px] ${
+                          modelsFetchResult.ok
+                            ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                            : 'bg-amber-50 text-amber-900 border border-amber-200'
+                        }`}
+                      >
+                        {modelsFetchResult.msg}
+                      </div>
+                    )}
+
+                    {allFetched.length > 10 && (
+                      <input
+                        type="text"
+                        value={modelSearch}
+                        onChange={(e) => setModelSearch(e.target.value)}
+                        placeholder={`快速筛选已拉取的 ${allFetched.length} 个模型（如输入 deepseek、claude、gpt、qwen、glm）…`}
+                        className="w-full rounded border border-[#D8D1C3] bg-white px-2.5 py-1.5 text-xs"
+                      />
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    <div>
+                      <label className="block text-xs font-bold text-[#11151C] mb-1">
+                        ⚡ 日常极速模型标识（用于去AI味/微信回复）
+                      </label>
+                      <input
+                        type="text"
+                        value={activeProvider.fastModel}
+                        onChange={(e) => patchActiveProvider({ fastModel: e.target.value })}
+                        placeholder="如 deepseek-chat 或 qwen-plus"
+                        className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono text-xs"
+                      />
+                      {allFetched.length > 0 && (
+                        <select
+                          value={allFetched.includes(activeProvider.fastModel) ? activeProvider.fastModel : ''}
+                          onChange={(e) => {
+                            if (e.target.value) patchActiveProvider({ fastModel: e.target.value });
+                          }}
+                          className="mt-1.5 w-full rounded border border-[#D1B27A]/70 bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#0E223D]"
+                        >
+                          <option value="">
+                            ▾ 从已拉取的 {filteredFetched.length} 个模型中点选极速模型…
+                          </option>
+                          {filteredFetched.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-[#11151C] mb-1">
+                        🧠 深度推理模型标识（用于审合同/拆解要件）
+                      </label>
+                      <input
+                        type="text"
+                        value={activeProvider.reasoningModel}
+                        onChange={(e) => patchActiveProvider({ reasoningModel: e.target.value })}
+                        placeholder="如 deepseek-reasoner 或 qwq-plus"
+                        className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono text-xs"
+                      />
+                      {allFetched.length > 0 && (
+                        <select
+                          value={
+                            allFetched.includes(activeProvider.reasoningModel)
+                              ? activeProvider.reasoningModel
+                              : ''
+                          }
+                          onChange={(e) => {
+                            if (e.target.value) patchActiveProvider({ reasoningModel: e.target.value });
+                          }}
+                          className="mt-1.5 w-full rounded border border-[#D1B27A]/70 bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#0E223D]"
+                        >
+                          <option value="">
+                            ▾ 从已拉取的 {filteredFetched.length} 个模型中点选推理模型…
+                          </option>
+                          {filteredFetched.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-[#11151C] mb-1">
+                      👁️ 视觉识图模型标识（在 AI 智囊上传截图 / 拍照时自动启用，选填）
+                    </label>
+                    <input
+                      type="text"
+                      value={activeProvider.visionModel ?? ''}
+                      onChange={(e) => patchActiveProvider({ visionModel: e.target.value })}
+                      placeholder="如 qwen-vl-max-latest、Qwen/Qwen2.5-VL-72B-Instruct、glm-4v-plus-0111（DeepSeek 官方暂仅支持纯文本，可留空）"
+                      className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-mono text-xs"
+                    />
+                    {allFetched.length > 0 && (
+                      <select
+                        value={
+                          allFetched.includes(activeProvider.visionModel || '')
+                            ? activeProvider.visionModel || ''
+                            : ''
+                        }
+                        onChange={(e) => {
+                          if (e.target.value) patchActiveProvider({ visionModel: e.target.value });
+                        }}
+                        className="mt-1.5 w-full rounded border border-[#D1B27A]/70 bg-white px-2.5 py-1.5 font-mono text-[11px] text-[#0E223D]"
+                      >
+                        <option value="">
+                          ▾ 从已拉取的 {filteredFetched.length} 个模型中点选视觉识图模型（选填）…
+                        </option>
+                        {filteredFetched.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      纯文字问答仍走上方极速/深度模型；当您上传合同照片、聊天记录或裁判文书截图时，系统会自动切换至本视觉模型。
+                    </p>
+                  </div>
+                </>
+              );
+            })()}
 
             <label className="flex items-center gap-2 text-xs text-slate-600">
               <input

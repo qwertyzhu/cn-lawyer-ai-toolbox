@@ -152,6 +152,92 @@ function normalizeEndpoint(provider: AiProviderConfig): string {
   return `${clean}/chat/completions`;
 }
 
+export function normalizeModelsEndpoints(provider: AiProviderConfig): string[] {
+  const raw = provider.baseUrl.trim().replace(/\/+$/, '');
+  if (!raw) return [];
+  const base = raw
+    .replace(/\/chat\/completions$/i, '')
+    .replace(/\/messages$/i, '')
+    .replace(/\/models$/i, '')
+    .replace(/\/+$/, '');
+
+  if (provider.protocol === 'anthropic') {
+    if (base.endsWith('/v1')) return [`${base}/models`];
+    return [`${base}/v1/models`, `${base}/models`];
+  }
+  if (/\/v\d+(?:alpha|beta)?$/i.test(base)) {
+    return [`${base}/models`];
+  }
+  return [`${base}/models`, `${base}/v1/models`];
+}
+
+export function parseModelsResponsePayload(json: unknown): string[] {
+  const rawList: unknown[] = Array.isArray(json)
+    ? json
+    : Array.isArray((json as { data?: unknown[] })?.data)
+    ? (json as { data: unknown[] }).data
+    : Array.isArray((json as { models?: unknown[] })?.models)
+    ? (json as { models: unknown[] }).models
+    : [];
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of rawList) {
+    let id = '';
+    if (typeof item === 'string') {
+      id = item.trim();
+    } else if (item && typeof item === 'object') {
+      const rec = item as { id?: unknown; name?: unknown; model?: unknown };
+      id = String(rec.id || rec.model || rec.name || '').trim();
+    }
+    if (!id) continue;
+    if (id.startsWith('models/')) id = id.slice('models/'.length);
+    if (!seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+
+  const nonChatRe = /(?:^|[/:_-])(embed|embedding|rerank|whisper|tts|speech|audio|dall-e|flux|sdxl|stable-diffusion|moderation|bge-|text-embedding|jina-embeddings|omni-moderation)/i;
+  return out.sort((a, b) => {
+    const aUtil = nonChatRe.test(a) ? 1 : 0;
+    const bUtil = nonChatRe.test(b) ? 1 : 0;
+    if (aUtil !== bUtil) return aUtil - bUtil;
+    return a.localeCompare(b);
+  });
+}
+
+export function suggestModelSlots(models: string[]): {
+  fastModel: string;
+  reasoningModel: string;
+  visionModel: string;
+} {
+  if (models.length === 0) return { fastModel: '', reasoningModel: '', visionModel: '' };
+  const nonChatRe = /(?:^|[/:_-])(embed|embedding|rerank|whisper|tts|speech|audio|dall-e|flux|sdxl|moderation|bge-|text-embedding)/i;
+  const chatModels = models.filter((m) => !nonChatRe.test(m));
+  const pool = chatModels.length > 0 ? chatModels : models;
+
+  const strongReasoningRe = /(reasoner|r1|qwq|thinking|o1|o3|o4-mini|opus)/i;
+  const fallbackReasoningRe = /(pro|max)/i;
+  const visionRe = /(vl|vision|4o|4\.1|4\.5|gpt-5|gpt-6|gemini|claude|omni|4v|qvq|pixtral)/i;
+  const fastRe = /(chat|flash|mini|turbo|plus|sonnet|haiku|v3|v4|glm-4|moonshot|kimi)/i;
+
+  const fastModel =
+    pool.find((m) => fastRe.test(m) && !/(reasoner|r1|qwq|thinking|vl|vision)/i.test(m)) ||
+    pool.find((m) => !strongReasoningRe.test(m) && !/(vl|vision)/i.test(m)) ||
+    pool[0] ||
+    '';
+  const reasoningModel =
+    pool.find((m) => strongReasoningRe.test(m)) ||
+    pool.find((m) => fallbackReasoningRe.test(m) && !/(vl|vision)/i.test(m)) ||
+    fastModel ||
+    pool[0] ||
+    '';
+  const visionModel = pool.find((m) => visionRe.test(m)) || '';
+
+  return { fastModel, reasoningModel, visionModel };
+}
+
 export function buildProviderRequestPayload(
   provider: AiProviderConfig,
   modelSlot: 'fast' | 'reasoning',
@@ -249,13 +335,14 @@ async function performRequest(
   headers: Record<string, string>,
   bodyStr: string,
   useRelay: boolean,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  method: 'POST' | 'GET' = 'POST'
 ): Promise<Response> {
   if (!useRelay) {
     return fetch(url, {
-      method: 'POST',
+      method,
       headers,
-      body: bodyStr,
+      ...(method === 'GET' ? {} : { body: bodyStr }),
       signal,
     });
   }
@@ -266,9 +353,10 @@ async function performRequest(
       'X-Toolbox-License': getSavedLicense()?.rawCode || '',
     },
     body: JSON.stringify({
+      method,
       targetUrl: url,
       headers,
-      body: bodyStr,
+      ...(method === 'GET' ? {} : { body: bodyStr }),
     }),
     signal,
   });
@@ -396,6 +484,66 @@ export async function streamAiCompletion(opts: StreamOptions): Promise<{
   }
 
   return { content: fullContent, reasoning: fullReasoning, usedModel };
+}
+
+export async function fetchAvailableModels(provider: AiProviderConfig): Promise<string[]> {
+  const apiKey = provider.apiKey?.trim();
+  if (!apiKey) {
+    throw new Error('请先填写 API Key，再拉取可用模型列表');
+  }
+  const candidates = normalizeModelsEndpoints(provider);
+  if (candidates.length === 0) {
+    throw new Error('请先填写有效的接口地址 Base URL');
+  }
+
+  const headers: Record<string, string> =
+    provider.protocol === 'anthropic'
+      ? {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        }
+      : {
+          Authorization: `Bearer ${apiKey}`,
+        };
+
+  let lastErr = '该接口未返回模型列表';
+  for (const endpoint of candidates) {
+    let res: Response | null = null;
+    try {
+      res = await performRequest(
+        endpoint,
+        headers,
+        '',
+        Boolean(provider.useCorsRelayFallback),
+        undefined,
+        'GET'
+      );
+    } catch (err) {
+      try {
+        res = await performRequest(endpoint, headers, '', true, undefined, 'GET');
+      } catch {
+        lastErr = err instanceof Error ? err.message : '网络或跨域受限';
+        continue;
+      }
+    }
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      lastErr = `HTTP ${res.status}${txt ? `：${txt.slice(0, 120)}` : ''}`;
+      if (res.status === 404 && candidates.length > 1) continue;
+      throw new Error(`拉取模型列表失败（${lastErr}）`);
+    }
+
+    const json = await res.json().catch(() => null);
+    const models = parseModelsResponsePayload(json);
+    if (models.length > 0) {
+      return models;
+    }
+    lastErr = '接口响应成功但返回模型列表为空（部分中转站不支持 /models，可直接手动填写模型名）';
+  }
+
+  throw new Error(lastErr);
 }
 
 export async function testProviderConnectivity(provider: AiProviderConfig): Promise<string> {

@@ -1310,18 +1310,21 @@ const server = http.createServer(async (req, res) => {
 
       const payload = await readJsonBody(req, 8 * 1024 * 1024);
       const safeUrl = await validatePublicHttpsUrl(payload.targetUrl);
+      const upstreamMethod = String(payload.method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
 
       const upstream = await fetch(safeUrl, {
-        method: 'POST',
+        method: upstreamMethod,
         headers: payload.headers || {},
-        body: payload.body,
+        ...(upstreamMethod === 'GET' ? {} : { body: payload.body }),
         redirect: 'error',
       });
 
       res.writeHead(upstream.status, {
-        'Content-Type': upstream.headers.get('content-type') || 'text/event-stream; charset=utf-8',
+        'Content-Type':
+          upstream.headers.get('content-type') ||
+          (upstreamMethod === 'GET' ? 'application/json; charset=utf-8' : 'text/event-stream; charset=utf-8'),
         'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
+        ...(upstreamMethod === 'GET' ? {} : { Connection: 'keep-alive' }),
       });
 
       if (upstream.body) {

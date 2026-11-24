@@ -9,7 +9,12 @@ import {
   PROHIBITED_RISK_CATEGORIES,
 } from '../src/lib/financeUtils.ts';
 import { redactLegalText, restoreRedactedText } from '../src/lib/redactor.ts';
-import { buildProviderRequestPayload } from '../src/lib/aiClient.ts';
+import {
+  buildProviderRequestPayload,
+  normalizeModelsEndpoints,
+  parseModelsResponsePayload,
+  suggestModelSlots,
+} from '../src/lib/aiClient.ts';
 import { buildIcsContent } from '../src/lib/icsGenerator.ts';
 import {
   ELEMENTS_COMPLAINT_TEMPLATES,
@@ -308,6 +313,65 @@ test('Multimodal AI payload builder formats OpenAI/Anthropic vision blocks and g
   const antContent = ant.payload.messages[0].content;
   assert.equal(antContent[0].type, 'image');
   assert.equal(antContent[0].source.data, 'AAAA');
+});
+
+test('Auto-fetch models normalizes endpoints, parses OpenAI/Anthropic/Ollama payloads, and suggests smart slots', () => {
+  assert.deepEqual(
+    normalizeModelsEndpoints({
+      id: '1',
+      presetId: 'custom-openai',
+      name: 'Custom',
+      protocol: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1/',
+      apiKey: 'sk-x',
+      fastModel: '',
+      reasoningModel: '',
+    }),
+    ['https://api.deepseek.com/v1/models']
+  );
+  assert.deepEqual(
+    normalizeModelsEndpoints({
+      id: '2',
+      presetId: 'custom-openai',
+      name: 'Proxy',
+      protocol: 'openai',
+      baseUrl: 'https://proxy.example.com/chat/completions',
+      apiKey: 'sk-x',
+      fastModel: '',
+      reasoningModel: '',
+    }),
+    ['https://proxy.example.com/models', 'https://proxy.example.com/v1/models']
+  );
+  assert.deepEqual(
+    normalizeModelsEndpoints({
+      id: '3',
+      presetId: 'custom-anthropic',
+      name: 'Claude',
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'sk-x',
+      fastModel: '',
+      reasoningModel: '',
+    }),
+    ['https://api.anthropic.com/v1/models', 'https://api.anthropic.com/models']
+  );
+
+  const parsed = parseModelsResponsePayload({
+    data: [
+      { id: 'text-embedding-3-large' },
+      { id: 'deepseek-reasoner' },
+      { id: 'deepseek-chat' },
+      { id: 'qwen-vl-max-latest' },
+      { id: 'deepseek-chat' },
+    ],
+  });
+  assert.equal(parsed.length, 4);
+  assert.equal(parsed[parsed.length - 1], 'text-embedding-3-large', 'Utility models should sort to bottom');
+
+  const slots = suggestModelSlots(parsed);
+  assert.equal(slots.fastModel, 'deepseek-chat');
+  assert.equal(slots.reasoningModel, 'deepseek-reasoner');
+  assert.equal(slots.visionModel, 'qwen-vl-max-latest');
 });
 
 test('Director Admin API signed headers verify cleanly against ephemeral P-256 public JWK', async () => {
