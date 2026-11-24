@@ -85,6 +85,7 @@ export const AiHubTab: React.FC = () => {
   const [specialistId, setSpecialistId] = useState<AiSpecialistId>(activeSpecialistId);
   const [modelSlot, setModelSlot] = useState<'fast' | 'reasoning'>(byok.defaultModelSlot);
   const [selectedPreset, setSelectedPreset] = useState<string>('');
+  const [customSceneNote, setCustomSceneNote] = useState<string>('');
   const [inputText, setInputText] = useState('');
   const [inputImages, setInputImages] = useState<AiImageAttachment[]>([]);
   const [followUpInput, setFollowUpInput] = useState('');
@@ -138,6 +139,7 @@ export const AiHubTab: React.FC = () => {
   useEffect(() => {
     setModelSlot(specialist.recommendedSlot);
     setSelectedPreset(specialist.presetOptions?.[0]?.value || '');
+    setCustomSceneNote('');
     setErrorMsg(null);
   }, [specialist]);
 
@@ -317,6 +319,7 @@ export const AiHubTab: React.FC = () => {
 
     // Apply automatic local redaction with incremental placeholder continuation across turns!
     let outboundText = effectiveText;
+    let outboundCustomNote = customSceneNote.trim();
     const baseMappings = isFollowUp || uiTurns.length === 0 ? sessionMappings : [];
     let nextMappings = [...baseMappings];
 
@@ -326,14 +329,25 @@ export const AiHubTab: React.FC = () => {
       });
       outboundText = red.redactedText;
       nextMappings = red.mappings;
+      if (!isFollowUp && outboundCustomNote) {
+        const noteRed = redactLegalText(outboundCustomNote, {
+          existingMappings: nextMappings,
+        });
+        outboundCustomNote = noteRed.redactedText;
+        nextMappings = noteRed.mappings;
+      }
       setSessionMappings(nextMappings);
     } else if (!isFollowUp && uiTurns.length > 0) {
       setSessionMappings([]);
     }
 
+    const combinedStance = [selectedPreset.trim(), outboundCustomNote ? `补充特别要求：${outboundCustomNote}` : '']
+      .filter(Boolean)
+      .join('\n');
+
     const userPromptContent =
-      !isFollowUp && selectedPreset
-        ? `【特定业务立场与场景要求】\n${selectedPreset}\n\n【待处理材料正文】\n${outboundText}`
+      !isFollowUp && combinedStance
+        ? `【特定业务立场与场景要求】\n${combinedStance}\n\n【待处理材料正文】\n${outboundText}`
         : outboundText;
 
     const newUserTurn: ChatTurn = {
@@ -600,23 +614,54 @@ export const AiHubTab: React.FC = () => {
             </label>
           </div>
 
-          {/* Preset Stance Selector */}
+          {/* Preset Stance Selector (Grouped by Practice Area + Custom Note) */}
           {specialist.presetOptions && specialist.presetOptions.length > 0 && (
-            <div>
-              <label className="block text-xs font-bold text-[#11151C] mb-1">
-                选择代理立场 / 文书场景：
+            <div className="space-y-1.5">
+              <label className="block text-xs font-bold text-[#11151C]">
+                选择代理立场 / 文书场景（覆盖民商 · 知产 · 刑事 · 行政 · 执行 · 非诉与通用）：
               </label>
               <select
                 value={selectedPreset}
                 onChange={(e) => setSelectedPreset(e.target.value)}
                 className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 text-xs font-medium text-[#11151C] focus:border-[#0E223D] focus:outline-none"
               >
-                {specialist.presetOptions.map((opt) => (
-                  <option key={opt.label} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
+                {(() => {
+                  const hasGroups = specialist.presetOptions.some((o) => Boolean(o.group));
+                  if (!hasGroups) {
+                    return specialist.presetOptions.map((opt) => (
+                      <option key={opt.label} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ));
+                  }
+                  const groups: { name: string; items: typeof specialist.presetOptions }[] = [];
+                  for (const opt of specialist.presetOptions) {
+                    const gName = opt.group || '通用场景';
+                    let found = groups.find((g) => g.name === gName);
+                    if (!found) {
+                      found = { name: gName, items: [] };
+                      groups.push(found);
+                    }
+                    found.items.push(opt);
+                  }
+                  return groups.map((g) => (
+                    <optgroup key={g.name} label={`── ${g.name} ──`}>
+                      {g.items.map((opt) => (
+                        <option key={`${g.name}-${opt.label}`} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ));
+                })()}
               </select>
+              <input
+                type="text"
+                value={customSceneNote}
+                onChange={(e) => setCustomSceneNote(e.target.value)}
+                placeholder="选填：补充具体文书名、审级或特别要求（如：二审上诉状 / 发给公安经侦 / 控制在 1500 字内）"
+                className="w-full rounded border border-[#E4DFD4] bg-white px-2.5 py-1.5 text-[11px] text-[#11151C] placeholder:text-slate-400 focus:border-[#0E223D] focus:outline-none"
+              />
             </div>
           )}
 

@@ -16,6 +16,7 @@ import {
   suggestModelSlots,
 } from '../src/lib/aiClient.ts';
 import { buildIcsContent } from '../src/lib/icsGenerator.ts';
+import { AI_SPECIALISTS_REGISTRY } from '../src/data/toolRegistry.ts';
 import {
   ELEMENTS_COMPLAINT_TEMPLATES,
   createInitialComplaintDraft,
@@ -708,5 +709,23 @@ test('Official SPC 法〔2025〕82号 113-template corpus, checkbox toggles, par
   });
   assert.ok(execExtracted.includes('执行依据信息'));
 });
+
+test('AI Hub 6 specialists cover full practice domains (civil/commercial/IP/criminal/admin/execution/general) and de-AI redlines', () => {
+  assert.equal(AI_SPECIALISTS_REGISTRY.length, 6);
+  for (const sp of AI_SPECIALISTS_REGISTRY) {
+    assert.ok(Array.isArray(sp.presetOptions) && sp.presetOptions.length >= 6, `${sp.code} should have >=6 presets`);
+    assert.ok(sp.presetOptions.every((o) => Boolean(o.group && o.label && o.value)), `${sp.code} presets must be grouped`);
+  }
+  const deAi = AI_SPECIALISTS_REGISTRY.find((s) => s.id === 'de-ai-polish');
+  assert.ok(deAi && deAi.presetOptions && deAi.presetOptions.length >= 12);
+  const allGroups = deAi.presetOptions.map((o) => o.group).join(' | ');
+  for (const kw of ['民事', '知识产权', '刑事', '行政', '执行与仲裁', '非诉', '通用']) {
+    assert.ok(allGroups.includes(kw), `AI-02 missing practice group keyword: ${kw}`);
+  }
+  assert.ok(deAi.systemPrompt.includes('只改表达，不改法律含义'));
+  assert.ok(deAi.systemPrompt.includes('固定程序性表述与司法引述语一字不动'));
+  assert.ok(deAi.systemPrompt.includes('可能影响法律含义的修改清单'));
+});
+
 
 
