@@ -91,8 +91,10 @@ export interface OfficialSpcDraftState {
   rowValues: Record<string, string>;
   /** Map of row.id -> edited cells array (for grid rows such as 案号/案由 or 3-col patent rows) */
   gridValues: Record<string, string[]>;
-  /** Duplicated repeatable rows (多原告/多被告/多第三人/多委托诉讼代理人 per 说明第4条) */
+  /** Duplicated repeatable party rows or custom added element rows */
   extraRows: ExtraPartyInstance[];
+  /** Official row IDs explicitly hidden/excluded by the lawyer or AI instruction */
+  excludedRowIds: string[];
   /** Edited attachment tables: attachmentIndex -> 2D string array */
   attachmentRows: Record<number, string[][]>;
   /** Attachment submitter/date overrides */
@@ -271,6 +273,7 @@ export function createInitialSpcDraft(tpl: OfficialSpcTemplate): OfficialSpcDraf
     rowValues,
     gridValues,
     extraRows: [],
+    excludedRowIds: [],
     attachmentRows,
     attachmentSubmitter: '',
     attachmentDate: '',
@@ -587,7 +590,24 @@ export function buildResolvedSpcDocument(
       !isRowUntouched(r, draft.rowValues[r.id])
   );
 
+  const excludedSet = new Set(!blankMode && Array.isArray(draft.excludedRowIds) ? draft.excludedRowIds : []);
+
   for (const r of tpl.rows) {
+    if (!blankMode && r.kind !== 'notice' && r.kind !== 'section' && excludedSet.has(r.id)) {
+      // Still splice custom extraRows anchored after this row if any exist
+      const extrasAfterExcluded = draft.extraRows.filter((ex) => ex.sourceRowId === r.id);
+      for (const ex of extrasAfterExcluded) {
+        resolvedRows.push({
+          id: ex.uid,
+          kind: 'field',
+          label: ex.label,
+          value: ex.value,
+          roleTag: r.roleTag,
+        });
+      }
+      continue;
+    }
+
     if (!blankMode && draft.hideUntouchedPartyRows && r.kind === 'field') {
       const untouched = isRowUntouched(r, draft.rowValues[r.id]);
       if (untouched) {
@@ -654,8 +674,8 @@ export function buildResolvedSpcDocument(
       });
     }
 
-    // Insert any duplicated extra party rows right after their source row (per official 说明第4条)
-    if (!blankMode && r.repeatable) {
+    // Insert any duplicated party rows OR custom lawyer/AI-added element rows right after their anchor row
+    if (!blankMode) {
       const extras = draft.extraRows.filter((ex) => ex.sourceRowId === r.id);
       for (const ex of extras) {
         resolvedRows.push({
@@ -750,3 +770,174 @@ export function buildOfficialSpcPlainText(doc: ResolvedSpcDocument): string {
 
   return lines.join('\n').trim();
 }
+
+export interface SpcAiPatchPayload {
+  rowValues?: Record<string, string>;
+  gridValues?: Record<string, string[]>;
+  excludeRowIds?: string[];
+  restoreRowIds?: string[];
+  addExtraRows?: { afterRowId: string; label: string; value: string }[];
+  updateExtraRows?: { uid: string; label?: string; value?: string }[];
+  removeExtraRowUids?: string[];
+  signerName?: string;
+  signDate?: string;
+  courtName?: string;
+  summary?: string;
+  missingChecklist?: string[];
+}
+
+export interface SpcAiPatchApplyResult {
+  nextDraft: OfficialSpcDraftState;
+  changedLabels: string[];
+  excludedLabels: string[];
+  restoredLabels: string[];
+  addedLabels: string[];
+  removedExtraCount: number;
+  totalOps: number;
+}
+
+/**
+ * Safely applies a structured AI patch (both Round 1 extraction and Round N multi-turn edits)
+ * onto an OfficialSpcDraftState without ever deleting official notice/section headers or corrupting untouched rows.
+ */
+export function applySpcAiPatch(
+  tpl: OfficialSpcTemplate,
+  draft: OfficialSpcDraftState,
+  patch: SpcAiPatchPayload
+): SpcAiPatchApplyResult {
+  const rowMap = new Map(tpl.rows.map((r) => [r.id, r]));
+  const nextRowValues = { ...draft.rowValues };
+  const nextGridValues = { ...draft.gridValues };
+  const excludedSet = new Set(Array.isArray(draft.excludedRowIds) ? draft.excludedRowIds : []);
+  let nextExtraRows = Array.isArray(draft.extraRows) ? draft.extraRows.map((x) => ({ ...x })) : [];
+  let nextSignerName = draft.signerName;
+  let nextSignDate = draft.signDate;
+
+  const changedLabels: string[] = [];
+  const excludedLabels: string[] = [];
+  const restoredLabels: string[] = [];
+  const addedLabels: string[] = [];
+  let removedExtraCount = 0;
+
+  const rowDisplayName = (r: OfficialSpcRow): string =>
+    (r.label || (r.cells ? r.cells[0] : '') || r.id).replace(/\n/g, '').trim() || r.id;
+
+  if (patch.rowValues && typeof patch.rowValues === 'object') {
+    for (const [k, v] of Object.entries(patch.rowValues)) {
+      const target = rowMap.get(k);
+      if (!target || target.kind === 'notice' || target.kind === 'section' || target.kind === 'grid') continue;
+      if (typeof v !== 'string') continue;
+      if (nextRowValues[k] !== v) {
+        nextRowValues[k] = v;
+        changedLabels.push(rowDisplayName(target));
+        // If AI explicitly updates a previously excluded row, restore it automatically
+        if (excludedSet.has(k)) {
+          excludedSet.delete(k);
+          restoredLabels.push(rowDisplayName(target));
+        }
+      }
+    }
+  }
+
+  if (patch.gridValues && typeof patch.gridValues === 'object') {
+    for (const [k, v] of Object.entries(patch.gridValues)) {
+      const target = rowMap.get(k);
+      if (!target || target.kind !== 'grid' || !Array.isArray(v)) continue;
+      const normalized = v.map((cell) => String(cell ?? ''));
+      nextGridValues[k] = normalized;
+      changedLabels.push(rowDisplayName(target));
+    }
+  }
+
+  if (Array.isArray(patch.excludeRowIds)) {
+    for (const id of patch.excludeRowIds) {
+      const target = rowMap.get(String(id));
+      if (!target || target.kind === 'notice' || target.kind === 'section') continue;
+      if (!excludedSet.has(target.id)) {
+        excludedSet.add(target.id);
+        excludedLabels.push(rowDisplayName(target));
+      }
+    }
+  }
+
+  if (Array.isArray(patch.restoreRowIds)) {
+    for (const id of patch.restoreRowIds) {
+      const target = rowMap.get(String(id));
+      if (target && excludedSet.has(target.id)) {
+        excludedSet.delete(target.id);
+        restoredLabels.push(rowDisplayName(target));
+      }
+    }
+  }
+
+  if (Array.isArray(patch.removeExtraRowUids) && patch.removeExtraRowUids.length > 0) {
+    const rmSet = new Set(patch.removeExtraRowUids.map(String));
+    const before = nextExtraRows.length;
+    nextExtraRows = nextExtraRows.filter((ex) => !rmSet.has(ex.uid));
+    removedExtraCount = before - nextExtraRows.length;
+  }
+
+  if (Array.isArray(patch.updateExtraRows)) {
+    for (const upd of patch.updateExtraRows) {
+      if (!upd || typeof upd.uid !== 'string') continue;
+      const target = nextExtraRows.find((ex) => ex.uid === upd.uid);
+      if (!target) continue;
+      if (typeof upd.label === 'string' && upd.label.trim()) target.label = upd.label.trim();
+      if (typeof upd.value === 'string') target.value = upd.value;
+      changedLabels.push(target.label);
+    }
+  }
+
+  if (Array.isArray(patch.addExtraRows)) {
+    const fallbackAnchor =
+      [...tpl.rows].reverse().find((r) => r.kind === 'field' || r.kind === 'full_input')?.id ||
+      tpl.rows[tpl.rows.length - 1]?.id ||
+      'r01';
+    patch.addExtraRows.forEach((item, idx) => {
+      if (!item || typeof item.label !== 'string' || !item.label.trim()) return;
+      const anchor = rowMap.has(String(item.afterRowId || '')) ? String(item.afterRowId) : fallbackAnchor;
+      nextExtraRows.push({
+        uid: `extra_ai_${anchor}_${Date.now()}_${idx}`,
+        sourceRowId: anchor,
+        label: item.label.trim(),
+        value: typeof item.value === 'string' ? item.value : '',
+      });
+      addedLabels.push(item.label.trim());
+    });
+  }
+
+  if (typeof patch.signerName === 'string' && patch.signerName.trim() !== nextSignerName.trim()) {
+    nextSignerName = patch.signerName.trim();
+    changedLabels.push('具状人/落款人');
+  }
+  if (typeof patch.signDate === 'string' && patch.signDate.trim() !== nextSignDate.trim()) {
+    nextSignDate = patch.signDate.trim();
+    changedLabels.push('落款日期');
+  }
+
+  const totalOps =
+    changedLabels.length +
+    excludedLabels.length +
+    restoredLabels.length +
+    addedLabels.length +
+    removedExtraCount;
+
+  return {
+    nextDraft: {
+      ...draft,
+      rowValues: nextRowValues,
+      gridValues: nextGridValues,
+      excludedRowIds: Array.from(excludedSet),
+      extraRows: nextExtraRows,
+      signerName: nextSignerName,
+      signDate: nextSignDate,
+    },
+    changedLabels,
+    excludedLabels,
+    restoredLabels,
+    addedLabels,
+    removedExtraCount,
+    totalOps,
+  };
+}
+

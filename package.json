@@ -1,6 +1,6 @@
 {
   "name": "cn-lawyer-ai-toolbox",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "license": "Apache-2.0",
   "description": "中国律师 AI 工具箱 (CN Lawyer AI Toolbox) — 离线优先 PWA + 最高法 113 份官方要素式示范文本 + 4,111 条离线法典 + BYOK 全领域脱敏法律 AI 智囊舱",
   "type": "module",

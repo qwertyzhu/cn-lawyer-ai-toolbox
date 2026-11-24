@@ -77,10 +77,31 @@ export const ToolProShell: React.FC<ToolProShellProps> = ({ toolId, children }) 
           </button>
 
           <div className="flex items-center gap-1.5 sm:gap-2">
-            <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-emerald-950/10 px-2.5 py-1 text-[11px] font-medium text-emerald-900">
-              <WifiOff className="h-3 w-3 text-emerald-700" />
-              100% 本地离线运算
-            </span>
+            {toolId === 'elements-complaint' ? (
+              <span
+                className="hidden sm:inline-flex items-center gap-1 rounded-full bg-[#0E223D]/8 border border-[#0E223D]/15 px-2.5 py-1 text-[11px] font-medium text-[#0E223D]"
+                title="离线手动填表、增删行与生成 Word(.docx) 均在浏览器本地完成；仅当您主动点击 AI 转写或 AI 改表时才向自配模型联网发送脱敏文本"
+              >
+                <ShieldCheck className="h-3 w-3 text-[#9A7538]" />
+                填表导出离线 · AI 辅写需联网
+              </span>
+            ) : meta?.aiTarget ? (
+              <span
+                className="hidden sm:inline-flex items-center gap-1 rounded-full bg-emerald-950/8 border border-emerald-900/15 px-2.5 py-1 text-[11px] font-medium text-emerald-900"
+                title="核心测算与工具运算在浏览器本地离线完成；点击 AI 复核/联动时将跳转 AI 智囊联网调用个人自配模型"
+              >
+                <WifiOff className="h-3 w-3 text-emerald-700" />
+                测算本地离线 · AI 复核需联网
+              </span>
+            ) : (
+              <span
+                className="hidden sm:inline-flex items-center gap-1 rounded-full bg-emerald-950/10 px-2.5 py-1 text-[11px] font-medium text-emerald-900"
+                title="全部运算与文件处理均在浏览器本地完成，不上传服务器"
+              >
+                <WifiOff className="h-3 w-3 text-emerald-700" />
+                本地离线运行 · 不上传服务器
+              </span>
+            )}
 
             <button
               type="button"

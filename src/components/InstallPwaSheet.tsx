@@ -63,7 +63,7 @@ export const InstallPwaSheet: React.FC<InstallPwaSheetProps> = ({ open, onClose 
         <div className="rounded-lg border border-[#EAE5DA] bg-[#FAF9F6] p-3 text-xs leading-5 text-slate-700 space-y-1.5">
           <div className="font-bold text-[#0E223D]">📌 律师同事 1 分钟上手三件事：</div>
           <div>
-            <strong>① 12 项离线工具直接用</strong>：要素式起诉状（支持上传传统 Word 一键转表）、诉讼费、LPR 利息、律师费报价单（底部自定义个人落款）及 50MB 证据 PDF 拆分均在手机本地运行，零费用、零上传。
+            <strong>① 12 项随身办案工具直接用</strong>：要素式起诉状（手动填表与导出 Word 本地离线，AI 转写/多轮改表按需联网）、诉讼费、LPR 利息、律师费报价单及 50MB 证据 PDF 拆分核心均在设备本地运行。
           </div>
           <div>
             <strong>② 查法条与 4.48 万份案例库</strong>：顶部搜索条输条号秒查 4,111 条离线法典；进「法典清单 → IMA 案例法规库」可手机直读 PDF 正文、带出处 AI 问答，或一键直达腾讯 IMA 官方免费语义问答。

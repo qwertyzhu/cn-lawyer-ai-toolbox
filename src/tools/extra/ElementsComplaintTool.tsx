@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   Eye,
+  EyeOff,
   FileSpreadsheet,
   FileText,
   FileUp,
@@ -15,14 +16,17 @@ import {
   KeyRound,
   Loader2,
   Lock,
+  MessageSquare,
   Paintbrush,
   Plus,
   Printer,
   RotateCcw,
   Search,
+  Send,
   ShieldCheck,
   Sparkles,
   Trash2,
+  Undo2,
   UserCheck,
   Wand2,
   X,
@@ -44,11 +48,13 @@ import { compressImageFileToAttachment } from '../../lib/imageUtils';
 import { redactLegalText, restoreRedactedText } from '../../lib/redactor';
 import {
   applyPartyQuickFillToCellText,
+  applySpcAiPatch,
   buildOfficialSpcPlainText,
   buildResolvedSpcDocument,
   createEmptyPartyQuickFill,
   createInitialSpcDraft,
   getTodayChinaDateCn,
+  isRowUntouched,
   loadOfficialSpcCorpus,
   parseCheckboxTokens,
   POPULAR_TEMPLATE_NAMES,
@@ -61,6 +67,7 @@ import {
   type OfficialSpcTemplate,
   type PartyQuickFillData,
   type ResolvedSpcDocument,
+  type SpcAiPatchPayload,
   type SpcDocRole,
   type SpcDomainId,
   type SpcRoleTag,
@@ -159,6 +166,7 @@ function loadSavedSpcDraft(corpus: SpcTemplateCorpus): OfficialSpcDraftState {
             rowValues: { ...base.rowValues, ...(parsed.rowValues || {}) },
             gridValues: { ...base.gridValues, ...(parsed.gridValues || {}) },
             extraRows: Array.isArray(parsed.extraRows) ? parsed.extraRows : [],
+            excludedRowIds: Array.isArray(parsed.excludedRowIds) ? parsed.excludedRowIds : [],
             attachmentRows: { ...base.attachmentRows, ...(parsed.attachmentRows || {}) },
           };
         }
@@ -649,15 +657,35 @@ export const ElementsComplaintTool: React.FC = () => {
   const [companionPreserveAmt, setCompanionPreserveAmt] = useState('');
   const [companionInvestigateOrg, setCompanionInvestigateOrg] = useState('');
 
-  // AI Convert state
+  // AI Convert & Multi-Turn Table Copilot state
   const [sourceText, setSourceText] = useState('');
   const [sourceImages, setSourceImages] = useState<AiImageAttachment[]>([]);
   const [autoRedact, setAutoRedact] = useState(true);
+  const [extractModelSlot, setExtractModelSlot] = useState<'fast' | 'reasoning'>('fast');
   const [extracting, setExtracting] = useState(false);
   const [extractLog, setExtractLog] = useState('');
   const [extractError, setExtractError] = useState('');
   const [pinInput, setPinInput] = useState('');
   const [redactingImg, setRedactingImg] = useState<AiImageAttachment | null>(null);
+
+  const [showAiCopilot, setShowAiCopilot] = useState(false);
+  const [aiRefineInput, setAiRefineInput] = useState('');
+  const [aiRefining, setAiRefining] = useState(false);
+  const [aiRefineLog, setAiRefineLog] = useState('');
+  const [aiRefineError, setAiRefineError] = useState('');
+  const [aiSessionMappings, setAiSessionMappings] = useState<RedactionMapping[]>([]);
+  const [draftUndoStack, setDraftUndoStack] = useState<OfficialSpcDraftState[]>([]);
+  const [aiRefineTurns, setAiRefineTurns] = useState<
+    {
+      id: string;
+      role: 'user' | 'assistant';
+      text: string;
+      changedLabels?: string[];
+      excludedLabels?: string[];
+      addedLabels?: string[];
+      missingChecklist?: string[];
+    }[]
+  >([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
@@ -776,7 +804,68 @@ export const ElementsComplaintTool: React.FC = () => {
     if (tpl && nextTpl.id === tpl.id) return;
     setDraft(createInitialSpcDraft(nextTpl));
     setOpenQuickFillRowId(null);
+    setAiRefineTurns([]);
+    setDraftUndoStack([]);
+    setAiSessionMappings([]);
     showToast(`已切换最高法官方模板：${nextTpl.displayName}`);
+  };
+
+  const pushUndoSnapshot = (snap: OfficialSpcDraftState) => {
+    setDraftUndoStack((prev) => [
+      {
+        ...snap,
+        rowValues: { ...snap.rowValues },
+        gridValues: Object.fromEntries(
+          Object.entries(snap.gridValues).map(([k, arr]) => [k, [...arr]])
+        ),
+        extraRows: snap.extraRows.map((x) => ({ ...x })),
+        excludedRowIds: [...(snap.excludedRowIds || [])],
+      },
+      ...prev,
+    ].slice(0, 10));
+  };
+
+  const handleUndoLastEdit = () => {
+    if (draftUndoStack.length === 0) return;
+    const [latest, ...rest] = draftUndoStack;
+    setDraft(latest);
+    setDraftUndoStack(rest);
+    showToast('已撤销上一轮 AI 表格修改');
+  };
+
+  const toggleExcludeRow = (rowId: string, labelForToast: string) => {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      const cur = new Set(prev.excludedRowIds || []);
+      const willExclude = !cur.has(rowId);
+      if (willExclude) cur.add(rowId);
+      else cur.delete(rowId);
+      showToast(
+        willExclude
+          ? `已排除「${labelForToast}」（导出 Word 时不显示，随时可恢复）`
+          : `已恢复「${labelForToast}」`
+      );
+      return { ...prev, excludedRowIds: Array.from(cur) };
+    });
+  };
+
+  const handleAddCustomSectionRow = (anchorRowId: string, sectionTitle: string) => {
+    setDraft((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        extraRows: [
+          ...prev.extraRows,
+          {
+            uid: `extra_custom_${anchorRowId}_${Date.now()}`,
+            sourceRowId: anchorRowId,
+            label: `${sectionTitle}补充项`,
+            value: '',
+          },
+        ],
+      };
+    });
+    showToast(`已在「${sectionTitle}」末尾新增一行自定义要素，可直接改标题与正文`);
   };
 
   const updateRowValue = (rowId: string, nextVal: string) => {
@@ -890,7 +979,7 @@ export const ElementsComplaintTool: React.FC = () => {
     }
 
     setExtracting(true);
-    setExtractLog(`正在按最高法官方《${tpl.displayName}》逐行提取要素…`);
+    setExtractLog(`正在按最高法官方《${tpl.displayName}》全量逐行核验提取要素…`);
 
     let mappings: RedactionMapping[] = [];
     let promptMaterial = sourceText.trim();
@@ -898,9 +987,12 @@ export const ElementsComplaintTool: React.FC = () => {
       const res = redactLegalText(promptMaterial);
       promptMaterial = res.redactedText;
       mappings = res.mappings;
+      setAiSessionMappings(mappings);
+    } else {
+      setAiSessionMappings([]);
     }
 
-    // Build exact official row specification so the LLM fills strictly inside official SPC slots
+    // Build exact official row specification so the LLM inspects EVERY row without omission
     const editableRowSpecs = tpl.rows
       .filter((r) => r.kind === 'field' || r.kind === 'full_input' || r.kind === 'grid')
       .map((r) => {
@@ -915,33 +1007,39 @@ export const ElementsComplaintTool: React.FC = () => {
         };
       });
 
-    const systemPrompt = `你是中国资深诉讼律师助手，专责将律师提供的传统诉状、答辩状、裁判文书或案件材料，严格按照最高人民法院《法〔2025〕82号》官方示范文本《${tpl.displayName}》的原始表格结构逐行填充为 JSON。
+    const systemPrompt = `你是中国资深诉讼律师助手，专责将律师提供的传统诉状、答辩状、裁判文书或案件材料，严格按照最高人民法院《法〔2025〕82号》官方示范文本《${tpl.displayName}》的原始表格结构**全量逐行**填充为 JSON，绝不遗漏原文已写明的任何当事人、电话、住所、金额、日期、作品/标的、诉讼请求、权利种类、侵权方式、事实理由、受案法院与具状人。
 铁律（必须严格遵守）：
-1. 必须完整保留每个栏目官方原文中的提示前缀、换行和选项结构（例如“姓名：”“名称：”“截至  年  月  日止…”“男□ 女□”“是□ 否□”），只能在对应空白处填入原文提取的事实，并将命中的“□”改为“☑”，未命中的保持“□”！
-2. 严禁编造任何材料中未出现的姓名、公司名、统一社会信用代码、身份证号、金额、日期、案号或合同条款；材料未涉及的栏目直接省略（不要放进 rowValues）或保持原空白模板不动。
-3. 若材料中存在脱敏占位符（如 [公司主体A]、[当事人甲]、[身份证号1]），必须原样保留在输出值中，以便本机自动还原。
-4. 只输出一个合法 JSON 对象，格式如下：
+1. **逐行通扫防遗漏**：你必须逐条对照下方全部 ${editableRowSpecs.length} 行（尤其是长勾选项如“权利种类”“侵权行为方式”“赔偿经济损失”“合理费用”“是否主张诉讼费用”“发生时间地点”），只要原文有提及，就必须填入对应行并把命中的“□”改为“☑”，未命中的保持“□”！
+2. **保留官方前缀与换行**：必须完整保留每个栏目官方原文中的提示前缀、换行和选项结构（如“名称：”“住所地：”“法定代表人：”“联系电话：”“经济损失  元”“是□ 否□”），只把提取到的事实填入对应空白处。
+3. **严禁编造**：材料中未出现的统一社会信用代码、身份证号、版权登记号、具体网址、金额或日期，严禁脑补；把材料未提供但该官方表需要的重要缺口写入 "missingChecklist" 数组提醒律师人工补填。
+4. **保留脱敏占位符**：若材料含 [公司主体A]、[当事人甲]、[手机号1] 等脱敏占位符，必须原样保留在输出值中以便本机自动还原。
+5. 只输出一个合法 JSON 对象，格式如下：
 {
   "rowValues": {
     "行id（如 r03）": "保留官方原行文字并填好内容、勾选☑后的完整单元格文本"
   },
   "gridValues": {
     "仅多列行id（如 r01 案号/案由）": ["案号", "具体案号", "案由", "具体案由"]
-  }
+  },
+  "signerName": "从“具状人/答辩人/申请人”提取的名称（无则留空）",
+  "signDate": "原文若明确写明日期则填，否则留空",
+  "courtName": "从“此致/此呈 XX人民法院”提取的受案法院名称（无则留空）",
+  "summary": "一句话概述本次已自动填入的核心栏目",
+  "missingChecklist": ["原诉状未提及、建议律师补充核实的要素1", "要素2"]
 }
 
-以下是当前最高法官方示范文本《${tpl.displayName}》的逐行原始结构（仅需在 rowValues/gridValues 中返回有提取内容的栏目）：
+以下是当前最高法官方示范文本《${tpl.displayName}》的全部 ${editableRowSpecs.length} 行结构：
 ${JSON.stringify(editableRowSpecs)}`;
 
     const userContent = promptMaterial
-      ? `请严格对照最高法官方《${tpl.displayName}》逐行结构，提取以下材料并输出 JSON：\n\n${promptMaterial}`
-      : `请识别所附材料图片，严格对照最高法官方《${tpl.displayName}》逐行结构提取并输出 JSON。`;
+      ? `请逐行通扫并严格对照最高法官方《${tpl.displayName}》全部栏目，无遗漏提取以下材料并输出 JSON：\n\n${promptMaterial}`
+      : `请识别所附材料图片，逐行通扫并严格对照最高法官方《${tpl.displayName}》全部栏目提取并输出 JSON。`;
 
     let fullReply = '';
     try {
       await streamAiCompletion({
         provider: { ...activeProvider, apiKey: plainKey },
-        modelSlot: 'fast',
+        modelSlot: extractModelSlot,
         temperature: 0.1,
         messages: [
           { role: 'system', content: systemPrompt },
@@ -953,58 +1051,244 @@ ${JSON.stringify(editableRowSpecs)}`;
         ],
         onChunk: (delta) => {
           fullReply += delta;
-          setExtractLog(`正在按最高法官方表逐项填充…（已接收 ${fullReply.length} 字）`);
+          setExtractLog(`正在按最高法官方表全量逐行填充…（已接收 ${fullReply.length} 字）`);
         },
       });
 
       const parsed = extractFirstJsonObject(fullReply);
       if (!parsed) {
-        throw new Error('模型未能返回标准 JSON 结构，请重试或改选推理能力更强的模型。');
+        throw new Error('模型未能返回标准 JSON 结构，请重试或切换「深度推理」模型。');
       }
 
-      const restored = restoreDeepStrings(parsed, mappings);
-      let updatedCount = 0;
+      const restored = restoreDeepStrings(parsed, mappings) as SpcAiPatchPayload;
+      pushUndoSnapshot(draft);
+      const applied = applySpcAiPatch(tpl, draft, restored);
+      setDraft(applied.nextDraft);
+      if (typeof restored.courtName === 'string' && restored.courtName.trim()) {
+        setCompanionCourt(restored.courtName.trim());
+      }
 
-      setDraft((prev) => {
-        if (!prev) return prev;
-        const nextRowValues = { ...prev.rowValues };
-        const nextGridValues = { ...prev.gridValues };
-        const validIds = new Set(tpl.rows.map((r) => r.id));
+      const missingList = Array.isArray(restored.missingChecklist)
+        ? restored.missingChecklist.map((x) => String(x || '').trim()).filter(Boolean)
+        : [];
+      const summaryText =
+        (typeof restored.summary === 'string' && restored.summary.trim()) ||
+        `已自动填充 ${applied.changedLabels.length} 项官方要素。如发现仍有遗漏或需要增删栏目，可直接在下方继续下达修改指令。`;
 
-        if (restored.rowValues && typeof restored.rowValues === 'object') {
-          for (const [k, v] of Object.entries(restored.rowValues as Record<string, unknown>)) {
-            if (validIds.has(k) && typeof v === 'string' && v.trim()) {
-              nextRowValues[k] = v;
-              updatedCount++;
-            }
-          }
-        }
-        if (restored.gridValues && typeof restored.gridValues === 'object') {
-          for (const [k, v] of Object.entries(restored.gridValues as Record<string, unknown>)) {
-            if (validIds.has(k) && Array.isArray(v)) {
-              nextGridValues[k] = v.map((cell) => String(cell ?? ''));
-              updatedCount++;
-            }
-          }
-        }
-        return {
-          ...prev,
-          rowValues: nextRowValues,
-          gridValues: nextGridValues,
-        };
-      });
-
+      setAiRefineTurns([
+        {
+          id: `round1-${Date.now()}`,
+          role: 'assistant',
+          text: summaryText,
+          changedLabels: applied.changedLabels,
+          excludedLabels: applied.excludedLabels,
+          addedLabels: applied.addedLabels,
+          missingChecklist: missingList,
+        },
+      ]);
+      setShowAiCopilot(true);
       setActiveMode('form');
       showToast(
         mappings.length > 0
-          ? `已按最高法官方原表填入 ${updatedCount} 项要素，并本地还原 ${mappings.length} 处脱敏实体！`
-          : `已按最高法官方原表精准填入 ${updatedCount} 项要素，请核对后导出 Word！`
+          ? `已按官方原表填入 ${applied.changedLabels.length} 项（本地还原 ${mappings.length} 处脱敏实体），可在上方 AI 改表助手继续微调！`
+          : `已按官方原表填入 ${applied.changedLabels.length} 项，可在上方 AI 改表助手继续增删微调！`
       );
     } catch (err) {
       setExtractError(err instanceof Error ? err.message : 'AI 要素提取失败');
     } finally {
       setExtracting(false);
       setExtractLog('');
+    }
+  };
+
+  const handleAiMultiTurnRefine = async (overrideInstruction?: string) => {
+    if (!tpl || !draft) return;
+    const instruction = (overrideInstruction !== undefined ? overrideInstruction : aiRefineInput).trim();
+    if (!instruction) {
+      showToast('请输入您要添加、删减或修改的具体指令');
+      return;
+    }
+    setAiRefineError('');
+    if (!isOnline) {
+      setAiRefineError('当前处于离线模式，AI 改表需要联网；您可直接手动编辑、隐藏或新增任意表格行。');
+      return;
+    }
+    if (!activeProvider || !hasApiKey) {
+      setAiRefineError('尚未配置个人大模型 API Key，请先前往「我的配置」绑定后再使用 AI 多轮改表。');
+      return;
+    }
+
+    let plainKey = activeProvider.apiKey;
+    if (activeProvider.apiKeyEncrypted) {
+      const pin = sessionUnlockedPin || pinInput.trim();
+      if (!pin) {
+        setAiRefineError('密钥受本机 PIN 保护，请先在「AI 智囊」或「AI 转写」页解锁 PIN 码。');
+        return;
+      }
+      try {
+        plainKey = await decryptWithPassphrase(activeProvider.apiKeyEncrypted, pin);
+        if (!sessionUnlockedPin) setSessionUnlockedPin(pin);
+      } catch {
+        setAiRefineError('PIN 码不正确，无法解密 API Key。');
+        return;
+      }
+    }
+
+    setAiRefining(true);
+    setAiRefineLog('正在理解修改指令并生成精准表格补丁…');
+    if (overrideInstruction === undefined) setAiRefineInput('');
+
+    // Build current table snapshot (with local redaction if enabled)
+    let mappings = [...aiSessionMappings];
+    const redactIfNeeded = (txt: string): string => {
+      if (!autoRedact || !txt) return txt;
+      const r = redactLegalText(txt, { existingMappings: mappings });
+      mappings = r.mappings;
+      return r.redactedText;
+    };
+
+    const redactedInstruction = redactIfNeeded(instruction);
+    const excludedSet = new Set(draft.excludedRowIds || []);
+    const currentSnapshot = tpl.rows
+      .filter((r) => r.kind === 'field' || r.kind === 'full_input' || r.kind === 'grid')
+      .map((r) => {
+        if (r.kind === 'grid' && r.cells) {
+          const curCells = draft.gridValues[r.id] || r.cells;
+          return {
+            id: r.id,
+            kind: 'grid',
+            excluded: excludedSet.has(r.id),
+            cells: curCells.map((c) => redactIfNeeded(c)),
+          };
+        }
+        const curVal = draft.rowValues[r.id] ?? r.templateText ?? '';
+        return {
+          id: r.id,
+          kind: r.kind,
+          label: (r.label || '').replace(/\n/g, ''),
+          excluded: excludedSet.has(r.id),
+          untouched: isRowUntouched(r, curVal),
+          currentValue: redactIfNeeded(curVal),
+        };
+      });
+
+    const currentExtras = draft.extraRows.map((ex) => ({
+      uid: ex.uid,
+      afterRowId: ex.sourceRowId,
+      label: redactIfNeeded(ex.label),
+      value: redactIfNeeded(ex.value),
+    }));
+
+    const redactedSource = sourceText.trim() ? redactIfNeeded(sourceText.trim()) : '';
+    const redactedSigner = redactIfNeeded(draft.signerName || '');
+    if (autoRedact) setAiSessionMappings(mappings);
+
+    const recentHistoryNotes = aiRefineTurns
+      .slice(-4)
+      .map((t) => `${t.role === 'user' ? '律师指令' : '助手回执'}：${redactIfNeeded(t.text)}`)
+      .join('\n');
+
+    const systemPrompt = `你是中国资深诉讼律师的「要素式表格增量改稿引擎」。
+律师正在编辑最高人民法院《法〔2025〕82号》官方示范文本《${tpl.displayName}》，并向你发出增、删、改指令。
+请仅针对指令涉及的栏目输出增量 JSON Patch（未涉及的栏目不要放进 rowValues，以免覆盖律师手动修改的内容）：
+
+允许的 JSON 字段（按需返回）：
+{
+  "rowValues": { "行id": "完整保留官方提示前缀并按指令修改/勾选☑后的文本" },
+  "gridValues": { "多列行id": ["列1", "列2", ...] },
+  "excludeRowIds": ["需要隐藏/删减的官方行id，如未用到的自然人原告 r02、第三人 r07/r08"],
+  "restoreRowIds": ["需要重新恢复显示的官方行id"],
+  "addExtraRows": [{ "afterRowId": "插入在哪一行id后面", "label": "新增行左栏标题", "value": "新增行正文内容" }],
+  "updateExtraRows": [{ "uid": "已有自定义行uid", "label": "新标题", "value": "新内容" }],
+  "removeExtraRowUids": ["需要删除的自定义行uid"],
+  "signerName": "仅当指令要求修改具状人/落款人时填写",
+  "signDate": "仅当指令要求修改落款日期时填写",
+  "courtName": "仅当识别或修改受案法院时填写",
+  "summary": "用 1-2 句简明交代本轮修改/增删了哪些栏目",
+  "missingChecklist": ["如律师要求查漏补缺，在此列出仍待律师人工确认的空缺项"]
+}
+
+硬规则：
+1. 修改官方栏目时必须保留该栏的官方结构与勾选框格式（命中的改 ☑，未命中的改 □）。
+2. 若存在 [公司主体A] 等脱敏占位符，必须原样保留。
+3. 绝不编造不存在的案号、身份证号、统一社会信用代码或金额。
+4. 只输出一个合法 JSON 对象，不要附加 Markdown 解释文字。`;
+
+    const userPrompt = [
+      `【律师本轮修改指令】\n${redactedInstruction}`,
+      recentHistoryNotes ? `【此前修改记录】\n${recentHistoryNotes}` : '',
+      redactedSource ? `【原始传统诉状/材料参考（便于查漏补缺）】\n${redactedSource}` : '',
+      `【当前表格实时状态】\n具状人：${redactedSigner || '（空）'} ｜ 日期：${draft.signDate || '（空）'}\n官方栏目：${JSON.stringify(currentSnapshot)}\n已有自定义新增行：${JSON.stringify(currentExtras)}`,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+    setAiRefineTurns((prev) => [
+      ...prev,
+      { id: `u-${Date.now()}`, role: 'user', text: instruction },
+    ]);
+
+    let fullReply = '';
+    try {
+      await streamAiCompletion({
+        provider: { ...activeProvider, apiKey: plainKey },
+        modelSlot: extractModelSlot,
+        temperature: 0.1,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        onChunk: (delta) => {
+          fullReply += delta;
+          setAiRefineLog(`AI 正在精准更新表格…（已接收 ${fullReply.length} 字）`);
+        },
+      });
+
+      const parsed = extractFirstJsonObject(fullReply);
+      if (!parsed) {
+        throw new Error('模型未能返回合法表格修改 JSON，请重试或换用「深度推理」模型。');
+      }
+
+      const restored = restoreDeepStrings(parsed, mappings) as SpcAiPatchPayload;
+      pushUndoSnapshot(draft);
+      const applied = applySpcAiPatch(tpl, draft, restored);
+      setDraft(applied.nextDraft);
+      if (typeof restored.courtName === 'string' && restored.courtName.trim()) {
+        setCompanionCourt(restored.courtName.trim());
+      }
+
+      const missingList = Array.isArray(restored.missingChecklist)
+        ? restored.missingChecklist.map((x) => String(x || '').trim()).filter(Boolean)
+        : [];
+      const replySummary =
+        (typeof restored.summary === 'string' && restored.summary.trim()) ||
+        (applied.totalOps > 0
+          ? `已完成本轮表格更新（共变更 ${applied.totalOps} 处）。`
+          : '已对照核查，当前表格未发现需要进一步改动的栏目。');
+
+      setAiRefineTurns((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now()}`,
+          role: 'assistant',
+          text: replySummary,
+          changedLabels: applied.changedLabels,
+          excludedLabels: applied.excludedLabels,
+          addedLabels: applied.addedLabels,
+          missingChecklist: missingList,
+        },
+      ]);
+
+      showToast(
+        applied.totalOps > 0
+          ? `AI 已直接更新表格 ${applied.totalOps} 处（可随时点「撤销上一轮」）`
+          : 'AI 核查完毕，当前表格暂无变更项'
+      );
+    } catch (err) {
+      setAiRefineError(err instanceof Error ? err.message : 'AI 改表请求失败');
+    } finally {
+      setAiRefining(false);
+      setAiRefineLog('');
     }
   };
 
@@ -1093,6 +1377,9 @@ ${JSON.stringify(editableRowSpecs)}`;
     setSourceText('');
     setSourceImages([]);
     setOpenQuickFillRowId(null);
+    setAiRefineTurns([]);
+    setDraftUndoStack([]);
+    setAiSessionMappings([]);
     showToast(`已重置《${tpl.displayName}》为最高法官方空白初始模板`);
   };
 
@@ -1680,6 +1967,31 @@ ${JSON.stringify(editableRowSpecs)}`;
           )}
 
           <div className="flex flex-wrap items-center gap-2.5">
+            <div className="inline-flex items-center rounded-lg border border-[#DCD4C1] bg-[#FAF8F3] p-0.5 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => setExtractModelSlot('fast')}
+                className={`rounded-md px-2.5 py-1.5 transition-colors ${
+                  extractModelSlot === 'fast'
+                    ? 'bg-[#0E223D] text-white'
+                    : 'text-slate-600 hover:text-[#0E223D]'
+                }`}
+              >
+                极速模型
+              </button>
+              <button
+                type="button"
+                onClick={() => setExtractModelSlot('reasoning')}
+                className={`rounded-md px-2.5 py-1.5 transition-colors ${
+                  extractModelSlot === 'reasoning'
+                    ? 'bg-[#0E223D] text-white'
+                    : 'text-slate-600 hover:text-[#0E223D]'
+                }`}
+                title="遇到复杂长诉状或 30+ 栏要素表时，建议切至深度推理显著降低遗漏率"
+              >
+                深度推理（推荐防漏）
+              </button>
+            </div>
             <button
               type="button"
               disabled={extracting}
@@ -1691,7 +2003,7 @@ ${JSON.stringify(editableRowSpecs)}`;
               ) : (
                 <Sparkles className="h-4 w-4 text-[#D1B27A]" />
               )}
-              <span>{extracting ? '正在按最高法官方表填充…' : 'AI 一键填入最高法官方表格'}</span>
+              <span>{extracting ? '正在按最高法官方表全量填充…' : 'AI 一键填入最高法官方表格'}</span>
             </button>
             <button
               type="button"
@@ -1704,9 +2016,248 @@ ${JSON.stringify(editableRowSpecs)}`;
         </section>
       )}
 
-      {/* MODE 2: Offline Official SPC Verbatim Table Editor */}
-      {activeMode === 'form' && (
+      {/* MODE 2: Official SPC Verbatim Table Editor + Embedded AI Multi-Turn Copilot & Manual Add/Delete */}
+      {activeMode === 'form' && (() => {
+        const editableRows = tpl.rows.filter(
+          (r) => r.kind === 'field' || r.kind === 'full_input'
+        );
+        const filledCount = editableRows.filter(
+          (r) => !isRowUntouched(r, draft.rowValues[r.id])
+        ).length;
+        const excludedCount = (draft.excludedRowIds || []).length;
+        const customExtraCount = draft.extraRows.length;
+
+        const AI_TABLE_QUICK_CHIPS = [
+          '对照原诉状全量查漏补缺，把遗漏的当事人信息、金额、权利种类与侵权事实补齐',
+          '隐藏本案未填写的冗余自然人原告、自然人被告及第三人行',
+          '根据当前已填事实，核查并自动勾齐所有应选的 ☑ 勾选框',
+          '润色诉讼请求与事实理由措辞，去口语化与重复套话（不改事实与金额）',
+        ];
+
+        return (
         <div className="space-y-4">
+          {/* Live Progress + AI Multi-Turn Table Editor Entry Bar */}
+          <section className="rounded-xl border border-[#D8CEB9] bg-white shadow-xs overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-gradient-to-r from-[#0E223D] to-[#153156] text-[#F6F4EF]">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <MessageSquare className="h-4 w-4 text-[#DFC086] flex-none" />
+                <span className="font-display font-bold">
+                  AI 多轮对话改表助手 & 手动增删控制台
+                </span>
+                <span className="rounded-full bg-white/12 px-2 py-0.5 text-[10.5px] text-[#E5CB96]">
+                  已填 {filledCount}/{editableRows.length} 栏
+                </span>
+                {excludedCount > 0 && (
+                  <span className="rounded-full bg-amber-400/20 px-2 py-0.5 text-[10.5px] text-amber-200">
+                    已排除 {excludedCount} 行
+                  </span>
+                )}
+                {customExtraCount > 0 && (
+                  <span className="rounded-full bg-emerald-400/20 px-2 py-0.5 text-[10.5px] text-emerald-200">
+                    新增 {customExtraCount} 行
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {excludedCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDraft((p) => (p ? { ...p, excludedRowIds: [] } : p));
+                      showToast('已恢复全部被排除的官方表格行');
+                    }}
+                    className="rounded-md border border-white/20 bg-white/10 hover:bg-white/20 px-2.5 py-1 text-[11px] font-medium text-white"
+                  >
+                    恢复全部隐藏行
+                  </button>
+                )}
+                {draftUndoStack.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleUndoLastEdit}
+                    className="inline-flex items-center gap-1 rounded-md border border-[#DFC086]/60 bg-[#DFC086]/15 hover:bg-[#DFC086]/25 px-2.5 py-1 text-[11px] font-semibold text-[#E8CF9C]"
+                  >
+                    <Undo2 className="h-3 w-3" /> 撤销上一轮 ({draftUndoStack.length})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setShowAiCopilot((v) => !v)}
+                  className="inline-flex items-center gap-1 rounded-md bg-[#CFA968] hover:bg-[#DFBE82] px-3 py-1 text-[11px] font-bold text-[#0E1A2B]"
+                >
+                  <Sparkles className="h-3 w-3" />
+                  {showAiCopilot ? '收起 AI 改表对话' : '展开 AI 多轮对话改表'}
+                </button>
+              </div>
+            </div>
+
+            {showAiCopilot && (
+              <div className="p-4 bg-[#FAF8F3] space-y-3 border-t border-[#E6DFCE]">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-slate-600">
+                  <span>
+                    用大白话直接指挥 AI 对下方官方表格做<strong>增补、删减/隐藏、修改勾选项或查漏补缺</strong>（改后可直接导出 Word，不满意随时点「撤销上一轮」；联网调用您自配模型，默认开启本地脱敏）。
+                  </span>
+                  <div className="flex items-center gap-2 flex-none">
+                    <div className="inline-flex rounded-md border border-[#DCD4C1] bg-white p-0.5 text-[11px] font-semibold">
+                      <button
+                        type="button"
+                        onClick={() => setExtractModelSlot('fast')}
+                        className={`rounded px-2 py-0.5 ${
+                          extractModelSlot === 'fast' ? 'bg-[#0E223D] text-white' : 'text-slate-600'
+                        }`}
+                      >
+                        极速
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setExtractModelSlot('reasoning')}
+                        className={`rounded px-2 py-0.5 ${
+                          extractModelSlot === 'reasoning' ? 'bg-[#0E223D] text-white' : 'text-slate-600'
+                        }`}
+                      >
+                        深度推理
+                      </button>
+                    </div>
+                    <label className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-900 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={autoRedact}
+                        onChange={(e) => setAutoRedact(e.target.checked)}
+                        className="accent-[#0E223D]"
+                      />
+                      本地脱敏
+                    </label>
+                  </div>
+                </div>
+
+                {/* Multi-Turn Change History & Missing Checklist */}
+                {aiRefineTurns.length > 0 && (
+                  <div className="legal-scroll max-h-56 overflow-y-auto space-y-2 rounded-xl border border-[#E5DEC9] bg-white p-3">
+                    {aiRefineTurns.map((turn) => (
+                      <div
+                        key={turn.id}
+                        className={`rounded-lg px-3 py-2 text-xs leading-5 ${
+                          turn.role === 'user'
+                            ? 'bg-[#F2EEE4] text-[#1E2736] border border-[#E5DEC9]'
+                            : 'bg-[#FCFBF8] text-[#0E223D] border border-[#EAE2D0]'
+                        }`}
+                      >
+                        <div className="text-[10.5px] font-bold text-[#8A6529] mb-0.5">
+                          {turn.role === 'user' ? '律师修改指令' : '✦ AI 表格同步回执'}
+                        </div>
+                        <div>{turn.text}</div>
+                        {turn.changedLabels && turn.changedLabels.length > 0 && (
+                          <div className="mt-1.5 flex flex-wrap gap-1">
+                            <span className="text-[10.5px] font-semibold text-emerald-800">已更新：</span>
+                            {turn.changedLabels.map((lb, idx) => (
+                              <span
+                                key={`${turn.id}-c-${idx}`}
+                                className="rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-medium text-emerald-900"
+                              >
+                                {lb}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {turn.excludedLabels && turn.excludedLabels.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            <span className="text-[10.5px] font-semibold text-amber-800">已隐藏：</span>
+                            {turn.excludedLabels.map((lb, idx) => (
+                              <span
+                                key={`${turn.id}-e-${idx}`}
+                                className="rounded bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-[10px] font-medium text-amber-900"
+                              >
+                                {lb}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {turn.addedLabels && turn.addedLabels.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            <span className="text-[10.5px] font-semibold text-sky-800">已新增行：</span>
+                            {turn.addedLabels.map((lb, idx) => (
+                              <span
+                                key={`${turn.id}-a-${idx}`}
+                                className="rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 text-[10px] font-medium text-sky-900"
+                              >
+                                {lb}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {turn.missingChecklist && turn.missingChecklist.length > 0 && (
+                          <div className="mt-2 rounded-md border border-amber-200 bg-amber-50/70 p-2 text-[11px] text-amber-950">
+                            <div className="font-bold text-amber-900 mb-0.5">
+                              原诉状未提及、建议核实补充的栏目：
+                            </div>
+                            <ul className="list-disc pl-4 space-y-0.5">
+                              {turn.missingChecklist.map((m, mi) => (
+                                <li key={`${turn.id}-m-${mi}`}>{m}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Quick Refinement Chips */}
+                <div className="flex flex-wrap gap-1.5">
+                  {AI_TABLE_QUICK_CHIPS.map((chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      disabled={aiRefining}
+                      onClick={() => handleAiMultiTurnRefine(chip)}
+                      className="rounded-full border border-[#DCD3BE] bg-white hover:border-[#B89254] hover:text-[#0E223D] px-2.5 py-1 text-[11px] font-medium text-slate-600 transition-colors disabled:opacity-45"
+                    >
+                      + {chip}
+                    </button>
+                  ))}
+                </div>
+
+                {aiRefineError && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+                    {aiRefineError}
+                  </div>
+                )}
+                {aiRefineLog && (
+                  <div className="rounded-lg border border-[#D1B27A]/50 bg-white px-3 py-2 text-xs text-[#7A5922] flex items-center gap-2">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin flex-none" />
+                    <span>{aiRefineLog}</span>
+                  </div>
+                )}
+
+                {/* Multi-turn Input Dock */}
+                <div className="flex items-center gap-2 rounded-xl border border-[#D8CFBC] bg-white p-1.5 shadow-xs focus-within:border-[#0E223D]">
+                  <input
+                    type="text"
+                    value={aiRefineInput}
+                    onChange={(e) => setAiRefineInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && !aiRefining && handleAiMultiTurnRefine()}
+                    placeholder="输入增删改指令（例：把被告电话补到被告栏并勾选信息网络传播权 / 删掉第三人行 / 事实与理由末尾加一行“权属链说明”）…"
+                    className="flex-1 min-w-0 bg-transparent px-2.5 py-1.5 text-xs text-[#11151C] placeholder:text-slate-400 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    disabled={aiRefining || !aiRefineInput.trim()}
+                    onClick={() => handleAiMultiTurnRefine()}
+                    className="flex-none inline-flex items-center gap-1 rounded-lg bg-[#0E223D] hover:bg-[#17345D] px-3.5 py-2 text-xs font-bold text-[#F6F4EF] disabled:opacity-45"
+                  >
+                    {aiRefining ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-[#DFC086]" />
+                    ) : (
+                      <Send className="h-3.5 w-3.5 text-[#DFC086]" />
+                    )}
+                    执行改表
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+
           {/* Official SPC Notice Collapsible Box */}
           {groupedSections.noticeRow && (
             <section className="rounded-xl border border-[#DED8CC] bg-[#FCFBF8] p-3.5 shadow-xs">
@@ -1872,9 +2423,93 @@ ${JSON.stringify(editableRowSpecs)}`;
                         'agent',
                       ].includes(row.roleTag)
                   );
-                  const extrasForRow = row.repeatable
-                    ? draft.extraRows.filter((ex) => ex.sourceRowId === row.id)
-                    : [];
+                  const extrasForRow = draft.extraRows.filter((ex) => ex.sourceRowId === row.id);
+                  const isExcluded = (draft.excludedRowIds || []).includes(row.id);
+                  const cleanRowTitle =
+                    row.kind === 'full_input'
+                      ? '整行填写栏'
+                      : (row.label || '').replace(/\n/g, ' ');
+
+                  if (isExcluded) {
+                    return (
+                      <div key={row.id} className="space-y-2">
+                        <div className="flex items-center justify-between gap-2 rounded-lg border border-dashed border-[#D8D1C3] bg-[#F7F5F0] px-3 py-2 text-xs text-slate-500">
+                          <span className="inline-flex items-center gap-1.5">
+                            <EyeOff className="h-3.5 w-3.5 text-slate-400" />
+                            <span>
+                              已排除「<strong>{cleanRowTitle}</strong>」（导出 Word / PDF 时自动省略）
+                            </span>
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => toggleExcludeRow(row.id, cleanRowTitle)}
+                            className="rounded border border-[#0E223D]/30 bg-white px-2.5 py-0.5 text-[11px] font-semibold text-[#0E223D] hover:border-[#0E223D]"
+                          >
+                            恢复此行
+                          </button>
+                        </div>
+                        {extrasForRow.map((ex) => (
+                          <div
+                            key={ex.uid}
+                            className="ml-3 rounded-lg border border-[#D1B27A] bg-[#FBF9F4] p-3 space-y-2"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <input
+                                type="text"
+                                value={ex.label.replace(/\n/g, '')}
+                                onChange={(e) =>
+                                  setDraft((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          extraRows: prev.extraRows.map((x) =>
+                                            x.uid === ex.uid ? { ...x, label: e.target.value } : x
+                                          ),
+                                        }
+                                      : prev
+                                  )
+                                }
+                                className="rounded border border-[#D8D1C3] bg-white px-2 py-0.5 text-xs font-bold text-[#0E223D]"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setDraft((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          extraRows: prev.extraRows.filter((x) => x.uid !== ex.uid),
+                                        }
+                                      : prev
+                                  )
+                                }
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 hover:underline"
+                              >
+                                <Trash2 className="h-3 w-3" /> 删除此新增行
+                              </button>
+                            </div>
+                            <textarea
+                              rows={Math.min(10, Math.max(3, ex.value.split('\n').length + 1))}
+                              value={ex.value}
+                              onChange={(e) =>
+                                setDraft((prev) =>
+                                  prev
+                                    ? {
+                                        ...prev,
+                                        extraRows: prev.extraRows.map((x) =>
+                                          x.uid === ex.uid ? { ...x, value: e.target.value } : x
+                                        ),
+                                      }
+                                    : prev
+                                )
+                              }
+                              className="w-full rounded-lg border border-[#D8D1C3] bg-white px-3 py-2 text-xs leading-6"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  }
 
                   return (
                     <div key={row.id} className="space-y-2">
@@ -1950,6 +2585,14 @@ ${JSON.stringify(editableRowSpecs)}`;
                                 <Plus className="h-3 w-3" /> 复制新增一行
                               </button>
                             )}
+                            <button
+                              type="button"
+                              onClick={() => toggleExcludeRow(row.id, cleanRowTitle)}
+                              className="inline-flex items-center gap-1 rounded border border-[#E2DAC7] bg-white hover:border-red-300 hover:text-red-700 px-2 py-0.5 text-[11px] text-slate-500 transition-colors"
+                              title="本案不需要此栏目时可手动隐藏/排除，导出 Word 时自动删除，随时可一键恢复"
+                            >
+                              <EyeOff className="h-3 w-3" /> 隐藏
+                            </button>
                           </div>
                         </div>
 
@@ -2098,6 +2741,20 @@ ${JSON.stringify(editableRowSpecs)}`;
                   );
                 })}
               </div>
+
+              {grp.rows.length > 0 && (
+                <div className="pt-1 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleAddCustomSectionRow(grp.rows[grp.rows.length - 1].id, grp.title)
+                    }
+                    className="inline-flex items-center gap-1 rounded-lg border border-dashed border-[#C9A463] bg-[#FCF9F2] hover:bg-[#F5EEDB] px-3 py-1.5 text-[11px] font-semibold text-[#7A5922] transition-colors"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> 在「{grp.title}」手动新增一行要素
+                  </button>
+                </div>
+              )}
             </section>
           ))}
 
@@ -2418,7 +3075,8 @@ ${JSON.stringify(editableRowSpecs)}`;
             </section>
           )}
         </div>
-      )}
+        );
+      })()}
 
       {/* MODE 3: Live Authentic SPC A4 Paper Preview & Export */}
       {activeMode === 'preview' && (

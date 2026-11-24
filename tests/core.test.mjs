@@ -38,6 +38,7 @@ import {
 } from '../src/lib/docxBuilder.ts';
 import {
   applyPartyQuickFillToCellText,
+  applySpcAiPatch,
   buildResolvedSpcDocument,
   createEmptyPartyQuickFill,
   createInitialSpcDraft,
@@ -773,6 +774,74 @@ test('5-doc filing companion bundle reuses SPC draft parties + lawyer profile an
     assert.ok(extracted.includes('示例甲方科技公司'), `${item.kind} missing client name`);
     assert.ok(extracted.includes('示例律师'), `${item.kind} missing lawyer name`);
   }
+});
+
+test('SPC multi-turn AI patch engine supports row updates, row exclusion/restoration, custom extra rows, and OOXML .docx roundtrip', async () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const corpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/spc-2025-templates.json'), 'utf8')
+  );
+  const tpl = corpus.templates.find((t) => t.id === 'spc2025_035');
+  assert.ok(tpl, 'spc2025_035 (侵害著作权及邻接权纠纷民事起诉状) must exist');
+
+  const d0 = createInitialSpcDraft(tpl);
+  const r1 = applySpcAiPatch(tpl, d0, {
+    rowValues: {
+      r00: '恶意覆盖官方说明测试',
+      r03: '名称：示例甲方影视文化有限公司\n住所地（主要办事机构所在地）：杭州市示例区文创园1号\n统一社会信用代码：91330100MA0000001X',
+      r06: '名称：示例乙方网络科技有限公司\n住所地（主要办事机构所在地）：长春市示例区科技路2号\n联系电话：0431-80000001',
+      r11: '判令被告立即停止侵害原告涉案视听作品《星河夜雨》信息网络传播权的行为。',
+      r12: '判令被告赔偿原告经济损失人民币 45,000 元。',
+      r13: '判令被告赔偿原告为维权支出的合理开支人民币 5,000 元（以上共计 50,000 元）。',
+      r19: '涉案视听作品《星河夜雨》（电视剧，共30集），原告经合法授权取得独占信息网络传播权及维权权利。',
+      r20: '信息网络传播权☑',
+    },
+    signerName: '示例甲方影视文化有限公司',
+    signDate: '2026年11月24日',
+  });
+  assert.equal(r1.nextDraft.rowValues['r00'], undefined, 'Must never overwrite official notice row r00');
+  assert.equal(r1.nextDraft.signerName, '示例甲方影视文化有限公司');
+  assert.ok(r1.changedLabels.length >= 7);
+
+  const r2 = applySpcAiPatch(tpl, r1.nextDraft, {
+    excludeRowIds: ['r00', 'r02', 'r05', 'r07', 'r08'],
+    addExtraRows: [
+      {
+        afterRowId: 'r13',
+        label: '4a. 诉讼费用及迟延履行说明',
+        value: '本案案件受理费由被告全部承担，逾期履行加倍支付迟延履行期间债务利息。',
+      },
+    ],
+    rowValues: {
+      r12: '判令被告赔偿原告经济损失人民币 50,000 元。',
+    },
+  });
+  assert.ok(!r2.nextDraft.excludedRowIds.includes('r00'), 'Must never exclude official notice row r00');
+  assert.deepEqual(r2.nextDraft.excludedRowIds.sort(), ['r02', 'r05', 'r07', 'r08']);
+  assert.equal(r2.addedLabels.length, 1);
+  assert.ok(r2.nextDraft.rowValues['r11'].includes('《星河夜雨》'));
+  assert.ok(r2.nextDraft.rowValues['r12'].includes('50,000'));
+
+  const resolved = buildResolvedSpcDocument(tpl, r2.nextDraft);
+  assert.ok(!resolved.rows.some((row) => row.id === 'r02' || row.id === 'r05' || row.id === 'r07' || row.id === 'r08'));
+  assert.ok(resolved.rows.some((row) => row.label === '4a. 诉讼费用及迟延履行说明'));
+
+  const docxBytes = buildOfficialSpcDocxBytes(resolved);
+  const extracted = await extractLocalDocumentText({
+    name: '侵害著作权及邻接权纠纷民事起诉状.docx',
+    arrayBuffer: async () => docxBytes.buffer.slice(docxBytes.byteOffset, docxBytes.byteOffset + docxBytes.byteLength),
+    text: async () => '',
+  });
+  assert.ok(extracted.includes('示例甲方影视文化有限公司'));
+  assert.ok(extracted.includes('信息网络传播权☑'));
+  assert.ok(extracted.includes('4a. 诉讼费用及迟延履行说明'));
+  assert.ok(!extracted.includes('第三人（自然人）'), 'Excluded third-person row must be omitted from exported .docx');
+
+  const r3 = applySpcAiPatch(tpl, r2.nextDraft, {
+    restoreRowIds: ['r02'],
+  });
+  assert.ok(!r3.nextDraft.excludedRowIds.includes('r02'));
+  assert.equal(r3.restoredLabels.length, 1);
 });
 
 

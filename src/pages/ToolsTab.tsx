@@ -68,10 +68,10 @@ export const ToolsTab: React.FC = () => {
         <div>
           <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-[#9A773E]">
             <WifiOff className="h-3.5 w-3.5 text-emerald-700" />
-            <span>100% OFFLINE READY · 断网秒开零上传</span>
+            <span>LOCAL-FIRST TOOLS · 核心填表与测算本地离线（AI 辅写按需联网）</span>
           </div>
           <h1 className="mt-1.5 font-display text-2xl sm:text-3xl font-bold text-[#11151C]">
-            离线随身办案工具全集（12 项）
+            本地随身办案工具全集（12 项）
           </h1>
         </div>
 
