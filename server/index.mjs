@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,10 +20,12 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
 const DIST_DIR = path.join(ROOT_DIR, 'dist');
-const ACCOUNT_REGISTRY_PATH = path.join(ROOT_DIR, '.account-registry.json');
-const TELEMETRY_COUNTS_PATH = path.join(ROOT_DIR, '.telemetry-counts.json');
-const USER_VAULTS_DIR = path.join(ROOT_DIR, '.user-vaults');
-const VAULT_MASTER_KEY_PATH = path.join(ROOT_DIR, '.vault-master.key');
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : ROOT_DIR;
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const ACCOUNT_REGISTRY_PATH = path.join(DATA_DIR, '.account-registry.json');
+const TELEMETRY_COUNTS_PATH = path.join(DATA_DIR, '.telemetry-counts.json');
+const USER_VAULTS_DIR = path.join(DATA_DIR, '.user-vaults');
+const VAULT_MASTER_KEY_PATH = path.join(DATA_DIR, '.vault-master.key');
 
 const ALLOWED_TELEMETRY_TOOL_IDS = new Set([
   'elements-complaint',
@@ -154,6 +157,156 @@ const PUBLIC_VERIFY_JWK = {
   y: 'REPLACE_VIA_NPM_RUN_INIT_KEYS_PUBLIC_Y_COORDINATE',
 };
 
+function loadVerifyKeyRegistry() {
+  const overrideRaw = String(process.env.OVERRIDE_PUBLIC_VERIFY_JWK || '').trim();
+  if (overrideRaw) {
+    try {
+      const parsed = JSON.parse(overrideRaw);
+      if (parsed && parsed.kty === 'EC' && parsed.x && parsed.y) {
+        return { v1: parsed };
+      }
+    } catch {
+      console.error('[license] Invalid OVERRIDE_PUBLIC_VERIFY_JWK JSON ignored');
+    }
+  }
+  return { v1: PUBLIC_VERIFY_JWK };
+}
+
+const VERIFY_KEYS = loadVerifyKeyRegistry();
+
+// Optional comma-separated upstream hostname / suffix allowlist for /api/ai-relay
+// e.g. RELAY_ALLOWED_HOSTS="api.deepseek.com,.aliyuncs.com" (empty = allow any public HTTPS host)
+const RELAY_ALLOWED_HOSTS = String(process.env.RELAY_ALLOWED_HOSTS || '')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+const MAX_CONCURRENT_RELAYS_PER_ACCOUNT = Math.max(
+  1,
+  Number(process.env.MAX_CONCURRENT_RELAYS_PER_ACCOUNT || 3)
+);
+const RELAY_CONNECT_TIMEOUT_MS = 15 * 1000;
+const RELAY_IDLE_TIMEOUT_MS = 120 * 1000;
+const ACTIVE_RELAY_COUNTS = new Map();
+
+// H-2: In-memory per-endpoint rate limiter + auth-failure IP temporary ban
+const RATE_LIMIT_BUCKETS = new Map();
+const AUTH_FAILURE_TRACKER = new Map();
+const AUTH_FAIL_WINDOW_MS = 10 * 60 * 1000;
+const AUTH_FAIL_BAN_MS = 10 * 60 * 1000;
+const AUTH_FAIL_BAN_THRESHOLD = Math.max(5, Number(process.env.AUTH_FAIL_BAN_THRESHOLD || 20));
+
+// H-3: Admin Nonce anti-replay cache (10-min TTL) & 2-min timestamp window
+const SEEN_ADMIN_NONCES = new Map();
+const ADMIN_NONCE_TTL_MS = 10 * 60 * 1000;
+const ADMIN_TS_WINDOW_MS = 2 * 60 * 1000;
+
+// S-4: Short-lived opaque download/preview tickets for /api/ima/file (replaces ?lic= query param)
+const IMA_FILE_TICKETS = new Map();
+const IMA_FILE_TICKET_TTL_MS = 60 * 1000;
+
+function getClientIp(req) {
+  const remote = String(req.socket?.remoteAddress || 'unknown');
+  const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  if (isLoopback) {
+    const forwarded = String(req.headers['x-real-ip'] || '').trim();
+    if (forwarded && forwarded.length <= 64) return forwarded;
+  }
+  return remote;
+}
+
+function checkRateLimit(bucketName, key, limitPerMin, windowMs = 60 * 1000) {
+  const now = Date.now();
+  if (RATE_LIMIT_BUCKETS.size > 4000) {
+    for (const [k, v] of RATE_LIMIT_BUCKETS) {
+      if (now >= v.resetAt) RATE_LIMIT_BUCKETS.delete(k);
+    }
+  }
+  const mapKey = `${bucketName}:${key}`;
+  const entry = RATE_LIMIT_BUCKETS.get(mapKey);
+  if (!entry || now >= entry.resetAt) {
+    RATE_LIMIT_BUCKETS.set(mapKey, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, retryAfterSec: 0 };
+  }
+  entry.count += 1;
+  if (entry.count > limitPerMin) {
+    return { allowed: false, retryAfterSec: Math.max(1, Math.ceil((entry.resetAt - now) / 1000)) };
+  }
+  return { allowed: true, retryAfterSec: 0 };
+}
+
+function getIpBanRemainingSec(ip) {
+  const rec = AUTH_FAILURE_TRACKER.get(ip);
+  if (!rec) return 0;
+  const now = Date.now();
+  if (rec.bannedUntil && now < rec.bannedUntil) {
+    return Math.max(1, Math.ceil((rec.bannedUntil - now) / 1000));
+  }
+  if (rec.bannedUntil && now >= rec.bannedUntil) {
+    AUTH_FAILURE_TRACKER.delete(ip);
+  }
+  return 0;
+}
+
+function recordAuthFailure(ip) {
+  const now = Date.now();
+  if (AUTH_FAILURE_TRACKER.size > 2000) {
+    for (const [k, v] of AUTH_FAILURE_TRACKER) {
+      if (now - v.windowStart > AUTH_FAIL_WINDOW_MS && (!v.bannedUntil || now >= v.bannedUntil)) {
+        AUTH_FAILURE_TRACKER.delete(k);
+      }
+    }
+  }
+  const rec = AUTH_FAILURE_TRACKER.get(ip);
+  if (!rec || now - rec.windowStart > AUTH_FAIL_WINDOW_MS) {
+    AUTH_FAILURE_TRACKER.set(ip, { count: 1, windowStart: now, bannedUntil: 0 });
+    return;
+  }
+  rec.count += 1;
+  if (rec.count >= AUTH_FAIL_BAN_THRESHOLD) {
+    rec.bannedUntil = now + AUTH_FAIL_BAN_MS;
+  }
+}
+
+function pruneExpiredTickets() {
+  const now = Date.now();
+  for (const [t, rec] of IMA_FILE_TICKETS) {
+    if (now > rec.expiresAt || rec.uses >= rec.maxUses) {
+      IMA_FILE_TICKETS.delete(t);
+    }
+  }
+}
+
+function issueImaFileTicket({ realMediaId, fileName, download, accountKey }) {
+  if (IMA_FILE_TICKETS.size > 1000) pruneExpiredTickets();
+  const ticket = crypto.randomBytes(24).toString('base64url');
+  IMA_FILE_TICKETS.set(ticket, {
+    realMediaId,
+    fileName,
+    download: Boolean(download),
+    accountKey,
+    uses: 0,
+    maxUses: download ? 1 : 3,
+    expiresAt: Date.now() + IMA_FILE_TICKET_TTL_MS,
+  });
+  return ticket;
+}
+
+function consumeImaFileTicket(ticket) {
+  if (!ticket || typeof ticket !== 'string') return null;
+  const rec = IMA_FILE_TICKETS.get(ticket);
+  if (!rec) return null;
+  if (Date.now() > rec.expiresAt || rec.uses >= rec.maxUses) {
+    IMA_FILE_TICKETS.delete(ticket);
+    return null;
+  }
+  rec.uses += 1;
+  if (rec.uses >= rec.maxUses) {
+    IMA_FILE_TICKETS.delete(ticket);
+  }
+  return rec;
+}
+
 // Demo team roster seed (only used when AUTH_MODE=license; customize or manage in Admin Console)
 const OFFICIAL_ROSTER_SEED = [
   { holderName: '张示范', role: '主任', serialNo: 'LAW-2026-001' },
@@ -239,7 +392,7 @@ function setCachedExtract(key, data) {
 
 let resolvedKbIdCache = null;
 let cachedAtMs = 0;
-let cachedPublicKey = null;
+const cachedPublicKeys = new Map();
 
 const MIME_MAP = {
   '.html': 'text/html; charset=utf-8',
@@ -273,17 +426,21 @@ function isFirmAdminRole(role) {
   return role === '主任' || role === '主任律师';
 }
 
-async function getVerifyPublicKey() {
-  if (!cachedPublicKey) {
-    cachedPublicKey = await crypto.subtle.importKey(
+async function getVerifyPublicKey(keyId = 'v1') {
+  const resolvedId = String(keyId || 'v1');
+  const jwk = VERIFY_KEYS[resolvedId];
+  if (!jwk) return null;
+  if (!cachedPublicKeys.has(resolvedId)) {
+    const imported = await crypto.subtle.importKey(
       'jwk',
-      PUBLIC_VERIFY_JWK,
+      jwk,
       { name: 'ECDSA', namedCurve: 'P-256' },
       false,
       ['verify']
     );
+    cachedPublicKeys.set(resolvedId, imported);
   }
-  return cachedPublicKey;
+  return cachedPublicKeys.get(resolvedId);
 }
 
 // =========================================================================
@@ -614,11 +771,17 @@ async function verifyTianranLicenseDetailed(rawToken, opts = {}) {
   try {
     const payloadBytes = Buffer.from(body.slice(0, dot), 'base64url');
     const sigBytes = Buffer.from(body.slice(dot + 1), 'base64url');
-    if (sigBytes.length !== 64) {
-      return { valid: false, active: false, reason: '激活凭证签名长度无效' };
+    if (sigBytes.length !== 64 || payloadBytes.length === 0 || payloadBytes.length > 4096) {
+      return { valid: false, active: false, reason: '激活凭证签名或载荷长度无效' };
     }
 
-    const pubKey = await getVerifyPublicKey();
+    const wire = JSON.parse(payloadBytes.toString('utf8'));
+    const keyId = String(wire?.k || 'v1');
+    const pubKey = await getVerifyPublicKey(keyId);
+    if (!pubKey) {
+      return { valid: false, active: false, reason: `未知的验签公钥版本（${keyId}）` };
+    }
+
     const ok = await crypto.subtle.verify(
       { name: 'ECDSA', hash: 'SHA-256' },
       pubKey,
@@ -629,7 +792,6 @@ async function verifyTianranLicenseDetailed(rawToken, opts = {}) {
       return { valid: false, active: false, reason: '激活凭证防伪签名未通过' };
     }
 
-    const wire = JSON.parse(payloadBytes.toString('utf8'));
     if (wire.i !== 'TR' || !wire.n) {
       return { valid: false, active: false, reason: '激活凭证缺少律所标识或持有人信息' };
     }
@@ -667,13 +829,28 @@ async function verifyAdminSignedRequest(req, pathname, rawBodyText) {
   }
 
   const tsStr = String(req.headers['x-toolbox-admin-ts'] || '').trim();
+  const nonce = String(req.headers['x-toolbox-admin-nonce'] || '').trim();
   const sigB64 = String(req.headers['x-toolbox-admin-sig'] || '').trim();
   const tsNum = Number(tsStr);
-  if (!tsStr || !Number.isFinite(tsNum) || Math.abs(Date.now() - tsNum) > 5 * 60 * 1000) {
-    return { ok: false, status: 403, error: '管理请求时间戳已过期或无效，请核对设备时间后重试' };
+  const now = Date.now();
+  if (!tsStr || !Number.isFinite(tsNum) || Math.abs(now - tsNum) > ADMIN_TS_WINDOW_MS) {
+    return { ok: false, status: 403, error: '管理请求时间戳已过期（超过2分钟窗口）或无效，请核对设备时间后重试' };
+  }
+  if (!nonce || nonce.length < 12 || nonce.length > 128 || !/^[A-Za-z0-9_-]+$/.test(nonce)) {
+    return { ok: false, status: 403, error: '缺少有效的防重放 Nonce，请刷新工作台页面后重试' };
   }
   if (!sigB64) {
     return { ok: false, status: 403, error: '缺少主任私钥签名，请先在管理端填入 TR-MASTER-... 主密钥' };
+  }
+
+  if (SEEN_ADMIN_NONCES.size > 1000) {
+    for (const [k, exp] of SEEN_ADMIN_NONCES) {
+      if (now >= exp) SEEN_ADMIN_NONCES.delete(k);
+    }
+  }
+  const seenExp = SEEN_ADMIN_NONCES.get(nonce);
+  if (seenExp && now < seenExp) {
+    return { ok: false, status: 403, error: '管理请求 Nonce 已被使用（防重放拦截），请重新发起操作' };
   }
 
   try {
@@ -682,8 +859,11 @@ async function verifyAdminSignedRequest(req, pathname, rawBodyText) {
       return { ok: false, status: 403, error: '管理端签名格式无效' };
     }
     const bodyHash = crypto.createHash('sha256').update(rawBodyText || '', 'utf8').digest('hex');
-    const signingMsg = Buffer.from(`${req.method}:${pathname}:${tsStr}:${bodyHash}`, 'utf8');
-    const pubKey = await getVerifyPublicKey();
+    const signingMsg = Buffer.from(`${req.method}:${pathname}:${tsStr}:${nonce}:${bodyHash}`, 'utf8');
+    const pubKey = await getVerifyPublicKey(lic.wire.k || 'v1');
+    if (!pubKey) {
+      return { ok: false, status: 403, error: '无法定位对应的验签公钥版本' };
+    }
     const ok = await crypto.subtle.verify(
       { name: 'ECDSA', hash: 'SHA-256' },
       pubKey,
@@ -693,6 +873,7 @@ async function verifyAdminSignedRequest(req, pathname, rawBodyText) {
     if (!ok) {
       return { ok: false, status: 403, error: '主任私钥签名核验未通过，请确认 TR-MASTER-... 主密钥正确' };
     }
+    SEEN_ADMIN_NONCES.set(nonce, now + ADMIN_NONCE_TTL_MS);
     return { ok: true, adminWire: lic.wire };
   } catch {
     return { ok: false, status: 403, error: '管理端签名校验失败' };
@@ -856,25 +1037,89 @@ function isPrivateIp(ip) {
   );
 }
 
-async function validatePublicHttpsUrl(rawUrl) {
-  const parsed = new URL(rawUrl);
-  if (parsed.protocol !== 'https:') {
-    throw new Error('仅允许转发至外部 HTTPS 大模型接口');
-  }
-  const records = await dns.lookup(parsed.hostname, { all: true });
-  for (const r of records) {
-    if (isPrivateIp(r.address)) {
-      throw new Error('禁止访问内网或本机回环地址');
+function isRelayHostAllowed(hostname) {
+  if (RELAY_ALLOWED_HOSTS.length === 0) return true;
+  const host = String(hostname || '').toLowerCase();
+  return RELAY_ALLOWED_HOSTS.some((rule) => {
+    if (rule.startsWith('.')) {
+      return host === rule.slice(1) || host.endsWith(rule);
     }
-  }
-  return parsed.toString();
+    return host === rule;
+  });
 }
 
-function sendJson(res, status, obj) {
+async function resolveAndValidatePublicHttpsUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || ''));
+  } catch {
+    const err = new Error('目标大模型接口地址格式无效');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (parsed.protocol !== 'https:') {
+    const err = new Error('仅允许转发至外部 HTTPS 大模型接口');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (parsed.username || parsed.password) {
+    const err = new Error('目标地址不得包含内嵌认证凭据');
+    err.statusCode = 400;
+    throw err;
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (!isRelayHostAllowed(hostname)) {
+    const err = new Error(`目标域名 ${hostname} 不在服务器允许的中转域名白名单中`);
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const ipVersion = net.isIP(hostname);
+  if (ipVersion) {
+    if (isPrivateIp(hostname)) {
+      const err = new Error('禁止访问内网或本机回环地址');
+      err.statusCode = 403;
+      throw err;
+    }
+    return { parsed, pinnedAddress: hostname, pinnedFamily: ipVersion };
+  }
+
+  let records;
+  try {
+    records = await dns.lookup(hostname, { all: true });
+  } catch {
+    const err = new Error(`无法解析目标大模型域名：${hostname}`);
+    err.statusCode = 502;
+    err.publicMessage = err.message;
+    throw err;
+  }
+  if (!records || records.length === 0) {
+    const err = new Error(`目标域名无可用解析记录：${hostname}`);
+    err.statusCode = 502;
+    err.publicMessage = err.message;
+    throw err;
+  }
+  for (const r of records) {
+    if (isPrivateIp(r.address)) {
+      const err = new Error('禁止访问内网或本机回环地址');
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+  const preferred = records.find((r) => r.family === 4) || records[0];
+  return {
+    parsed,
+    pinnedAddress: preferred.address,
+    pinnedFamily: preferred.family,
+  };
+}
+
+function sendJson(res, status, obj, extraHeaders = {}) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     'X-Robots-Tag': 'noindex, nofollow, noarchive',
+    ...extraHeaders,
   });
   res.end(JSON.stringify(obj));
 }
@@ -909,7 +1154,21 @@ async function readJsonBody(req, maxBytes = 256 * 1024) {
 function sanitizeRelayHeaders(raw) {
   const out = {};
   if (!raw || typeof raw !== 'object') return out;
-  const blocked = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'keep-alive', 'upgrade']);
+  const blocked = new Set([
+    'host',
+    'connection',
+    'content-length',
+    'transfer-encoding',
+    'keep-alive',
+    'upgrade',
+    'cookie',
+    'x-toolbox-license',
+    'x-toolbox-admin-ts',
+    'x-toolbox-admin-nonce',
+    'x-toolbox-admin-sig',
+    'x-forwarded-for',
+    'x-real-ip',
+  ]);
   for (const [k, v] of Object.entries(raw)) {
     if (!k || blocked.has(k.toLowerCase())) continue;
     if (typeof v === 'string' || typeof v === 'number') out[k] = String(v);
@@ -932,6 +1191,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const fullUrl = new URL(req.url || '/', 'http://localhost');
     const pathname = fullUrl.pathname;
+    const clientIp = getClientIp(req);
 
     if (pathname === '/api/health' && req.method === 'GET') {
       return sendJson(res, 200, {
@@ -942,13 +1202,35 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    if (pathname.startsWith('/api/')) {
+      const banSec = getIpBanRemainingSec(clientIp);
+      if (banSec > 0) {
+        return sendJson(
+          res,
+          429,
+          { ok: false, error: `鉴权失败次数过多，当前 IP 已临时封禁，请 ${banSec} 秒后重试` },
+          { 'Retry-After': String(banSec) }
+        );
+      }
+    }
+
     // =========================================================================
     // 0. Real-Time License Status & Director Account Enable/Disable Console API
     // =========================================================================
     if (pathname === '/api/license/status' && req.method === 'GET') {
+      const rl = checkRateLimit('license-status', clientIp, 30);
+      if (!rl.allowed) {
+        return sendJson(
+          res,
+          429,
+          { ok: false, error: '状态校验请求过于频繁，请稍后再试' },
+          { 'Retry-After': String(rl.retryAfterSec) }
+        );
+      }
       const licenseHeader = req.headers['x-toolbox-license'] || '';
       const result = await verifyTianranLicenseDetailed(String(licenseHeader));
       if (!result.valid) {
+        recordAuthFailure(clientIp);
         return sendJson(res, 403, { ok: false, active: false, error: result.reason });
       }
       return sendJson(res, 200, {
@@ -981,6 +1263,7 @@ const server = http.createServer(async (req, res) => {
       const licenseHeader = req.headers['x-toolbox-license'] || '';
       const auth = await verifyTianranLicenseDetailed(String(licenseHeader));
       if (!auth.valid || !auth.active || !auth.wire) {
+        recordAuthFailure(clientIp);
         return sendJson(res, 403, {
           ok: false,
           error: auth.reason || '未检测到有效的团队激活凭证，无法使用跨端云同步',
@@ -990,6 +1273,15 @@ const server = http.createServer(async (req, res) => {
       const canonKey = makeAccountKey(String(auth.wire.s || '').trim(), String(auth.wire.n || '').trim());
       if (!canonKey) {
         return sendJson(res, 400, { ok: false, error: '无法识别当前激活码所属账户标识' });
+      }
+      const rl = checkRateLimit('sync-vault', canonKey, 20);
+      if (!rl.allowed) {
+        return sendJson(
+          res,
+          429,
+          { ok: false, error: '云端配置同步过于频繁，请稍后再试' },
+          { 'Retry-After': String(rl.retryAfterSec) }
+        );
       }
 
       if (req.method === 'GET') {
@@ -1082,7 +1374,13 @@ const server = http.createServer(async (req, res) => {
       const licenseHeader = req.headers['x-toolbox-license'] || '';
       const auth = await verifyTianranLicenseDetailed(String(licenseHeader));
       if (!auth.valid || !auth.active) {
+        recordAuthFailure(clientIp);
         return sendJson(res, 403, { ok: false, error: '无效激活凭证' });
+      }
+      const rlKey = makeAccountKey(String(auth.wire?.s || ''), String(auth.wire?.n || '')) || clientIp;
+      const rl = checkRateLimit('telemetry', rlKey, 60);
+      if (!rl.allowed) {
+        return sendJson(res, 429, { ok: false, error: '请求过于频繁' }, { 'Retry-After': String(rl.retryAfterSec) });
       }
       const body = await readJsonBody(req, 4096);
       const toolId = String(body?.toolId || '').trim();
@@ -1094,13 +1392,30 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname.startsWith('/api/admin/')) {
+      const rl = checkRateLimit('admin', clientIp, 30);
+      if (!rl.allowed) {
+        return sendJson(
+          res,
+          429,
+          { ok: false, error: '管理端请求过于频繁，请稍后再试' },
+          { 'Retry-After': String(rl.retryAfterSec) }
+        );
+      }
       const rawBody = req.method === 'POST' ? await readRawBody(req, 512 * 1024) : '';
       const auth = await verifyAdminSignedRequest(req, pathname, rawBody);
       if (!auth.ok) {
+        recordAuthFailure(clientIp);
         return sendJson(res, auth.status, { ok: false, error: auth.error });
       }
 
-      const body = rawBody ? JSON.parse(rawBody) : {};
+      let body = {};
+      if (rawBody) {
+        try {
+          body = JSON.parse(rawBody);
+        } catch {
+          return sendJson(res, 400, { ok: false, error: '请求体不是合法的 JSON 格式' });
+        }
+      }
 
       if (req.method === 'GET' && pathname === '/api/admin/telemetry') {
         return sendJson(res, 200, { ok: true, ...summarizeTelemetryStats() });
@@ -1213,16 +1528,133 @@ const server = http.createServer(async (req, res) => {
     // 1. Read-Only Allowlisted Tencent IMA Public Law & Case Library Gateway
     // =========================================================================
     if (pathname.startsWith('/api/ima/')) {
+      // S-4: GET /api/ima/file authenticates exclusively via short-lived opaque ticket (NEVER ?lic= in URL!)
+      if (req.method === 'GET' && pathname === '/api/ima/file') {
+        const rl = checkRateLimit('ima-file', clientIp, 60);
+        if (!rl.allowed) {
+          return sendJson(
+            res,
+            429,
+            { ok: false, error: '文献下载请求过于频繁，请稍后再试' },
+            { 'Retry-After': String(rl.retryAfterSec) }
+          );
+        }
+        const ticketParam = fullUrl.searchParams.get('ticket') || '';
+        const ticketRec = consumeImaFileTicket(ticketParam);
+        if (!ticketRec) {
+          recordAuthFailure(clientIp);
+          return sendJson(res, 403, {
+            ok: false,
+            error: '临时文件凭据无效或已过期（60秒单次有效），请回到页面重新点击查看或下载',
+          });
+        }
+        if (AUTH_MODE === 'license') {
+          const acct = (accountRegistryCache.accounts || {})[ticketRec.accountKey];
+          if (acct && acct.status === 'disabled') {
+            return sendJson(res, 403, { ok: false, error: '该律师账号已被停用，拒绝下载文献' });
+          }
+        }
+
+        let mediaData;
+        try {
+          mediaData = await callImaOpenApi('openapi/wiki/v1/get_media_info', {
+            media_id: ticketRec.realMediaId,
+          });
+        } catch (err) {
+          if (err && err.imaCode === 220030) {
+            return sendJson(res, 403, {
+              ok: false,
+              imaCode: 220030,
+              error:
+                '该外部订阅知识库受腾讯 IMA 接口权限限制，暂不支持直接下载原件，请点击「去 IMA 客户端/网页版打开」查阅。',
+            });
+          }
+          throw err;
+        }
+
+        const urlInfo = mediaData.url_info;
+        if (!urlInfo || !urlInfo.url) {
+          return sendJson(res, 404, { ok: false, error: '该条目暂不支持直接读取原文' });
+        }
+
+        const targetHost = new URL(urlInfo.url).hostname.toLowerCase();
+        if (!targetHost.endsWith('.myqcloud.com') && !targetHost.endsWith('.qq.com')) {
+          return sendJson(res, 403, { ok: false, error: '非受信任的媒体存储源' });
+        }
+
+        const cosResp = await fetch(urlInfo.url, {
+          headers: urlInfo.headers || {},
+        });
+
+        if (!cosResp.ok || !cosResp.body) {
+          return sendJson(res, 502, { ok: false, error: `读取云端文件失败 (${cosResp.status})` });
+        }
+
+        const fileName = ticketRec.fileName || 'document';
+        const lowerName = fileName.toLowerCase();
+        let contentType = cosResp.headers.get('content-type') || 'application/octet-stream';
+        if (lowerName.endsWith('.pdf')) contentType = 'application/pdf';
+        else if (lowerName.endsWith('.md') || lowerName.endsWith('.txt'))
+          contentType = 'text/plain; charset=utf-8';
+        else if (lowerName.endsWith('.docx'))
+          contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+        const encodedName = encodeURIComponent(fileName);
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Disposition': `${ticketRec.download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodedName}`,
+          'Cache-Control': 'no-store',
+          'X-Robots-Tag': 'noindex, nofollow, noarchive',
+        });
+        pipeWebStreamSafely(cosResp.body, res);
+        return;
+      }
+
+      let imaAccountKey = clientIp;
       if (AUTH_MODE === 'license') {
-        const licenseHeader =
-          req.headers['x-toolbox-license'] || fullUrl.searchParams.get('lic') || '';
+        const licenseHeader = req.headers['x-toolbox-license'] || '';
         const auth = await verifyTianranLicenseDetailed(String(licenseHeader));
         if (!auth.valid || !auth.active) {
+          recordAuthFailure(clientIp);
           return sendJson(res, 403, {
             ok: false,
             error: auth.reason || '未检测到有效的团队激活凭证，拒绝访问云端法规案例网关',
           });
         }
+        imaAccountKey = makeAccountKey(String(auth.wire?.s || ''), String(auth.wire?.n || '')) || clientIp;
+      }
+
+      const rl = checkRateLimit('ima', imaAccountKey, 60);
+      if (!rl.allowed) {
+        return sendJson(
+          res,
+          429,
+          { ok: false, error: '云端法规检索过于频繁，请稍后再试' },
+          { 'Retry-After': String(rl.retryAfterSec) }
+        );
+      }
+
+      if (req.method === 'POST' && pathname === '/api/ima/file-ticket') {
+        const body = await readJsonBody(req, 16 * 1024);
+        const itemKey = String(body.itemKey || '').trim();
+        const fileName = String(body.name || 'document').trim().slice(0, 180) || 'document';
+        const download = Boolean(body.download);
+        const realMediaId = fromOpaqueId(itemKey);
+        if (!realMediaId) {
+          return sendJson(res, 404, { ok: false, error: '文件索引已过期，请重新检索后再点开' });
+        }
+        const ticket = issueImaFileTicket({
+          realMediaId,
+          fileName,
+          download,
+          accountKey: imaAccountKey,
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          ticket,
+          expiresInSec: Math.floor(IMA_FILE_TICKET_TTL_MS / 1000),
+          url: `/api/ima/file?ticket=${encodeURIComponent(ticket)}`,
+        });
       }
 
       if (req.method === 'GET' && pathname === '/api/ima/catalog') {
@@ -1586,75 +2018,12 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
-      if (req.method === 'GET' && pathname === '/api/ima/file') {
-        const itemKey = fullUrl.searchParams.get('itemKey') || '';
-        const fileName = fullUrl.searchParams.get('name') || 'document';
-        const download = fullUrl.searchParams.get('download') === '1';
-
-        const realMediaId = fromOpaqueId(itemKey);
-        if (!realMediaId) {
-          return sendJson(res, 404, { ok: false, error: '文件索引已过期，请重新搜索后再点开' });
-        }
-
-        let mediaData;
-        try {
-          mediaData = await callImaOpenApi('openapi/wiki/v1/get_media_info', {
-            media_id: realMediaId,
-          });
-        } catch (err) {
-          if (err && err.imaCode === 220030) {
-            return sendJson(res, 403, {
-              ok: false,
-              imaCode: 220030,
-              error:
-                '该外部订阅知识库受腾讯 IMA 接口权限限制，暂不支持直接下载原件，请点击「去 IMA 客户端/网页版打开」查阅。',
-            });
-          }
-          throw err;
-        }
-
-        const urlInfo = mediaData.url_info;
-        if (!urlInfo || !urlInfo.url) {
-          return sendJson(res, 404, { ok: false, error: '该条目暂不支持直接读取原文' });
-        }
-
-        const targetHost = new URL(urlInfo.url).hostname.toLowerCase();
-        if (!targetHost.endsWith('.myqcloud.com') && !targetHost.endsWith('.qq.com')) {
-          return sendJson(res, 403, { ok: false, error: '非受信任的媒体存储源' });
-        }
-
-        const cosResp = await fetch(urlInfo.url, {
-          headers: urlInfo.headers || {},
-        });
-
-        if (!cosResp.ok || !cosResp.body) {
-          return sendJson(res, 502, { ok: false, error: `读取云端文件失败 (${cosResp.status})` });
-        }
-
-        const lowerName = fileName.toLowerCase();
-        let contentType = cosResp.headers.get('content-type') || 'application/octet-stream';
-        if (lowerName.endsWith('.pdf')) contentType = 'application/pdf';
-        else if (lowerName.endsWith('.md') || lowerName.endsWith('.txt'))
-          contentType = 'text/plain; charset=utf-8';
-        else if (lowerName.endsWith('.docx'))
-          contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-
-        const encodedName = encodeURIComponent(fileName);
-        res.writeHead(200, {
-          'Content-Type': contentType,
-          'Content-Disposition': `${download ? 'attachment' : 'inline'}; filename*=UTF-8''${encodedName}`,
-          'Cache-Control': 'private, max-age=600',
-          'X-Robots-Tag': 'noindex, nofollow, noarchive',
-        });
-        pipeWebStreamSafely(cosResp.body, res);
-        return;
-      }
-
       return sendJson(res, 404, { ok: false, error: '未知的 IMA 网关接口' });
     }
 
     // =========================================================================
     // 2. Stateless Zero-Log CORS Pass-Through Relay for Custom BYOK LLMs
+    //    H-1: DNS-rebinding-proof pinned-IP https.request + timeouts + concurrency cap
     // =========================================================================
     if (req.method === 'POST' && pathname === '/api/ai-relay') {
       if (!ENABLE_AI_RELAY) {
@@ -1664,48 +2033,185 @@ const server = http.createServer(async (req, res) => {
         });
       }
 
+      let accountKey = clientIp;
       if (AUTH_MODE === 'license') {
         const licenseHeader = req.headers['x-toolbox-license'] || '';
         const auth = await verifyTianranLicenseDetailed(String(licenseHeader));
         if (!auth.valid || !auth.active) {
+          recordAuthFailure(clientIp);
           return sendJson(res, 403, {
             ok: false,
             error: auth.reason || '未检测到有效的团队激活凭证，拒绝使用跨域转发通道',
           });
         }
+        accountKey = makeAccountKey(String(auth.wire?.s || ''), String(auth.wire?.n || '')) || clientIp;
       }
 
-      if (!checkRelayRateLimit(req)) {
-        return sendJson(res, 429, {
-          ok: false,
-          error: `请求过于频繁（单 IP 限流 ${AI_RELAY_RPM_LIMIT} 次/分钟），请稍后再试`,
-        });
+      const rl = checkRateLimit('ai-relay', accountKey, AI_RELAY_RPM_LIMIT);
+      if (!rl.allowed) {
+        return sendJson(
+          res,
+          429,
+          { ok: false, error: `AI 中转请求过于频繁（限流 ${AI_RELAY_RPM_LIMIT} 次/分钟），请稍后再试` },
+          { 'Retry-After': String(rl.retryAfterSec) }
+        );
+      }
+
+      const activeCount = ACTIVE_RELAY_COUNTS.get(accountKey) || 0;
+      if (activeCount >= MAX_CONCURRENT_RELAYS_PER_ACCOUNT) {
+        return sendJson(
+          res,
+          429,
+          {
+            ok: false,
+            error: `当前账户已有 ${MAX_CONCURRENT_RELAYS_PER_ACCOUNT} 路 AI 流式中转正在进行，请等待完成后再发起新请求`,
+          },
+          { 'Retry-After': '5' }
+        );
       }
 
       const payload = await readJsonBody(req, 8 * 1024 * 1024);
-      const safeUrl = await validatePublicHttpsUrl(payload.targetUrl);
+      const { parsed, pinnedAddress, pinnedFamily } = await resolveAndValidatePublicHttpsUrl(
+        payload.targetUrl
+      );
       const upstreamMethod = String(payload.method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
-
-      const upstream = await fetch(safeUrl, {
-        method: upstreamMethod,
-        headers: sanitizeRelayHeaders(payload.headers),
-        ...(upstreamMethod === 'GET' ? {} : { body: payload.body }),
-        redirect: 'error',
-      });
-
-      res.writeHead(upstream.status, {
-        'Content-Type':
-          upstream.headers.get('content-type') ||
-          (upstreamMethod === 'GET' ? 'application/json; charset=utf-8' : 'text/event-stream; charset=utf-8'),
-        'Cache-Control': 'no-cache, no-transform',
-        ...(upstreamMethod === 'GET' ? {} : { Connection: 'keep-alive' }),
-      });
-
-      if (upstream.body) {
-        pipeWebStreamSafely(upstream.body, res);
-      } else {
-        res.end();
+      const upstreamHeaders = {
+        ...sanitizeRelayHeaders(payload.headers),
+        Host: parsed.host,
+      };
+      const bodyStr =
+        upstreamMethod === 'GET' || payload.body === undefined || payload.body === null
+          ? ''
+          : typeof payload.body === 'string'
+            ? payload.body
+            : JSON.stringify(payload.body);
+      if (upstreamMethod !== 'GET' && bodyStr) {
+        upstreamHeaders['Content-Length'] = String(Buffer.byteLength(bodyStr, 'utf8'));
       }
+
+      ACTIVE_RELAY_COUNTS.set(accountKey, activeCount + 1);
+      let slotReleased = false;
+      const releaseSlot = () => {
+        if (slotReleased) return;
+        slotReleased = true;
+        const cur = ACTIVE_RELAY_COUNTS.get(accountKey) || 0;
+        if (cur <= 1) ACTIVE_RELAY_COUNTS.delete(accountKey);
+        else ACTIVE_RELAY_COUNTS.set(accountKey, cur - 1);
+      };
+
+      await new Promise((resolve) => {
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(connectTimer);
+          releaseSlot();
+          resolve();
+        };
+
+        const upstreamReq = https.request(
+          {
+            protocol: 'https:',
+            hostname: parsed.hostname,
+            port: parsed.port ? Number(parsed.port) : 443,
+            path: `${parsed.pathname}${parsed.search}`,
+            method: upstreamMethod,
+            headers: upstreamHeaders,
+            servername: parsed.hostname,
+            autoSelectFamily: false,
+            lookup: (_host, opts, cb) => {
+              if (typeof opts === 'function') {
+                opts(null, pinnedAddress, pinnedFamily);
+                return;
+              }
+              if (opts && opts.all) {
+                cb(null, [{ address: pinnedAddress, family: pinnedFamily }]);
+              } else {
+                cb(null, pinnedAddress, pinnedFamily);
+              }
+            },
+          },
+          (upstreamRes) => {
+            clearTimeout(connectTimer);
+            const status = upstreamRes.statusCode || 502;
+            if (status >= 300 && status < 400 && upstreamRes.headers.location) {
+              upstreamRes.resume();
+              if (!res.headersSent) {
+                sendJson(res, 502, {
+                  ok: false,
+                  error: '上游大模型接口返回跳转重定向，出于防 SSRF 安全策略已拒绝跟随',
+                });
+              }
+              done();
+              return;
+            }
+
+            if (!res.headersSent) {
+              res.writeHead(status, {
+                'Content-Type':
+                  upstreamRes.headers['content-type'] ||
+                  (upstreamMethod === 'GET'
+                    ? 'application/json; charset=utf-8'
+                    : 'text/event-stream; charset=utf-8'),
+                'Cache-Control': 'no-cache, no-transform',
+                'X-Robots-Tag': 'noindex, nofollow, noarchive',
+                ...(upstreamMethod === 'GET' ? {} : { Connection: 'keep-alive' }),
+              });
+            }
+
+            upstreamRes.on('error', () => {
+              if (!res.writableEnded) res.end();
+              done();
+            });
+            upstreamRes.on('end', done);
+            upstreamRes.pipe(res);
+          }
+        );
+
+        const connectTimer = setTimeout(() => {
+          upstreamReq.destroy(new Error('CONNECT_TIMEOUT'));
+        }, RELAY_CONNECT_TIMEOUT_MS);
+
+        upstreamReq.setTimeout(RELAY_IDLE_TIMEOUT_MS, () => {
+          upstreamReq.destroy(new Error('IDLE_TIMEOUT'));
+        });
+
+        upstreamReq.on('error', (err) => {
+          const code = err instanceof Error ? err.message : '';
+          if (!res.headersSent) {
+            if (code === 'CONNECT_TIMEOUT' || code === 'IDLE_TIMEOUT') {
+              sendJson(res, 504, {
+                ok: false,
+                error:
+                  code === 'CONNECT_TIMEOUT'
+                    ? '上游大模型接口连接超时（15 秒），请检查服务商地址或网络状态'
+                    : '上游大模型流式输出空闲超时（120 秒），连接已自动断开',
+              });
+            } else {
+              console.error('[ai-relay] Upstream request failed:', err instanceof Error ? err.message : err);
+              sendJson(res, 502, {
+                ok: false,
+                error: '连接外部大模型接口失败，请确认 API 地址有效且支持标准 HTTPS 证书',
+              });
+            }
+          } else if (!res.writableEnded) {
+            res.end();
+          }
+          done();
+        });
+
+        res.on('close', () => {
+          if (!res.writableEnded) {
+            upstreamReq.destroy();
+          }
+          done();
+        });
+
+        if (upstreamMethod !== 'GET' && bodyStr) {
+          upstreamReq.write(bodyStr);
+        }
+        upstreamReq.end();
+      });
       return;
     }
 
@@ -1715,10 +2221,19 @@ const server = http.createServer(async (req, res) => {
     }
 
     // =========================================================================
-    // 3. Static PWA File Serving
+    // 3. Static PWA File Serving (H-8: strict decodeURIComponent & DIST_DIR boundary)
     // =========================================================================
-    const safeRel = path.normalize(decodeURIComponent(pathname)).replace(/^(\.\.(\/|\\|$))+/, '');
-    let filePath = path.join(DIST_DIR, safeRel === '/' ? 'index.html' : safeRel);
+    let decodedPath;
+    try {
+      decodedPath = decodeURIComponent(pathname);
+    } catch {
+      return sendJson(res, 400, { ok: false, error: '请求路径编码格式无效' });
+    }
+    const safeRel = path.normalize(decodedPath).replace(/^(\.\.(\/|\\|$))+/, '').replace(/^[/\\]+/, '');
+    let filePath = path.resolve(DIST_DIR, safeRel || 'index.html');
+    if (filePath !== DIST_DIR && !filePath.startsWith(DIST_DIR + path.sep)) {
+      return sendJson(res, 403, { ok: false, error: '禁止访问站点根目录以外的路径' });
+    }
 
     if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
       filePath = path.join(DIST_DIR, 'index.html');
@@ -1737,13 +2252,21 @@ const server = http.createServer(async (req, res) => {
     });
     fs.createReadStream(filePath).pipe(res);
   } catch (err) {
+    console.error('[cn-lawyer-ai-toolbox] Request error:', req.method, req.url, err);
     if (res.headersSent) {
       if (!res.writableEnded) res.end();
       return;
     }
-    sendJson(res, err.statusCode || 500, {
+    const status = Number(err?.statusCode) || 500;
+    const isSafeClientErr = status >= 400 && status < 500;
+    const clientMessage = isSafeClientErr
+      ? err instanceof Error
+        ? err.message
+        : '请求参数有误'
+      : err?.publicMessage || '服务暂时不可用，请稍后重试';
+    sendJson(res, status, {
       ok: false,
-      error: err instanceof Error ? err.message : 'Server error',
+      error: clientMessage,
     });
   }
 });

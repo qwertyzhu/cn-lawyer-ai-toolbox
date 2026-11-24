@@ -44,16 +44,19 @@ import {
 } from '../lib/cryptoVault';
 import {
   buildSignedAdminHeaders,
+  clearEncryptedAdminMasterVault,
   clearSavedLicense,
   formatWeChatInvitationCard,
   getSavedAdminMasterToken,
+  hasEncryptedAdminMasterVault,
   isFirmAdminRole,
   saveAdminMasterToken,
+  saveEncryptedAdminMasterVault,
   signActivationCodeWithMasterToken,
+  unlockEncryptedAdminMasterVault,
   type LawyerRoleLabel,
   type VerifiedLicenseInfo,
 } from '../lib/licenseEngine';
-import { TIANRAN_OFFICIAL_ROSTER } from '../data/firmRoster';
 import { resetLocalUserWorkspaceForAccountSwitch } from '../lib/cloudSync';
 import { toolboxStorage } from '../lib/storage';
 import type { AiProviderConfig, LawyerProfile } from '../types/toolbox';
@@ -177,6 +180,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [telemetryError, setTelemetryError] = useState<string | null>(null);
   const [telemetryRange, setTelemetryRange] = useState<'30d' | 'all'>('30d');
   const [masterToken, setMasterToken] = useState<string>(() => getSavedAdminMasterToken());
+  const [hasMasterVault, setHasMasterVault] = useState<boolean>(() => hasEncryptedAdminMasterVault());
+  const [masterVaultPass, setMasterVaultPass] = useState('');
   const [batchNamesInput, setBatchNamesInput] = useState('');
   const [issueRole, setIssueRole] = useState<LawyerRoleLabel>('专职律师');
   const [issueExpiryMode, setIssueExpiryMode] = useState<'forever' | '1y' | '180d' | 'custom'>('forever');
@@ -1398,7 +1403,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
             <label className="flex items-start gap-2 rounded-md border border-[#E4DFD4] bg-white p-2.5 cursor-pointer">
               <input
                 type="checkbox"
@@ -1431,10 +1436,27 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 className="mt-0.5 rounded accent-[#0E223D]"
               />
               <span>
-                <strong className="block text-[#11151C]">同步偏好与办案台账</strong>
-                <span className="text-[11px] text-slate-500">置顶、收藏法条、保全预警、速记与报价落款</span>
+                <strong className="block text-[#11151C]">同步常规工作台偏好</strong>
+                <span className="text-[11px] text-slate-500">置顶工具、收藏法条、常用指令与落款名片</span>
               </span>
             </label>
+            <label className="flex items-start gap-2 rounded-md border border-amber-300/80 bg-amber-50/50 p-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={syncPrefs.syncSensitiveNotes}
+                onChange={(e) => updateSyncPrefs({ syncSensitiveNotes: e.target.checked })}
+                className="mt-0.5 rounded accent-[#0E223D]"
+              />
+              <span>
+                <strong className="block text-amber-950">同步会见速记与测算记录（默认关闭）</strong>
+                <span className="text-[11px] text-amber-900/90">含客户案情，默认仅存本机；如需跨端请搭配下方独立口令</span>
+              </span>
+            </label>
+          </div>
+
+          <div className="rounded-md border border-[#E4DFD4] bg-[#FAF8F3] px-3 py-2 text-[11px] leading-5 text-slate-600">
+            <strong className="text-[#0E223D]">加密边界透明说明：</strong>
+            默认同步采用<strong>服务端 AES-256-GCM 静态加密</strong>（换设备免输口令即可恢复，但服务器管理员在技术上具备解密能力）；如需<strong>服务端零知识端到端加密</strong>，请展开下方设置独立同步口令，密文在离开浏览器前即完成加密。
           </div>
 
           {/* Optional Zero-Knowledge Client E2EE Sync Passphrase */}
@@ -1755,18 +1777,21 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         {showIssuerDrawer && (
           <div className="border-t border-[#EFECE5] p-4 sm:p-5 space-y-4 bg-[#FAF9F6]">
             <p className="text-xs leading-5 text-slate-600">
-              说明：服务端与前端均不保存您的签发私钥。首次在您本人设备粘贴 <code className="bg-white px-1">TR-MASTER-...</code> 主密钥后（仅存本机本地），即可在下方<strong>一键实时启用 / 关闭任一律师账号</strong>，并随时离线批量签发新激活码。
+              安全红线：服务端与前端均<strong>绝不明文持久化</strong>您的签发私钥。<code className="bg-white px-1">TR-MASTER-...</code> 仅保存在当前页面内存中（关闭或刷新即清）；如需下次免重粘贴，可使用下方「口令加密封存」（PBKDF2 + AES-256-GCM）。
             </p>
 
-            <div>
-              <label className="block text-xs font-bold text-[#11151C] mb-1">
-                主任管理主密钥（TR-MASTER-... · 本地签名不出设备）
+            <div className="space-y-2">
+              <label className="block text-xs font-bold text-[#11151C]">
+                主任管理主密钥（TR-MASTER-... · 仅驻留内存，绝不明文落盘）
               </label>
               <div className="flex gap-2">
                 <input
                   type="password"
                   value={masterToken}
-                  onChange={(e) => setMasterToken(e.target.value)}
+                  onChange={(e) => {
+                    setMasterToken(e.target.value);
+                    saveAdminMasterToken(e.target.value);
+                  }}
                   placeholder="粘贴 ops/.keys/ 或电脑发码器中的 TR-MASTER-... 私钥"
                   className="flex-1 min-w-0 rounded border border-[#D8D1C3] bg-white px-3 py-2 font-mono text-xs"
                 />
@@ -1779,6 +1804,65 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                   <RefreshCw className={`h-3.5 w-3.5 text-[#D1B27A] ${accountsLoading ? 'animate-spin' : ''}`} />
                   同步账户
                 </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-[#E4DFD4] bg-white p-2.5 text-xs">
+                <input
+                  type="password"
+                  value={masterVaultPass}
+                  onChange={(e) => setMasterVaultPass(e.target.value)}
+                  placeholder={hasMasterVault ? '输入 6 位以上口令解锁已封存主密钥' : '可选：设 6 位以上口令加密封存到本机'}
+                  className="flex-1 min-w-[180px] rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2.5 py-1.5 text-xs"
+                />
+                {hasMasterVault && !masterToken.trim() && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const plain = await unlockEncryptedAdminMasterVault(masterVaultPass);
+                        setMasterToken(plain);
+                        setMasterVaultPass('');
+                        showToast('已从本机 AES-GCM 保险箱解锁主密钥至当前内存会话');
+                      } catch (err) {
+                        showToast(err instanceof Error ? err.message : '口令不正确');
+                      }
+                    }}
+                    className="rounded bg-[#0E223D] px-3 py-1.5 text-xs font-semibold text-white"
+                  >
+                    口令解锁
+                  </button>
+                )}
+                {masterToken.trim().startsWith('TR-MASTER-') && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await saveEncryptedAdminMasterVault(masterToken, masterVaultPass);
+                        setHasMasterVault(true);
+                        setMasterVaultPass('');
+                        showToast('已用 PBKDF2 + AES-256-GCM 加密封存主密钥');
+                      } catch (err) {
+                        showToast(err instanceof Error ? err.message : '封存失败');
+                      }
+                    }}
+                    className="rounded border border-[#0E223D] bg-[#FAF9F6] px-3 py-1.5 text-xs font-semibold text-[#0E223D]"
+                  >
+                    加密封存本机
+                  </button>
+                )}
+                {hasMasterVault && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearEncryptedAdminMasterVault();
+                      setHasMasterVault(false);
+                      setMasterToken('');
+                      showToast('已清除本机加密主密钥封存');
+                    }}
+                    className="rounded border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs font-semibold text-red-700"
+                  >
+                    清除封存
+                  </button>
+                )}
               </div>
             </div>
 
@@ -2128,6 +2212,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                                                   serialNo: acct.serialNo || 'LAW-VIP',
                                                   issuedAt: acct.issuedAt || new Date().toISOString().slice(0, 10),
                                                   expiresAt: acct.expiresAt || null,
+                                                  keyId: 'v1',
                                                   fingerprint: '',
                                                   activatedAt: acct.activatedAt || '',
                                                 },
@@ -2343,14 +2428,18 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    if (cloudAccounts.length === 0) {
+                      showToast('请先点击上方「同步账户」拉取本所已登记成员名单，或直接在下方输入');
+                      return;
+                    }
                     setBatchNamesInput(
-                      TIANRAN_OFFICIAL_ROSTER.map((m) => `${m.name}:${m.role}`).join('\n')
+                      cloudAccounts.map((m) => `${m.holderName}:${m.role}`).join('\n')
                     );
-                    showToast(`已填入示例律所 ${TIANRAN_OFFICIAL_ROSTER.length} 位成员（请按本所实际名单修改）`);
+                    showToast(`已从服务端账户表载入 ${cloudAccounts.length} 位已登记成员`);
                   }}
                   className="rounded border border-[#B89254] bg-[#F3ECE0] px-2.5 py-0.5 text-[11px] font-bold text-[#7A5922] hover:bg-[#EAE0CE]"
                 >
-                  一键填入官网全所 13 人名录
+                  从已同步账户载入名单
                 </button>
               </div>
               <textarea

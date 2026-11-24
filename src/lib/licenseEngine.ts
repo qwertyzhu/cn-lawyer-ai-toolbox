@@ -1,4 +1,5 @@
 import { SITE_CONFIG } from '../config/siteConfig.ts';
+import { decryptWithPassphrase, encryptWithPassphrase } from './cryptoVault.ts';
 
 /**
  * 律所团队非对称数字签名专属激活码引擎 (ECDSA P-256 + SHA-256)
@@ -6,6 +7,13 @@ import { SITE_CONFIG } from '../config/siteConfig.ts';
  * 默认开源模式 (`VITE_AUTH_MODE=open`) 免激活码开箱即用。
  * 如需开启律所团队实名发码门禁 (`VITE_AUTH_MODE=license`)，请先运行 `npm run init-keys`
  * 生成本所专属 ECDSA P-256 密钥对（私钥仅留存本地 ops/.keys/，公钥自动写入此处）。
+ *
+ * 安全设计：
+ * 1. 客户端仅内置【验签公钥表 (TIANRAN_VERIFY_KEYS，支持 kid 多版本平滑轮换)】，绝不含私钥；
+ * 2. 强制通过浏览器原生 Web Crypto API 完成验签（移除手写曲线运算）；
+ * 3. 主任主密钥 (TR-MASTER-...) 严禁明文写入 localStorage：仅保留在本次页面内存中，刷新即清；
+ *    如需免重输，可选通过自设口令经 PBKDF2 + AES-256-GCM 加密后存储，并主动清理旧版明文遗留；
+ * 4. 管理端签名请求内置一次性随机 Nonce (X-Toolbox-Admin-Nonce) + 时间戳防重放。
  */
 
 export const TIANRAN_PUBLIC_VERIFY_JWK: JsonWebKey = {
@@ -13,6 +21,12 @@ export const TIANRAN_PUBLIC_VERIFY_JWK: JsonWebKey = {
   crv: 'P-256',
   x: 'REPLACE_VIA_NPM_RUN_INIT_KEYS_PUBLIC_X_COORDINATE',
   y: 'REPLACE_VIA_NPM_RUN_INIT_KEYS_PUBLIC_Y_COORDINATE',
+};
+
+export const CURRENT_VERIFY_KEY_ID = 'v1';
+
+export const TIANRAN_VERIFY_KEYS: Record<string, JsonWebKey> = {
+  v1: TIANRAN_PUBLIC_VERIFY_JWK,
 };
 
 export function createOpenModeLicense(): VerifiedLicenseInfo {
@@ -24,13 +38,18 @@ export function createOpenModeLicense(): VerifiedLicenseInfo {
     serialNo: 'OSS-LOCAL',
     issuedAt: today,
     expiresAt: null,
+    keyId: CURRENT_VERIFY_KEY_ID,
     fingerprint: 'APACHE20',
     activatedAt: new Date().toISOString(),
   };
 }
 
 const ACTIVATED_LICENSE_STORAGE_KEY = 'cn_lawyer_toolbox_license_v2';
-const ADMIN_MASTER_TOKEN_STORAGE_KEY = 'cn_lawyer_toolbox_admin_master_v1';
+const LEGACY_ADMIN_MASTER_PLAINTEXT_KEY = 'cn_lawyer_toolbox_admin_master_v1';
+const ENCRYPTED_ADMIN_MASTER_KEY = 'cn_lawyer_toolbox_admin_master_vault_v2';
+
+// Strict in-memory cache for Admin master token (cleared on refresh/tab close; NEVER persisted in plaintext!)
+let inMemoryAdminMasterToken = '';
 
 export type LawyerRoleLabel =
   | '主任'
@@ -50,6 +69,7 @@ export function isFirmAdminRole(role?: string): boolean {
 
 export interface LicenseWirePayload {
   i: 'TR'; // Issuer code
+  k?: string; // Optional key version id (defaults to "v1")
   n: string; // Holder name, e.g. "张示例"
   r: LawyerRoleLabel | string; // Role
   s: string; // Serial number, e.g. "LAW-2026-001"
@@ -64,6 +84,7 @@ export interface VerifiedLicenseInfo {
   serialNo: string;
   issuedAt: string;
   expiresAt: string | null; // null = permanent
+  keyId: string;
   fingerprint: string;
   activatedAt: string;
 }
@@ -86,6 +107,12 @@ function base64UrlToBytes(b64url: string): Uint8Array {
   return out;
 }
 
+function generateRandomNonce(): string {
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  return bytesToBase64Url(buf);
+}
+
 /**
  * Extracts a TR1-<payload>.<signature> token even if pasted inside a full WeChat invitation message.
  */
@@ -95,124 +122,8 @@ export function extractActivationToken(rawInput: string): string | null {
   return match ? match[0] : null;
 }
 
-// Pure-JS NIST P-256 ECDSA Public-Key Verification fallback (only used when opened over plain HTTP LAN IP like http://192.168.x.x where mobile browsers hide crypto.subtle)
-const P256_P = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffffn;
-const P256_N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
-const P256_A = P256_P - 3n;
-const P256_GX = 0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296n;
-const P256_GY = 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5n;
-
-function modP(a: bigint, m = P256_P): bigint {
-  const r = a % m;
-  return r >= 0n ? r : r + m;
-}
-function modInvP(a: bigint, m = P256_P): bigint {
-  let [t, newT] = [0n, 1n];
-  let [r, newR] = [m, modP(a, m)];
-  while (newR !== 0n) {
-    const q = r / newR;
-    [t, newT] = [newT, t - q * newT];
-    [r, newR] = [newR, r - q * newR];
-  }
-  return modP(t, m);
-}
-function ecAdd(p1: [bigint, bigint] | null, p2: [bigint, bigint] | null): [bigint, bigint] | null {
-  if (!p1) return p2;
-  if (!p2) return p1;
-  const [x1, y1] = p1;
-  const [x2, y2] = p2;
-  if (x1 === x2 && modP(y1 + y2) === 0n) return null;
-  const lam =
-    x1 === x2 && y1 === y2
-      ? modP((3n * x1 * x1 + P256_A) * modInvP(2n * y1))
-      : modP((y2 - y1) * modInvP(x2 - x1));
-  const x3 = modP(lam * lam - x1 - x2);
-  const y3 = modP(lam * (x1 - x3) - y1);
-  return [x3, y3];
-}
-function ecMul(k: bigint, pt: [bigint, bigint]): [bigint, bigint] | null {
-  let res: [bigint, bigint] | null = null;
-  let addend: [bigint, bigint] | null = pt;
-  let s = k;
-  while (s > 0n) {
-    if (s & 1n) res = ecAdd(res, addend);
-    addend = ecAdd(addend, addend);
-    s >>= 1n;
-  }
-  return res;
-}
-const SHA256_K = [
-  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
-];
-function sha256Pure(msg: Uint8Array): Uint8Array {
-  const l = msg.length;
-  const bitLen = l * 8;
-  const padLen = ((l + 9 + 63) >> 6) << 6;
-  const buf = new Uint8Array(padLen);
-  buf.set(msg);
-  buf[l] = 0x80;
-  const dv = new DataView(buf.buffer);
-  dv.setUint32(padLen - 4, bitLen >>> 0, false);
-  dv.setUint32(padLen - 8, Math.floor(bitLen / 0x100000000), false);
-  let [h0,h1,h2,h3,h4,h5,h6,h7] = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-  const w = new Uint32Array(64);
-  const rotr = (n: number, x: number) => (x >>> n) | (x << (32 - n));
-  for (let i = 0; i < padLen; i += 64) {
-    for (let j = 0; j < 16; j++) w[j] = dv.getUint32(i + j * 4, false);
-    for (let j = 16; j < 64; j++) {
-      const s0 = rotr(7, w[j-15]) ^ rotr(18, w[j-15]) ^ (w[j-15] >>> 3);
-      const s1 = rotr(17, w[j-2]) ^ rotr(19, w[j-2]) ^ (w[j-2] >>> 10);
-      w[j] = (w[j-16] + s0 + w[j-7] + s1) >>> 0;
-    }
-    let [a,b,c,d,e,f,g,h] = [h0,h1,h2,h3,h4,h5,h6,h7];
-    for (let j = 0; j < 64; j++) {
-      const t1 = (h + (rotr(6,e)^rotr(11,e)^rotr(25,e)) + ((e&f)^((~e)&g)) + SHA256_K[j] + w[j]) >>> 0;
-      const t2 = ((rotr(2,a)^rotr(13,a)^rotr(22,a)) + ((a&b)^(a&c)^(b&c))) >>> 0;
-      h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
-    }
-    h0=(h0+a)>>>0; h1=(h1+b)>>>0; h2=(h2+c)>>>0; h3=(h3+d)>>>0;
-    h4=(h4+e)>>>0; h5=(h5+f)>>>0; h6=(h6+g)>>>0; h7=(h7+h)>>>0;
-  }
-  const out = new Uint8Array(32);
-  const odv = new DataView(out.buffer);
-  [h0,h1,h2,h3,h4,h5,h6,h7].forEach((v, idx) => odv.setUint32(idx * 4, v, false));
-  return out;
-}
-function toBigInt(bytes: Uint8Array): bigint {
-  let hex = '';
-  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
-  return BigInt('0x' + (hex || '0'));
-}
-function verifyEcdsaPureP256(
-  payloadBytes: Uint8Array,
-  sigBytes: Uint8Array,
-  pubJwk: JsonWebKey = TIANRAN_PUBLIC_VERIFY_JWK
-): boolean {
-  const r = toBigInt(sigBytes.subarray(0, 32));
-  const s = toBigInt(sigBytes.subarray(32, 64));
-  if (r <= 0n || r >= P256_N || s <= 0n || s >= P256_N) return false;
-  const z = toBigInt(sha256Pure(payloadBytes));
-  const w = modInvP(s, P256_N);
-  const u1 = modP(z * w, P256_N);
-  const u2 = modP(r * w, P256_N);
-  const qx = toBigInt(base64UrlToBytes(pubJwk.x!));
-  const qy = toBigInt(base64UrlToBytes(pubJwk.y!));
-  const pt = ecAdd(ecMul(u1, [P256_GX, P256_GY]), ecMul(u2, [qx, qy]));
-  if (!pt) return false;
-  return modP(pt[0], P256_N) === r;
-}
-
 async function computeFingerprint(sigBytes: Uint8Array): Promise<string> {
-  const digestBytes = crypto?.subtle
-    ? new Uint8Array(await crypto.subtle.digest('SHA-256', sigBytes as BufferSource))
-    : sha256Pure(sigBytes);
+  const digestBytes = new Uint8Array(await crypto.subtle.digest('SHA-256', sigBytes as BufferSource));
   const hex = Array.from(digestBytes.slice(0, 4))
     .map((b) => b.toString(16).padStart(2, '0').toUpperCase())
     .join('');
@@ -223,10 +134,20 @@ function getTodayChinaYmd(): string {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
+function assertSubtleCryptoAvailable(): void {
+  if (typeof crypto === 'undefined' || !crypto.subtle) {
+    throw new Error(
+      '当前为非加密 HTTP 环境，浏览器已限制密码学验签接口。请通过 HTTPS 安全地址或 localhost 访问。'
+    );
+  }
+}
+
 export async function verifyActivationCode(
   rawInput: string,
-  pubJwk: JsonWebKey = TIANRAN_PUBLIC_VERIFY_JWK
+  overrideVerifyJwk?: JsonWebKey
 ): Promise<VerifiedLicenseInfo> {
+  assertSubtleCryptoAvailable();
+
   const token = extractActivationToken(rawInput);
   if (!token) {
     throw new Error('未识别到有效的激活码格式（应以 TR1- 开头，可直接整段粘贴微信授权消息）');
@@ -254,34 +175,35 @@ export async function verifyActivationCode(
     throw new Error('激活码防伪数字签名长度无效');
   }
 
-  let valid = false;
-  if (crypto?.subtle) {
-    const pubKey = await crypto.subtle.importKey(
-      'jwk',
-      pubJwk,
-      { name: 'ECDSA', namedCurve: 'P-256' },
-      false,
-      ['verify']
-    );
-    valid = await crypto.subtle.verify(
-      { name: 'ECDSA', hash: 'SHA-256' },
-      pubKey,
-      sigBytes as BufferSource,
-      payloadBytes as BufferSource
-    );
-  } else {
-    valid = verifyEcdsaPureP256(payloadBytes, sigBytes, pubJwk);
-  }
-
-  if (!valid) {
-    throw new Error('激活码防伪签名校验未通过（非本所官方签发或已被篡改）');
-  }
-
   let wire: LicenseWirePayload;
   try {
     wire = JSON.parse(new TextDecoder().decode(payloadBytes)) as LicenseWirePayload;
   } catch {
     throw new Error('激活码载荷解析失败');
+  }
+
+  const keyId = wire.k || CURRENT_VERIFY_KEY_ID;
+  const verifyJwk = overrideVerifyJwk || TIANRAN_VERIFY_KEYS[keyId];
+  if (!verifyJwk) {
+    throw new Error(`未知的验签公钥版本（${keyId}），请刷新工作台或联系律所管理端`);
+  }
+
+  const pubKey = await crypto.subtle.importKey(
+    'jwk',
+    verifyJwk,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['verify']
+  );
+  const valid = await crypto.subtle.verify(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    pubKey,
+    sigBytes as BufferSource,
+    payloadBytes as BufferSource
+  );
+
+  if (!valid) {
+    throw new Error('激活码防伪签名校验未通过（非本所官方签发或已被篡改）');
   }
 
   if (wire.i !== 'TR' || !wire.n) {
@@ -304,6 +226,7 @@ export async function verifyActivationCode(
     serialNo: wire.s || 'TR-VIP',
     issuedAt: wire.t || '',
     expiresAt: wire.e || null,
+    keyId,
     fingerprint,
     activatedAt: new Date().toISOString(),
   };
@@ -311,7 +234,6 @@ export async function verifyActivationCode(
 
 /**
  * Signs a new genuine TR1-... activation code using the Admin's private Master Token ("TR-MASTER-...").
- * Used by the standalone local generator & optional mobile Admin Issuer Drawer.
  */
 export async function signActivationCodeWithMasterToken(
   masterToken: string,
@@ -319,11 +241,14 @@ export async function signActivationCodeWithMasterToken(
     holderName: string;
     role: string;
     serialNo: string;
-    expiresAt?: string; // YYYY-MM-DD or "" for permanent
+    expiresAt?: string;
     issuedAt?: string;
+    keyId?: string;
   },
-  pubJwk: JsonWebKey = TIANRAN_PUBLIC_VERIFY_JWK
+  overrideVerifyJwk?: JsonWebKey
 ): Promise<{ code: string; info: VerifiedLicenseInfo }> {
+  assertSubtleCryptoAvailable();
+
   const cleanMaster = masterToken.trim();
   if (!cleanMaster.startsWith('TR-MASTER-')) {
     throw new Error('主任签发主密钥格式不正确（应以 TR-MASTER- 开头）');
@@ -337,7 +262,9 @@ export async function signActivationCodeWithMasterToken(
     throw new Error('无法解析签发主密钥');
   }
 
-  if (!privJwk.d || privJwk.x !== pubJwk.x) {
+  const keyId = params.keyId || CURRENT_VERIFY_KEY_ID;
+  const expectedPub = overrideVerifyJwk || TIANRAN_VERIFY_KEYS[keyId] || TIANRAN_PUBLIC_VERIFY_JWK;
+  if (!privJwk.d || privJwk.x !== expectedPub.x) {
     throw new Error('签发主密钥与当前系统公钥不匹配（请确认已运行 npm run init-keys）');
   }
 
@@ -351,6 +278,7 @@ export async function signActivationCodeWithMasterToken(
 
   const wire: LicenseWirePayload = {
     i: 'TR',
+    k: keyId,
     n: params.holderName.trim(),
     r: params.role.trim() || '专职律师',
     s: params.serialNo.trim() || `LAW-${new Date().getFullYear()}-001`,
@@ -367,7 +295,7 @@ export async function signActivationCodeWithMasterToken(
   const sigBytes = new Uint8Array(sigBuf);
 
   const code = `TR1-${bytesToBase64Url(payloadBytes)}.${bytesToBase64Url(sigBytes)}`;
-  const verified = await verifyActivationCode(code, pubJwk);
+  const verified = await verifyActivationCode(code, overrideVerifyJwk);
   return { code, info: verified };
 }
 
@@ -403,7 +331,10 @@ export function getSavedLicense(): VerifiedLicenseInfo | null {
         return null;
       }
     }
-    return parsed;
+    return {
+      ...parsed,
+      keyId: parsed.keyId || CURRENT_VERIFY_KEY_ID,
+    };
   } catch {
     return null;
   }
@@ -425,20 +356,71 @@ export function clearSavedLicense(): void {
   }
 }
 
-export function getSavedAdminMasterToken(): string {
+export function purgeLegacyAdminMasterToken(): void {
   try {
-    return localStorage.getItem(ADMIN_MASTER_TOKEN_STORAGE_KEY) || '';
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(LEGACY_ADMIN_MASTER_PLAINTEXT_KEY);
+    }
   } catch {
-    return '';
+    // ignore
   }
 }
 
+export function getSavedAdminMasterToken(): string {
+  purgeLegacyAdminMasterToken();
+  return inMemoryAdminMasterToken;
+}
+
 export function saveAdminMasterToken(token: string): void {
+  purgeLegacyAdminMasterToken();
+  inMemoryAdminMasterToken = token.trim();
+}
+
+export function hasEncryptedAdminMasterVault(): boolean {
   try {
-    if (!token.trim()) {
-      localStorage.removeItem(ADMIN_MASTER_TOKEN_STORAGE_KEY);
-    } else {
-      localStorage.setItem(ADMIN_MASTER_TOKEN_STORAGE_KEY, token.trim());
+    return typeof localStorage !== 'undefined' && Boolean(localStorage.getItem(ENCRYPTED_ADMIN_MASTER_KEY));
+  } catch {
+    return false;
+  }
+}
+
+export async function saveEncryptedAdminMasterVault(
+  masterToken: string,
+  passphrase: string
+): Promise<void> {
+  const clean = masterToken.trim();
+  const pass = passphrase.trim();
+  if (!clean.startsWith('TR-MASTER-')) {
+    throw new Error('请先输入合法的 TR-MASTER-... 主任主密钥');
+  }
+  if (pass.length < 6) {
+    throw new Error('加密口令至少需要 6 位字符');
+  }
+  const cipher = await encryptWithPassphrase(clean, pass);
+  purgeLegacyAdminMasterToken();
+  localStorage.setItem(ENCRYPTED_ADMIN_MASTER_KEY, cipher);
+  inMemoryAdminMasterToken = clean;
+}
+
+export async function unlockEncryptedAdminMasterVault(passphrase: string): Promise<string> {
+  const cipher = localStorage.getItem(ENCRYPTED_ADMIN_MASTER_KEY) || '';
+  if (!cipher) {
+    throw new Error('当前浏览器尚未封存加密的主任主密钥');
+  }
+  const plain = await decryptWithPassphrase(cipher, passphrase.trim());
+  if (!plain.startsWith('TR-MASTER-')) {
+    throw new Error('解密结果格式异常，请核对口令');
+  }
+  inMemoryAdminMasterToken = plain;
+  return plain;
+}
+
+export function clearEncryptedAdminMasterVault(): void {
+  purgeLegacyAdminMasterToken();
+  inMemoryAdminMasterToken = '';
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(ENCRYPTED_ADMIN_MASTER_KEY);
     }
   } catch {
     // ignore
@@ -446,8 +428,8 @@ export function saveAdminMasterToken(token: string): void {
 }
 
 /**
- * Signs an authenticated Admin Console API request locally using the Director's TR-MASTER-... private key.
- * The private key NEVER leaves the Director's browser; the server verifies using ONLY the public key.
+ * Signs an authenticated Admin Console API request locally using the Admin's TR-MASTER-... private key.
+ * Includes a cryptographic random Nonce (X-Toolbox-Admin-Nonce) + Timestamp (X-Toolbox-Admin-Ts) to prevent replay.
  */
 export async function buildSignedAdminHeaders(
   masterToken: string,
@@ -455,8 +437,10 @@ export async function buildSignedAdminHeaders(
   method: 'GET' | 'POST',
   pathname: string,
   rawBodyText = '',
-  pubJwk: JsonWebKey = TIANRAN_PUBLIC_VERIFY_JWK
+  overrideVerifyJwk?: JsonWebKey
 ): Promise<Record<string, string>> {
+  assertSubtleCryptoAvailable();
+
   const cleanMaster = masterToken.trim();
   if (!cleanMaster.startsWith('TR-MASTER-')) {
     throw new Error('请先在上方填入主任签发主密钥（TR-MASTER-...）以操作云端账户开关');
@@ -469,17 +453,21 @@ export async function buildSignedAdminHeaders(
   } catch {
     throw new Error('无法解析主任签发主密钥');
   }
-  if (!privJwk.d || privJwk.x !== pubJwk.x) {
+  const expectedPub = overrideVerifyJwk || TIANRAN_PUBLIC_VERIFY_JWK;
+  if (!privJwk.d || privJwk.x !== expectedPub.x) {
     throw new Error('主任签发主密钥与当前系统公钥不匹配');
   }
 
   const ts = String(Date.now());
+  const nonce = generateRandomNonce();
   const bodyBytes = new TextEncoder().encode(rawBodyText);
   const hashBuf = await crypto.subtle.digest('SHA-256', bodyBytes);
   const bodyHashHex = Array.from(new Uint8Array(hashBuf))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-  const signingBytes = new TextEncoder().encode(`${method}:${pathname}:${ts}:${bodyHashHex}`);
+  const signingBytes = new TextEncoder().encode(
+    `${method}:${pathname}:${ts}:${nonce}:${bodyHashHex}`
+  );
 
   const privKey = await crypto.subtle.importKey(
     'jwk',
@@ -498,6 +486,7 @@ export async function buildSignedAdminHeaders(
     'Content-Type': 'application/json',
     'X-Toolbox-License': licenseRawCode,
     'X-Toolbox-Admin-Ts': ts,
+    'X-Toolbox-Admin-Nonce': nonce,
     'X-Toolbox-Admin-Sig': bytesToBase64Url(new Uint8Array(sigBuf)),
   };
 }

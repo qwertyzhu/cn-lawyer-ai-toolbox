@@ -10,11 +10,19 @@ import {
 } from '../src/lib/financeUtils.ts';
 import { redactLegalText, restoreRedactedText } from '../src/lib/redactor.ts';
 import {
+  AiDirectConnectError,
   buildProviderRequestPayload,
+  fetchAvailableModels,
   normalizeModelsEndpoints,
   parseModelsResponsePayload,
+  streamAiCompletion,
   suggestModelSlots,
 } from '../src/lib/aiClient.ts';
+import {
+  AI_LEGAL_DISCLAIMER,
+  checkLprDateCoverage,
+  isDateOutsideHolidayCoverage,
+} from '../src/data/legalDataManifest.ts';
 import { buildIcsContent } from '../src/lib/icsGenerator.ts';
 import { AI_SPECIALISTS_REGISTRY } from '../src/data/toolRegistry.ts';
 import {
@@ -62,6 +70,8 @@ import {
   importEncryptedSyncCode,
 } from '../src/lib/cryptoVault.ts';
 import {
+  DEFAULT_CLOUD_SYNC_PREFS,
+  buildLocalSyncSnapshot,
   encodeSyncSnapshotForUpload,
   decodeSyncSnapshotFromCloud,
 } from '../src/lib/cloudSync.ts';
@@ -445,14 +455,18 @@ test('Director Admin API signed headers verify cleanly against ephemeral P-256 p
     body,
     publicJwk
   );
-  assert.ok(headers['X-Toolbox-Admin-Sig'] && headers['X-Toolbox-Admin-Ts']);
+  assert.ok(
+    headers['X-Toolbox-Admin-Sig'] &&
+      headers['X-Toolbox-Admin-Ts'] &&
+      headers['X-Toolbox-Admin-Nonce']
+  );
   const sigBytes = Buffer.from(headers['X-Toolbox-Admin-Sig'], 'base64url');
   assert.equal(sigBytes.length, 64);
   const bodyHash = Buffer.from(
     await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body))
   ).toString('hex');
   const msg = new TextEncoder().encode(
-    `POST:/api/admin/accounts/toggle:${headers['X-Toolbox-Admin-Ts']}:${bodyHash}`
+    `POST:/api/admin/accounts/toggle:${headers['X-Toolbox-Admin-Ts']}:${headers['X-Toolbox-Admin-Nonce']}:${bodyHash}`
   );
   const pubKey = await crypto.subtle.importKey(
     'jwk',
@@ -873,6 +887,167 @@ test('SPC multi-turn AI patch engine supports row updates, row exclusion/restora
   assert.ok(!r3.nextDraft.excludedRowIds.includes('r02'));
   assert.equal(r3.restoredLabels.length, 1);
 });
+
+test('S-1: Cloud Sync defaults keep sensitive meeting notes & calculation history strictly local unless explicitly opted in', () => {
+  assert.equal(DEFAULT_CLOUD_SYNC_PREFS.syncSensitiveNotes, false);
+
+  const mem = new Map();
+  mem.set(
+    'cn_lawyer_box_scratchpads_v1',
+    JSON.stringify([{ id: 'n1', title: '绝密会见笔录', content: '当事人私密陈述', updatedAt: '2026-11-24' }])
+  );
+  mem.set(
+    'cn_lawyer_box_calc_history_v1',
+    JSON.stringify([{ id: 'h1', toolId: 'lpr-interest-calculator', summary: '标的额1000万', createdAt: '2026-11-24' }])
+  );
+  const prevLS = globalThis.localStorage;
+  try {
+    globalThis.localStorage = {
+      getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+      setItem: (k, v) => mem.set(k, String(v)),
+      removeItem: (k) => mem.delete(k),
+    };
+    const defaultSnap = buildLocalSyncSnapshot(DEFAULT_CLOUD_SYNC_PREFS);
+    assert.deepEqual(defaultSnap.workspace?.scratchpads, []);
+    assert.deepEqual(defaultSnap.workspace?.history, []);
+
+    const optInSnap = buildLocalSyncSnapshot({
+      ...DEFAULT_CLOUD_SYNC_PREFS,
+      syncSensitiveNotes: true,
+    });
+    assert.equal(optInSnap.workspace?.scratchpads?.length, 1);
+    assert.equal(optInSnap.workspace?.history?.length, 1);
+  } finally {
+    if (prevLS === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = prevLS;
+  }
+});
+
+test('S-2: Direct-connect failure NEVER silently falls back to /api/ai-relay unless provider.useCorsRelayFallback is explicitly true', async () => {
+  const calls = [];
+  const prevFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url) => {
+      calls.push(String(url));
+      throw new TypeError('Failed to fetch (simulated CORS block)');
+    };
+
+    const strictProvider = {
+      id: 'p1',
+      presetId: 'custom-openai',
+      name: '示例直连模型',
+      protocol: 'openai',
+      baseUrl: 'https://api.example-llm.test/v1',
+      apiKey: 'sk-test-never-relay',
+      fastModel: 'demo-chat',
+      reasoningModel: 'demo-reasoner',
+      useCorsRelayFallback: false,
+    };
+
+    await assert.rejects(
+      () =>
+        streamAiCompletion({
+          provider: strictProvider,
+          modelSlot: 'fast',
+          messages: [{ role: 'user', content: '测试直连红线' }],
+        }),
+      (err) => err instanceof AiDirectConnectError && err.code === 'AI_DIRECT_CORS_FAILED'
+    );
+    assert.ok(calls.every((u) => !u.includes('/api/ai-relay')));
+
+    calls.length = 0;
+    await assert.rejects(
+      () => fetchAvailableModels(strictProvider),
+      (err) => err instanceof AiDirectConnectError && err.code === 'AI_DIRECT_CORS_FAILED'
+    );
+    assert.ok(calls.every((u) => !u.includes('/api/ai-relay')));
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+});
+
+test('L-1 & L-3: Legal dataset manifest detects out-of-coverage holiday years, stale LPR windows, and embeds AI disclaimer in Word exports', () => {
+  assert.equal(isDateOutsideHolidayCoverage('2025-10-01'), false);
+  assert.equal(isDateOutsideHolidayCoverage('2026-05-01'), false);
+  assert.equal(isDateOutsideHolidayCoverage('2024-12-31'), true);
+  assert.equal(isDateOutsideHolidayCoverage('2027-01-15'), true);
+
+  const okLpr = checkLprDateCoverage('2024-06-01', '2026-11-24');
+  assert.equal(okLpr.staleEnd, false);
+  assert.equal(okLpr.beforeLprReform, false);
+
+  const staleLpr = checkLprDateCoverage('2018-01-01', '2027-02-01');
+  assert.equal(staleLpr.staleEnd, true);
+  assert.equal(staleLpr.beforeLprReform, true);
+
+  const withDisclaimer = buildMarkdownReportDocxBytes({
+    title: 'AI 研判测试',
+    markdownBody: '一、结论：示例文本。',
+  });
+  const textWith = extractDocxTextFromBuffer(Buffer.from(withDisclaimer));
+  assert.ok(textWith.includes(AI_LEGAL_DISCLAIMER));
+
+  const withoutDisclaimer = buildMarkdownReportDocxBytes({
+    title: '原始文献转换测试',
+    markdownBody: '示例正文。',
+    includeAiDisclaimer: false,
+  });
+  const textWithout = extractDocxTextFromBuffer(Buffer.from(withoutDisclaimer));
+  assert.ok(!textWithout.includes(AI_LEGAL_DISCLAIMER));
+});
+
+test('L-2: Synthetic 30-paragraph legal redaction regression suite achieves >=95% structured PII recall', () => {
+  const syntheticCases = [
+    { text: '原告：杭州青岚网络科技有限公司，法定代表人：周明轩。', mustHide: ['杭州青岚网络科技有限公司', '周明轩'] },
+    { text: '被告：宁波海潮实业有限公司，统一社会信用代码：91330200MA29AB1201。', mustHide: ['宁波海潮实业有限公司', '91330200MA29AB1201'] },
+    { text: '委托人：林清河，身份证号：33010619870314251X。', mustHide: ['林清河', '33010619870314251X'] },
+    { text: '联系电话：13957112233，电子邮箱：lin.qinghe@example-law.test。', mustHide: ['13957112233', 'lin.qinghe@example-law.test'] },
+    { text: '一审案号：（2025）浙0106民初6789号，二审案号：（2026）浙01民终1234号。', mustHide: ['（2025）浙0106民初6789号', '（2026）浙01民终1234号'] },
+    { text: '收款账户：6222021202019876543，开户行某支行。', mustHide: ['6222021202019876543'] },
+    { text: '上诉人：苏州明月文化传媒有限公司诉被上诉人：南京晨星电子商务有限公司。', mustHide: ['苏州明月文化传媒有限公司', '南京晨星电子商务有限公司'] },
+    { text: '借款人：陈志远于2025年向出借人：赵海燕借款50万元。', mustHide: ['陈志远', '赵海燕'] },
+    { text: '担保人：徐文博提供连带责任保证，手机号18605718899。', mustHide: ['徐文博', '18605718899'] },
+    { text: '申请执行人：上海云帆信息技术有限公司，信用代码91310115MA1K99887X。', mustHide: ['上海云帆信息技术有限公司', '91310115MA1K99887X'] },
+    { text: '被执行人：王建军，公民身份号码110105197911083321。', mustHide: ['王建军', '110105197911083321'] },
+    { text: '劳动者：吴思琪在温州星光物业服务有限公司任职三年。', mustHide: ['吴思琪', '温州星光物业服务有限公司'] },
+    { text: '第三人：嘉兴江南建筑工程有限公司未按期结算工程款。', mustHide: ['嘉兴江南建筑工程有限公司'] },
+    { text: '犯罪嫌疑人：郑伟民涉嫌合同诈骗案，手机13777889900。', mustHide: ['郑伟民', '13777889900'] },
+    { text: '被害人：孙晓梅报案称被骗转账至账号6214830199887766。', mustHide: ['孙晓梅', '6214830199887766'] },
+    { text: '甲方：成都天府建设集团有限公司与乙方：重庆山城贸易有限公司签约。', mustHide: ['成都天府建设集团有限公司', '重庆山城贸易有限公司'] },
+    { text: '联系邮箱：finance.dept@demo-corp.org，备用手机：+86 158-6810-4455。', mustHide: ['finance.dept@demo-corp.org', '+86 158-6810-4455'] },
+    { text: '执行案号：(2026)苏0508执5566号，执行标的120万元。', mustHide: ['(2026)苏0508执5566号'] },
+    { text: '申请人：深圳前海星辰投资合伙企业（有限合伙）申请财产保全。', mustHide: ['深圳前海星辰投资合伙企业（有限合伙）'] },
+    { text: '被申请人：广州岭南管理咨询有限公司，统一社会信用代码91440101MA59CD3422。', mustHide: ['广州岭南管理咨询有限公司', '91440101MA59CD3422'] },
+    { text: '出租方：沈国强将商铺出租给承租方：韩雪梅，租金月付。', mustHide: ['沈国强', '韩雪梅'] },
+    { text: '原告：北京京华影视文化有限公司诉被告：天津渤海信息科技有限公司。', mustHide: ['北京京华影视文化有限公司', '天津渤海信息科技有限公司'] },
+    { text: '案号（2024）京0491民初1024号判决已生效，收款卡号6228480038123456789。', mustHide: ['（2024）京0491民初1024号', '6228480038123456789'] },
+    { text: '受托人：马晓东联系邮箱ma_xd@sample.cn，手机号13512345678。', mustHide: ['马晓东', 'ma_xd@sample.cn', '13512345678'] },
+    { text: '发包人：合肥科创新材料股份有限公司拖欠承包人：武汉长江实业有限公司工程款。', mustHide: ['合肥科创新材料股份有限公司', '武汉长江实业有限公司'] },
+    { text: '保证人：冯立新，身份证号320102198206254418，承诺清偿。', mustHide: ['冯立新', '320102198206254418'] },
+    { text: '异议人：长沙湘江文化工作室不服（2025）湘0102执异301号裁定。', mustHide: ['长沙湘江文化工作室', '（2025）湘0102执异301号'] },
+    { text: '债权人：青岛海韵贸易有限公司申报债权，联系人电话13698765432。', mustHide: ['青岛海韵贸易有限公司', '13698765432'] },
+    { text: '股东：董明辉将其持有的郑州中原科技发展有限责任公司股权转让。', mustHide: ['董明辉', '郑州中原科技发展有限责任公司'] },
+    {
+      text: '内部项目代号“苍穹计划”由定制客户“星尘剧组”委托，不得外泄。',
+      customTerms: ['苍穹计划', '星尘剧组'],
+      mustHide: ['苍穹计划', '星尘剧组'],
+    },
+  ];
+
+  assert.equal(syntheticCases.length, 30);
+  let totalEntities = 0;
+  let maskedEntities = 0;
+  for (const sc of syntheticCases) {
+    const res = redactLegalText(sc.text, { customTerms: sc.customTerms || [] });
+    for (const target of sc.mustHide) {
+      totalEntities += 1;
+      if (!res.redactedText.includes(target)) maskedEntities += 1;
+    }
+    assert.equal(restoreRedactedText(res.redactedText, res.mappings), sc.text);
+  }
+  assert.ok(maskedEntities / totalEntities >= 0.95);
+});
+
 
 
 

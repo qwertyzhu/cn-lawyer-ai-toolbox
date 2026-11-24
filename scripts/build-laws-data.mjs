@@ -55,8 +55,13 @@ const companionDocs = (raw.companionDocs || []).map((doc) => ({
   })),
 }));
 
+const DATA_AS_OF = String(raw.dataAsOf || raw.updatedAt || '2026-11-24').slice(0, 10);
+const BUILT_AT = new Date().toISOString().slice(0, 10);
+
 const payload = {
-  generatedAt: new Date().toISOString().slice(0, 10),
+  dataAsOf: DATA_AS_OF,
+  builtAt: BUILT_AT,
+  generatedAt: DATA_AS_OF,
   civilCount: civilArticles.length,
   docCount: companionDocs.length,
   totalArticles:

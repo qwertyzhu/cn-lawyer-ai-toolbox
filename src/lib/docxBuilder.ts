@@ -7,6 +7,7 @@
  * Apple Pages, and LibreOffice with clean A4 two-column bordered court tables.
  */
 
+import { AI_LEGAL_DISCLAIMER } from '../data/legalDataManifest.ts';
 import type { RenderedComplaintSection } from '../data/elementsComplaintTemplates.ts';
 import type { ResolvedSpcAttachment, ResolvedSpcDocument } from './spcOfficialTemplates.ts';
 
@@ -1081,10 +1082,12 @@ export interface BuildMarkdownReportDocxInput {
   title: string;
   subtitle?: string;
   markdownBody: string;
+  /** Whether to embed the mandatory AI legal verification disclaimer (default: true for AI outputs) */
+  includeAiDisclaimer?: boolean;
 }
 
 export function buildMarkdownReportDocxBytes(input: BuildMarkdownReportDocxInput): Uint8Array {
-  const { title, subtitle, markdownBody } = input;
+  const { title, subtitle, markdownBody, includeAiDisclaimer = true } = input;
   const blocks: string[] = [
     makeParagraph(title || '法律实务文书底稿', {
       align: 'center',
@@ -1105,9 +1108,21 @@ export function buildMarkdownReportDocxBytes(input: BuildMarkdownReportDocxInput
         sizeHalfPt: 20,
         font: '仿宋',
         spaceBefore: 0,
-        spaceAfter: 160,
+        spaceAfter: includeAiDisclaimer ? 80 : 160,
         line: 280,
       })
+    );
+  }
+
+  if (includeAiDisclaimer) {
+    blocks.push(
+      `<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="4" w:color="B89254"/><w:bottom w:val="single" w:sz="4" w:space="4" w:color="B89254"/></w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="FAF6EC"/><w:spacing w:before="60" w:after="140" w:line="280" w:lineRule="auto"/></w:pPr>` +
+        makeInlineFormattedRuns(`【AI 辅助生成与法源复核提示】${AI_LEGAL_DISCLAIMER}`, {
+          sizeHalfPt: 19,
+          font: '楷体',
+          baseBold: false,
+        }) +
+        `</w:p>`
     );
   }
 

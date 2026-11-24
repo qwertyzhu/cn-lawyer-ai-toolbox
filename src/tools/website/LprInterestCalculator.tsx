@@ -12,6 +12,7 @@ import {
   Send,
 } from 'lucide-react';
 import { trackEvent } from '../../components/ToolboxBridgeLink';
+import { checkLprDateCoverage, LEGAL_DATA_MANIFEST } from '../../data/legalDataManifest';
 import { copyToClipboard } from '../../lib/clipboard';
 import { ToolQuickRefSection as ToolSeoKnowledgeSection } from '../../components/ToolQuickRefSection';
 
@@ -204,6 +205,8 @@ export const LprInterestCalculator: React.FC = () => {
       (mode === 'custom_rate' && customRate > fourTimesLatestLpr) ||
       (mode !== 'delay_only' && mode !== 'custom_rate' && LATEST_LPR.r1y * multiplier + bps / 100 > fourTimesLatestLpr);
 
+    const lprCoverage = checkLprDateCoverage(startDate, endDate);
+
     return {
       totalDays,
       segments,
@@ -214,6 +217,7 @@ export const LprInterestCalculator: React.FC = () => {
       grandTotal,
       fourTimesLatestLpr,
       exceedsPrivateLendingCap,
+      lprCoverage,
     };
   }, [
     mode,
@@ -618,6 +622,21 @@ export const LprInterestCalculator: React.FC = () => {
               </div>
             )}
 
+            {(mode === 'lpr_floating' || mode === 'lpr_fixed') && calc.lprCoverage.staleEnd && (
+              <div className="border border-amber-400 bg-amber-50 px-4 py-3 text-xs leading-6 text-amber-950">
+                <strong>LPR 数据时效核对提醒：</strong>
+                所选截止日期（{endDate}）超出本箱内置 LPR 报价核验期（截至{' '}
+                {calc.lprCoverage.verifiedThrough}，超出约 {calc.lprCoverage.gapDays} 天）。中国人民银行每月 20 日公布最新一期 LPR，超出核验期部分当前沿用最近已核验报价（1年期 {LATEST_LPR.r1y.toFixed(2)}% / 5年期 {LATEST_LPR.r5y.toFixed(2)}%），提交法庭前请核对央行最新一期公告。
+              </div>
+            )}
+
+            {(mode === 'lpr_floating' || mode === 'lpr_fixed') && calc.lprCoverage.beforeLprReform && (
+              <div className="border border-amber-300 bg-amber-50 px-4 py-3 text-xs leading-6 text-amber-950">
+                <strong>LPR 改革前分段提醒：</strong>
+                起算日期（{startDate}）早于 2019-08-20（央行 LPR 报价机制启动日）。2019-08-19 及之前的法定逾期利息在实务中通常适用央行同期同类贷款基准利率，建议分段核验或与裁判口径对齐。
+              </div>
+            )}
+
             {/* Segment Table */}
             <div className="min-w-0 border border-[#DED8CC] bg-white p-4 sm:p-6">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFECE5] pb-3">
@@ -707,7 +726,7 @@ export const LprInterestCalculator: React.FC = () => {
         <p className="mx-auto mt-6 flex max-w-4xl items-start justify-center gap-1.5 text-center text-xs leading-6 text-slate-500">
           <Info className="mt-1 h-3.5 w-3.5 flex-none text-[#B89254]" />
           <span>
-            本工具完全在本地浏览器离线计算，不上传任何金额与交易日期。已内置央行 2019 年 8 月至 2026 年 11 月历次 LPR 报价；具体案件涉及部分清偿抵扣顺序（先息后本/先本后息）或复利约定时，以生效裁判文书及法院执行核定为准。
+            本工具完全在本地浏览器离线计算，不上传任何金额与交易日期。已内置央行 2019 年 8 月至 {LEGAL_DATA_MANIFEST.lprHistory.asOf} 历次 LPR 核验报价（数据来源：{LEGAL_DATA_MANIFEST.lprHistory.source}）；具体案件涉及部分清偿抵扣顺序（先息后本/先本后息）或复利约定时，以生效裁判文书及法院执行核定为准。
           </span>
         </p>
       </div>

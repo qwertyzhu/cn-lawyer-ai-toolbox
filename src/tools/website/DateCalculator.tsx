@@ -13,6 +13,11 @@ import {
   Send,
 } from 'lucide-react';
 import { trackEvent } from '../../components/ToolboxBridgeLink';
+import {
+  CN_HOLIDAY_COVERED_MAX_YEAR,
+  CN_HOLIDAY_COVERED_MIN_YEAR,
+  isDateOutsideHolidayCoverage,
+} from '../../data/legalDataManifest';
 import { copyToClipboard } from '../../lib/clipboard';
 
 type ToolTab = 'legal' | 'workdays' | 'shift' | 'age';
@@ -574,6 +579,19 @@ export const DateCalculator: React.FC = () => {
                   )}
                 </div>
 
+                {(isDateOutsideHolidayCoverage(toIsoDate(legalCalc.rawEnd)) ||
+                  isDateOutsideHolidayCoverage(toIsoDate(legalCalc.finalEnd))) && (
+                  <div className="mt-4 rounded-[2px] border border-amber-400 bg-amber-50 p-3.5 text-xs leading-6 text-amber-950 flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 flex-none text-amber-700 mt-0.5" />
+                    <div>
+                      <strong>跨年法定节假日核对提醒：</strong>
+                      本次推算的届满日期（{toIsoDate(legalCalc.finalEnd)}）超出本箱内置的{' '}
+                      {CN_HOLIDAY_COVERED_MIN_YEAR}–{CN_HOLIDAY_COVERED_MAX_YEAR}{' '}
+                      年国务院节假日与调休表覆盖范围，当前仅按常规周六/周日顺延，尚未包含该年度法定长假与调休安排，请务必核对国务院当年正式放假通知后最终确认！
+                    </div>
+                  </div>
+                )}
+
                 {/* Holiday Extension Notice */}
                 {!preset.isCriminal37 && (
                   <div className="mt-4 border border-[#E4DFD4] bg-[#FAF9F6] p-4 text-xs leading-6 text-slate-700">
@@ -667,6 +685,15 @@ export const DateCalculator: React.FC = () => {
               </label>
             </div>
 
+            {(isDateOutsideHolidayCoverage(startA) || isDateOutsideHolidayCoverage(endA)) && (
+              <div className="mt-4 rounded-[2px] border border-amber-400 bg-amber-50 p-3.5 text-xs leading-6 text-amber-950 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 flex-none text-amber-700 mt-0.5" />
+                <div>
+                  <strong>节假日覆盖范围提醒：</strong>所选区间超出内置 {CN_HOLIDAY_COVERED_MIN_YEAR}–{CN_HOLIDAY_COVERED_MAX_YEAR} 年中国法定节假日与调休表范围，超出年份仅按双休日统计，请人工核对国务院当年放假通知。
+                </div>
+              </div>
+            )}
+
             <div className="mt-6 grid gap-4 sm:grid-cols-3">
               <div className="bg-[#11151C] p-5 text-white">
                 <p className="text-[11px] uppercase tracking-[0.16em] text-[#D1B27A]">自然日间隔</p>
@@ -753,6 +780,15 @@ export const DateCalculator: React.FC = () => {
                   : ''}
               </p>
             </div>
+            {(isDateOutsideHolidayCoverage(toIsoDate(shiftResult.target)) ||
+              isDateOutsideHolidayCoverage(toIsoDate(shiftResult.ext.finalDate))) && (
+              <div className="rounded-[2px] border border-amber-400 bg-amber-50 p-3.5 text-xs leading-6 text-amber-950 flex items-start gap-2">
+                <AlertCircle className="h-4 w-4 flex-none text-amber-700 mt-0.5" />
+                <div>
+                  <strong>跨年法定节假日提醒：</strong>推算结果超出内置 {CN_HOLIDAY_COVERED_MIN_YEAR}–{CN_HOLIDAY_COVERED_MAX_YEAR} 年节假日与调休表，当前仅按周末判断顺延，请复核当年国务院放假通知。
+                </div>
+              </div>
+            )}
           </div>
         )}
 

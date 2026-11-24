@@ -1,26 +1,64 @@
-import React, { useState } from 'react';
-import { ArrowRight, Pin, Search, WifiOff } from 'lucide-react';
+import React, { Suspense, lazy, useState } from 'react';
+import { ArrowRight, Loader2, Pin, Search, WifiOff } from 'lucide-react';
 import { ToolIcon } from '../components/ToolIcon';
 import { ToolProShell } from '../components/ToolProShell';
 import { useToolbox } from '../context/ToolboxContext';
 import { OFFLINE_TOOLS_REGISTRY, TOOL_CATEGORIES_META } from '../data/toolRegistry';
 import type { OfflineToolId, ToolCategoryCode } from '../types/toolbox';
 
-// 6 Ported & Pro-upgraded Website Tools
-import { DateCalculator } from '../tools/website/DateCalculator';
-import { EvidencePdfToolkit } from '../tools/website/EvidencePdfToolkit';
-import { InjuryCompensationCalculator } from '../tools/website/InjuryCompensationCalculator';
-import { LaborCompensationCalculator } from '../tools/website/LaborCompensationCalculator';
-import { LitigationFeeCalculator } from '../tools/website/LitigationFeeCalculator';
-import { LprInterestCalculator } from '../tools/website/LprInterestCalculator';
+const DateCalculator = lazy(() =>
+  import('../tools/website/DateCalculator').then((m) => ({ default: m.DateCalculator }))
+);
+const EvidencePdfToolkit = lazy(() =>
+  import('../tools/website/EvidencePdfToolkit').then((m) => ({ default: m.EvidencePdfToolkit }))
+);
+const InjuryCompensationCalculator = lazy(() =>
+  import('../tools/website/InjuryCompensationCalculator').then((m) => ({
+    default: m.InjuryCompensationCalculator,
+  }))
+);
+const LaborCompensationCalculator = lazy(() =>
+  import('../tools/website/LaborCompensationCalculator').then((m) => ({
+    default: m.LaborCompensationCalculator,
+  }))
+);
+const LitigationFeeCalculator = lazy(() =>
+  import('../tools/website/LitigationFeeCalculator').then((m) => ({
+    default: m.LitigationFeeCalculator,
+  }))
+);
+const LprInterestCalculator = lazy(() =>
+  import('../tools/website/LprInterestCalculator').then((m) => ({
+    default: m.LprInterestCalculator,
+  }))
+);
+const ElementsComplaintTool = lazy(() =>
+  import('../tools/extra/ElementsComplaintTool').then((m) => ({ default: m.ElementsComplaintTool }))
+);
+const LawyerFeeQuoteTool = lazy(() =>
+  import('../tools/extra/LawyerFeeQuoteTool').then((m) => ({ default: m.LawyerFeeQuoteTool }))
+);
+const LocalRedactorTool = lazy(() =>
+  import('../tools/extra/LocalRedactorTool').then((m) => ({ default: m.LocalRedactorTool }))
+);
+const MeetingScratchpadTool = lazy(() =>
+  import('../tools/extra/MeetingScratchpadTool').then((m) => ({ default: m.MeetingScratchpadTool }))
+);
+const PreservationDeadlineTool = lazy(() =>
+  import('../tools/extra/PreservationDeadlineTool').then((m) => ({
+    default: m.PreservationDeadlineTool,
+  }))
+);
+const RmbAndDebtOffsetTool = lazy(() =>
+  import('../tools/extra/RmbAndDebtOffsetTool').then((m) => ({ default: m.RmbAndDebtOffsetTool }))
+);
 
-// 6 Newly Built Extra Offline Tools
-import { ElementsComplaintTool } from '../tools/extra/ElementsComplaintTool';
-import { LawyerFeeQuoteTool } from '../tools/extra/LawyerFeeQuoteTool';
-import { LocalRedactorTool } from '../tools/extra/LocalRedactorTool';
-import { MeetingScratchpadTool } from '../tools/extra/MeetingScratchpadTool';
-import { PreservationDeadlineTool } from '../tools/extra/PreservationDeadlineTool';
-import { RmbAndDebtOffsetTool } from '../tools/extra/RmbAndDebtOffsetTool';
+const ToolLoadingFallback: React.FC = () => (
+  <div className="flex min-h-[38vh] items-center justify-center gap-2.5 text-xs font-medium text-slate-500">
+    <Loader2 className="h-4 w-4 animate-spin text-[#B89254]" />
+    <span>正在加载本地工具组件…</span>
+  </div>
+);
 
 function renderToolComponent(toolId: OfflineToolId): React.ReactNode {
   switch (toolId) {
@@ -57,7 +95,11 @@ export const ToolsTab: React.FC = () => {
   const [filterText, setFilterText] = useState('');
 
   if (activeToolId) {
-    return <ToolProShell toolId={activeToolId}>{renderToolComponent(activeToolId)}</ToolProShell>;
+    return (
+      <ToolProShell toolId={activeToolId}>
+        <Suspense fallback={<ToolLoadingFallback />}>{renderToolComponent(activeToolId)}</Suspense>
+      </ToolProShell>
+    );
   }
 
   const kw = filterText.trim().toLowerCase();

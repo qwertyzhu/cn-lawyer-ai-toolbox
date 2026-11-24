@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import {
   Award,
   BookOpen,
   Home,
+  Loader2,
   Search,
   Settings,
   Sparkles,
@@ -25,12 +26,24 @@ import {
   type VerifiedLicenseInfo,
 } from './lib/licenseEngine';
 import { resetLocalUserWorkspaceForAccountSwitch } from './lib/cloudSync';
-import { AiHubTab } from './pages/AiHubTab';
-import { HomeTab } from './pages/HomeTab';
-import { LawsAndChecklistsTab } from './pages/LawsAndChecklistsTab';
-import { SettingsTab } from './pages/SettingsTab';
-import { ToolsTab } from './pages/ToolsTab';
 import type { MainTabId } from './types/toolbox';
+
+const AiHubTab = lazy(() => import('./pages/AiHubTab').then((m) => ({ default: m.AiHubTab })));
+const HomeTab = lazy(() => import('./pages/HomeTab').then((m) => ({ default: m.HomeTab })));
+const LawsAndChecklistsTab = lazy(() =>
+  import('./pages/LawsAndChecklistsTab').then((m) => ({ default: m.LawsAndChecklistsTab }))
+);
+const SettingsTab = lazy(() =>
+  import('./pages/SettingsTab').then((m) => ({ default: m.SettingsTab }))
+);
+const ToolsTab = lazy(() => import('./pages/ToolsTab').then((m) => ({ default: m.ToolsTab })));
+
+const TabLoadingFallback: React.FC = () => (
+  <div className="flex min-h-[45vh] items-center justify-center gap-2.5 text-xs font-medium text-slate-500">
+    <Loader2 className="h-4 w-4 animate-spin text-[#B89254]" />
+    <span>正在加载模块…</span>
+  </div>
+);
 
 const NAV_ITEMS: {
   id: MainTabId;
@@ -236,19 +249,21 @@ const ToolboxShell: React.FC<{
 
         {/* Active Tab Viewport */}
         <main className="flex-1 safe-pb lg:pb-8">
-          {activeTab === 'home' && (
-            <HomeTab license={license} onOpenInstallGuide={() => setInstallOpen(true)} />
-          )}
-          {activeTab === 'tools' && <ToolsTab />}
-          {activeTab === 'ai' && <AiHubTab />}
-          {activeTab === 'laws' && <LawsAndChecklistsTab />}
-          {activeTab === 'settings' && (
-            <SettingsTab
-              license={license}
-              onOpenInstallGuide={() => setInstallOpen(true)}
-              onLicenseChanged={onLicenseChanged}
-            />
-          )}
+          <Suspense fallback={<TabLoadingFallback />}>
+            {activeTab === 'home' && (
+              <HomeTab license={license} onOpenInstallGuide={() => setInstallOpen(true)} />
+            )}
+            {activeTab === 'tools' && <ToolsTab />}
+            {activeTab === 'ai' && <AiHubTab />}
+            {activeTab === 'laws' && <LawsAndChecklistsTab />}
+            {activeTab === 'settings' && (
+              <SettingsTab
+                license={license}
+                onOpenInstallGuide={() => setInstallOpen(true)}
+                onLicenseChanged={onLicenseChanged}
+              />
+            )}
+          </Suspense>
 
           <footer className="mx-auto max-w-6xl px-4 sm:px-6 pt-4 pb-6 text-center text-[11px] text-slate-400 flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
             <span>© {new Date().getFullYear()} {SITE_CONFIG.firmName || SITE_CONFIG.appName}</span>

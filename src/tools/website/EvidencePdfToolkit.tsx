@@ -1,6 +1,11 @@
 import React, { useRef, useState } from 'react';
 import { Link } from '../../components/ToolboxBridgeLink';
-import { PDFDocument } from 'pdf-lib';
+import type { PDFDocument } from 'pdf-lib';
+
+async function loadPdfDocumentCtor() {
+  const mod = await import('pdf-lib');
+  return mod.PDFDocument;
+}
 import {
   ArrowDown,
   ArrowLeft,
@@ -334,7 +339,8 @@ export const EvidencePdfToolkit: React.FC = () => {
       if (isPdf) {
         try {
           const buf = await file.arrayBuffer();
-          const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+          const PdfDoc = await loadPdfDocumentCtor();
+          const doc = await PdfDoc.load(buf, { ignoreEncryption: true });
           pages = doc.getPageCount();
         } catch {
           setErrorMsg(`无法读取加密或损坏的 PDF：${file.name}`);
@@ -368,7 +374,8 @@ export const EvidencePdfToolkit: React.FC = () => {
     maxMb: number
   ): Promise<{ volumes: number; totalPages: number; maxVolBytes: number }> => {
     const maxBytes = maxMb * 1024 * 1024;
-    const src = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+    const PdfDoc = await loadPdfDocumentCtor();
+    const src = await PdfDoc.load(pdfBytes, { ignoreEncryption: true });
     const totalPages = src.getPageCount();
     const avgPerPage = Math.max(20 * 1024, pdfBytes.byteLength / Math.max(1, totalPages));
 
@@ -383,7 +390,7 @@ export const EvidencePdfToolkit: React.FC = () => {
 
       while (true) {
         setStatusMsg(`正在按 ${maxMb}MB 分卷：生成第 ${volIndex} 卷（第 ${cursor + 1}–${cursor + take} 页）…`);
-        const subDoc = await PDFDocument.create();
+        const subDoc = await PdfDoc.create();
         const pageIndices = Array.from({ length: take }, (_, idx) => cursor + idx);
         const copied = await subDoc.copyPages(src, pageIndices);
         copied.forEach((p) => subDoc.addPage(p));
@@ -416,13 +423,14 @@ export const EvidencePdfToolkit: React.FC = () => {
     setStatusMsg('正在本地浏览器合并卷宗与压缩图片...');
     setLastOutputInfo(null);
     try {
-      const outDoc = await PDFDocument.create();
+      const PdfDoc = await loadPdfDocumentCtor();
+      const outDoc = await PdfDoc.create();
       for (let i = 0; i < queue.length; i++) {
         const item = queue[i];
         setStatusMsg(`正在处理 (${i + 1}/${queue.length})：${item.file.name}`);
         if (item.kind === 'pdf') {
           const buf = await item.file.arrayBuffer();
-          const src = await PDFDocument.load(buf, { ignoreEncryption: true });
+          const src = await PdfDoc.load(buf, { ignoreEncryption: true });
           const copiedPages = await outDoc.copyPages(src, src.getPageIndices());
           copiedPages.forEach((p) => outDoc.addPage(p));
         } else {
@@ -488,7 +496,8 @@ export const EvidencePdfToolkit: React.FC = () => {
     setErrorMsg('');
     try {
       const buf = await file.arrayBuffer();
-      const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+      const PdfDoc = await loadPdfDocumentCtor();
+      const doc = await PdfDoc.load(buf, { ignoreEncryption: true });
       const info = { file, pages: doc.getPageCount() };
       if (target === 'stamp') setStampFile(info);
       else {
@@ -514,7 +523,8 @@ export const EvidencePdfToolkit: React.FC = () => {
     setStatusMsg('正在本地加载思源开源字体并叠加页码/水印...');
     try {
       const buf = await stampFile.file.arrayBuffer();
-      const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+      const PdfDoc = await loadPdfDocumentCtor();
+      const doc = await PdfDoc.load(buf, { ignoreEncryption: true });
       await applyOverlays(doc, { pageNum: enablePageNum, watermark: enableWatermark });
       const outBytes = await doc.save({ useObjectStreams: true });
       const base = stampFile.file.name.replace(/\.pdf$/i, '');
@@ -546,8 +556,9 @@ export const EvidencePdfToolkit: React.FC = () => {
     setStatusMsg(`正在本地提取 ${indices.length} 页证据...`);
     try {
       const buf = await splitFile.file.arrayBuffer();
-      const src = await PDFDocument.load(buf, { ignoreEncryption: true });
-      const outDoc = await PDFDocument.create();
+      const PdfDoc = await loadPdfDocumentCtor();
+      const src = await PdfDoc.load(buf, { ignoreEncryption: true });
+      const outDoc = await PdfDoc.create();
       const copied = await outDoc.copyPages(src, indices);
       copied.forEach((p) => outDoc.addPage(p));
       const outBytes = await outDoc.save({ useObjectStreams: true });

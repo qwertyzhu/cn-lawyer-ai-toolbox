@@ -152,7 +152,7 @@ export function redactLegalText(input: string, options?: RedactOptions): Redacti
       /[\u4e00-\u9fa5]{2,26}(?:有限责任公司|股份有限公司|集团有限公司|影视文化有限公司|文化传媒有限公司|网络科技有限公司|科技有限公司|信息科技有限公司|电子商务有限公司|实业有限公司|贸易有限公司|建筑工程有限公司|建设集团有限公司|物业服务有限公司|管理咨询有限公司|投资合伙企业（有限合伙）|创业投资合伙企业（有限合伙）|合伙企业（有限合伙）|有限合伙企业|有限公司|影视工作室|文化工作室)(?:[\u4e00-\u9fa5]{2,8}分公司)?/g;
     // Boundary phrases that commonly appear immediately before a company name in legal prose
     const boundarySplitRe =
-      /.*?(?:被上诉人|上诉人|被申请人|申请人|被执行人|申请执行人|原告|被告|第三人|法定代表人|委托人|受托人|出租方|承租方|发包人|承包人|出借人|借款人|保证人|担保人|甲方|乙方|丙方|未向|已向|向|与|和|及|诉|系|为|对|将|把|由|在|经|因|就|关于|针对|要求|请求|通知|委托|授权|支付|赔偿|起诉|告知)/;
+      /.*?(?:被上诉人|上诉人|被申请人|申请人|被执行人|申请执行人|原告|被告|第三人|法定代表人|委托人|受托人|出租方|承租方|发包人|承包人|出借人|借款人|保证人|担保人|甲方|乙方|丙方|其持有的|持有的|名下的|旗下的|所属的|未向|已向|向|与|和|及|诉|系|为|对|将|把|由|在|经|因|就|关于|针对|要求|请求|通知|委托|授权|支付|赔偿|起诉|告知)/;
 
     for (const m of input.matchAll(compRe)) {
       let cleaned = m[0];
@@ -182,10 +182,17 @@ export function redactLegalText(input: string, options?: RedactOptions): Redacti
 
   // 8. Context-triggered Chinese Personal Names
   if (opts.redactNames) {
-    const roleNameRe =
-      /(?:原告|被告|上诉人|被上诉人|申请人|被申请人|被执行人|申请执行人|第三人|法定代表人|委托人|甲方|乙方|丙方|借款人|出借人|保证人|担保人|犯罪嫌疑人|被告人|被害人|证人|员工|劳动者|联系人|收款人|户名)(?:（[^）]{1,10}）)?[：:\s、，]*([\u4e00-\u9fa5]{2,4})(?=[，,。；;：:（(\s、]|$)/g;
-    for (const m of input.matchAll(roleNameRe)) {
-      const name = m[1];
+    const roleList =
+      '原告|被告|上诉人|被上诉人|申请人|被申请人|被执行人|申请执行人|第三人|法定代表人|委托人|受托人|出租方|承租方|发包人|承包人|甲方|乙方|丙方|借款人|出借人|保证人|担保人|犯罪嫌疑人|被告人|被害人|证人|员工|劳动者|联系人|收款人|户名|股东|异议人|债权人|债务人';
+    const roleNamePunctRe = new RegExp(
+      `(?:${roleList})(?:（[^）]{1,10}）)?[：:\\s、，]*([\\u4e00-\\u9fa5]{2,4})(?=[，,。；;：:（(\\s、]|$)`,
+      'g'
+    );
+    const roleNameClauseRe = new RegExp(
+      `(?:${roleList})(?:（[^）]{1,10}）)?[：:\\s]+([\\u4e00-\\u9fa5]{2,3}?)(?=于|在|向|将|把|对|与|和|系|为|因|经|未|已|涉嫌|报案|提供|联系|借款|拖欠|承诺|持有|任职|签署|起诉|诉|被|称)`,
+      'g'
+    );
+    const tryRegisterName = (name: string | undefined) => {
       if (
         name &&
         !ROLE_STOPWORDS.has(name) &&
@@ -194,6 +201,12 @@ export function redactLegalText(input: string, options?: RedactOptions): Redacti
       ) {
         register(name, 'name', 65);
       }
+    };
+    for (const m of input.matchAll(roleNamePunctRe)) {
+      tryRegisterName(m[1]);
+    }
+    for (const m of input.matchAll(roleNameClauseRe)) {
+      tryRegisterName(m[1]);
     }
   }
 

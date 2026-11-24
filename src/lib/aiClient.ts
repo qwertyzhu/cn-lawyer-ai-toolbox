@@ -362,10 +362,19 @@ async function performRequest(
   });
 }
 
+export class AiDirectConnectError extends Error {
+  readonly code = 'AI_DIRECT_CORS_FAILED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiDirectConnectError';
+  }
+}
+
 export async function streamAiCompletion(opts: StreamOptions): Promise<{
   content: string;
   reasoning: string;
   usedModel: string;
+  usedRelay: boolean;
 }> {
   const { provider, modelSlot, messages, temperature = 0.25, signal, onChunk } = opts;
   const apiKey = provider.apiKey?.trim();
@@ -395,20 +404,22 @@ export async function streamAiCompletion(opts: StreamOptions): Promise<{
         };
 
   const bodyStr = JSON.stringify(payload);
+  const allowRelay = Boolean(provider.useCorsRelayFallback);
   let res: Response;
 
   try {
-    res = await performRequest(endpoint, headers, bodyStr, Boolean(provider.useCorsRelayFallback), signal);
+    res = await performRequest(endpoint, headers, bodyStr, allowRelay, signal);
   } catch (err) {
     if (signal?.aborted) throw new Error('已手动停止生成');
-    // Automatic stateless CORS relay fallback if browser direct fetch hits CORS block
-    try {
-      res = await performRequest(endpoint, headers, bodyStr, true, signal);
-    } catch {
-      throw new Error(
-        `无法连接大模型接口（${err instanceof Error ? err.message : '网络或跨域受限'}）。请检查手机网络、Base URL 或 API Key。`
+    // S-2: Strictly forbid silent fallback to /api/ai-relay unless explicitly enabled by user
+    if (!allowRelay) {
+      throw new AiDirectConnectError(
+        `浏览器直连该大模型接口失败（${err instanceof Error ? err.message : '网络或跨域受限'}）。因您未开启「跨域转发兜底」，系统严禁静默改走服务器转发；如该自定义中转站不支持浏览器直连，请前往「我的配置」手动勾选启用中转兜底后再试。`
       );
     }
+    throw new Error(
+      `经服务器无状态中转连接大模型接口失败（${err instanceof Error ? err.message : '网络异常'}）。请检查网络、Base URL 或 API Key。`
+    );
   }
 
   if (!res.ok) {
@@ -431,7 +442,7 @@ export async function streamAiCompletion(opts: StreamOptions): Promise<{
       json?.content?.[0]?.text ||
       '';
     onChunk(content);
-    return { content, reasoning: '', usedModel };
+    return { content, reasoning: '', usedModel, usedRelay: allowRelay };
   }
 
   const reader = res.body.getReader();
@@ -483,7 +494,7 @@ export async function streamAiCompletion(opts: StreamOptions): Promise<{
     }
   }
 
-  return { content: fullContent, reasoning: fullReasoning, usedModel };
+  return { content: fullContent, reasoning: fullReasoning, usedModel, usedRelay: allowRelay };
 }
 
 export async function fetchAvailableModels(provider: AiProviderConfig): Promise<string[]> {
@@ -507,25 +518,19 @@ export async function fetchAvailableModels(provider: AiProviderConfig): Promise<
           Authorization: `Bearer ${apiKey}`,
         };
 
+  const allowRelay = Boolean(provider.useCorsRelayFallback);
   let lastErr = '该接口未返回模型列表';
+  let sawDirectConnectErr = false;
   for (const endpoint of candidates) {
     let res: Response | null = null;
     try {
-      res = await performRequest(
-        endpoint,
-        headers,
-        '',
-        Boolean(provider.useCorsRelayFallback),
-        undefined,
-        'GET'
-      );
+      res = await performRequest(endpoint, headers, '', allowRelay, undefined, 'GET');
     } catch (err) {
-      try {
-        res = await performRequest(endpoint, headers, '', true, undefined, 'GET');
-      } catch {
-        lastErr = err instanceof Error ? err.message : '网络或跨域受限';
-        continue;
+      if (!allowRelay) {
+        sawDirectConnectErr = true;
       }
+      lastErr = err instanceof Error ? err.message : '网络或跨域受限';
+      continue;
     }
 
     if (!res.ok) {
@@ -543,6 +548,11 @@ export async function fetchAvailableModels(provider: AiProviderConfig): Promise<
     lastErr = '接口响应成功但返回模型列表为空（部分中转站不支持 /models，可直接手动填写模型名）';
   }
 
+  if (sawDirectConnectErr && !allowRelay) {
+    throw new AiDirectConnectError(
+      `浏览器直连拉取模型列表失败（${lastErr}）。因未开启「跨域转发兜底」，系统严禁静默走服务器中转；如需中转拉取，请先手动勾选「启用跨域转发兜底」后再试。`
+    );
+  }
   throw new Error(lastErr);
 }
 

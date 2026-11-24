@@ -16,6 +16,7 @@ import {
 import { ImaCloudLibraryPanel } from '../components/ImaCloudLibraryPanel';
 import { useToolbox } from '../context/ToolboxContext';
 import { PRACTICE_CHECKLISTS } from '../data/checklists';
+import { LEGAL_DATA_MANIFEST } from '../data/legalDataManifest';
 import { copyToClipboard } from '../lib/clipboard';
 import type { ChecklistInstance } from '../types/toolbox';
 
@@ -51,6 +52,9 @@ interface CompanionDocItem {
 }
 
 interface LawsCorpusPayload {
+  dataAsOf?: string;
+  builtAt?: string;
+  generatedAt?: string;
   civilCount: number;
   docCount: number;
   totalArticles: number;
@@ -419,7 +423,8 @@ export const LawsAndChecklistsTab: React.FC = () => {
                 法庭 / 看守所无信号离线秒查（民法典 + 著作权法 + 民诉法 + 25部核心司解）
               </span>
               <span className="flex-none whitespace-nowrap inline-flex items-center gap-1 rounded-full bg-emerald-950/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-900">
-                <WifiOff className="h-3 w-3 text-emerald-700" /> 离线就绪
+                <WifiOff className="h-3 w-3 text-emerald-700" /> 离线就绪 · 语料截至{' '}
+                {corpus?.dataAsOf || LEGAL_DATA_MANIFEST.lawsOffline.asOf}
               </span>
             </div>
 

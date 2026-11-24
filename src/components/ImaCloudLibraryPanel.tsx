@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { SITE_CONFIG } from '../config/siteConfig';
 import { useToolbox } from '../context/ToolboxContext';
+import { AI_LEGAL_DISCLAIMER } from '../data/legalDataManifest';
 import { streamAiCompletion } from '../lib/aiClient';
 import { copyToClipboard } from '../lib/clipboard';
 import { decryptWithPassphrase } from '../lib/cryptoVault';
@@ -201,6 +202,8 @@ export const ImaCloudLibraryPanel: React.FC<{
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewDoc, setPreviewDoc] = useState<ExtractedDocResult | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [pdfTicketUrl, setPdfTicketUrl] = useState<string>('');
+  const [pdfTicketLoading, setPdfTicketLoading] = useState(false);
   const [inDocFilter, setInDocFilter] = useState('');
   const [copiedDoc, setCopiedDoc] = useState(false);
   const previewCardRef = useRef<HTMLDivElement | null>(null);
@@ -351,15 +354,88 @@ export const ImaCloudLibraryPanel: React.FC<{
     }
   }, [isOnline, imaApiReady, initialQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const buildFileUrl = (item: ImaEntryItem, download = false) => {
-    const qs = new URLSearchParams({
-      itemKey: item.itemKey,
-      name: item.title,
-      lic: getLicenseToken(),
-      ...(download ? { download: '1' } : {}),
-    });
-    return `/api/ima/file?${qs.toString()}`;
-  };
+  // S-4: Request a short-lived (60s) opaque ticket via POST header auth instead of putting ?lic= in URLs
+  const requestFileTicketUrl = useCallback(
+    async (item: ImaEntryItem, download = false): Promise<string> => {
+      const resp = await fetch('/api/ima/file-ticket', {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          itemKey: item.itemKey,
+          name: item.title,
+          download,
+        }),
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.ok || !data?.url) {
+        throw new Error(data?.error || `获取临时文件凭据失败 (${resp.status})`);
+      }
+      return String(data.url);
+    },
+    [authHeaders]
+  );
+
+  const handleDownloadOriginal = useCallback(
+    async (item: ImaEntryItem) => {
+      try {
+        const ticketUrl = await requestFileTicketUrl(item, true);
+        const a = document.createElement('a');
+        a.href = ticketUrl;
+        a.download = item.title;
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : '下载原件失败，请稍后重试');
+      }
+    },
+    [requestFileTicketUrl, showToast]
+  );
+
+  const handleOpenPdfNewTab = useCallback(
+    async (item: ImaEntryItem) => {
+      const win = window.open('about:blank', '_blank', 'noopener,noreferrer');
+      try {
+        const ticketUrl = await requestFileTicketUrl(item, false);
+        if (win) {
+          win.location.href = ticketUrl;
+        } else {
+          window.open(ticketUrl, '_blank', 'noopener,noreferrer');
+        }
+      } catch (err) {
+        if (win) win.close();
+        showToast(err instanceof Error ? err.message : '无法打开 PDF 预览，请稍后重试');
+      }
+    },
+    [requestFileTicketUrl, showToast]
+  );
+
+  useEffect(() => {
+    if (!previewItem || previewItem.kind !== 'pdf' || previewView !== 'pdf') {
+      setPdfTicketUrl('');
+      setPdfTicketLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPdfTicketLoading(true);
+    setPdfTicketUrl('');
+    requestFileTicketUrl(previewItem, false)
+      .then((url) => {
+        if (!cancelled) setPdfTicketUrl(url);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPreviewError(err instanceof Error ? err.message : '获取原版 PDF 临时凭据失败');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPdfTicketLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [previewItem, previewView, requestFileTicketUrl]);
 
   const extractSingleDoc = useCallback(
     async (item: ImaEntryItem, maxChars = 36000): Promise<ExtractedDocResult> => {
@@ -1033,6 +1109,9 @@ export const ImaCloudLibraryPanel: React.FC<{
               <div className="p-4 sm:p-5 whitespace-pre-wrap text-xs sm:text-[14px] leading-7 text-[#14181F]">
                 {qaAnswer}
               </div>
+              <div className="border-t border-[#EFECE5] bg-[#FAF7F0] px-4 py-2 text-[11px] text-[#7A5922]">
+                {AI_LEGAL_DISCLAIMER}
+              </div>
             </div>
           )}
 
@@ -1410,12 +1489,13 @@ export const ImaCloudLibraryPanel: React.FC<{
                 </>
               )}
 
-              <a
-                href={buildFileUrl(previewItem, true)}
-                className="inline-flex items-center gap-1 rounded border border-white/25 bg-white/10 px-2.5 py-1.5 text-xs font-semibold text-white"
+              <button
+                type="button"
+                onClick={() => handleDownloadOriginal(previewItem)}
+                className="inline-flex items-center gap-1 rounded border border-white/25 bg-white/10 hover:bg-white/20 px-2.5 py-1.5 text-xs font-semibold text-white"
               >
                 <Download className="h-3.5 w-3.5" /> 下载原件
-              </a>
+              </button>
 
               <button
                 type="button"
@@ -1455,14 +1535,13 @@ export const ImaCloudLibraryPanel: React.FC<{
                   >
                     原版 PDF 排版
                   </button>
-                  <a
-                    href={buildFileUrl(previewItem, false)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 rounded-md border border-[#DED8CC] bg-white px-2.5 py-1 text-xs font-semibold text-[#0E223D]"
+                  <button
+                    type="button"
+                    onClick={() => handleOpenPdfNewTab(previewItem)}
+                    className="inline-flex items-center gap-1 rounded-md border border-[#DED8CC] bg-white hover:border-[#0E223D] px-2.5 py-1 text-xs font-semibold text-[#0E223D]"
                   >
                     <ExternalLink className="h-3 w-3" /> 新窗全屏
-                  </a>
+                  </button>
                 </>
               )}
             </div>
@@ -1490,6 +1569,7 @@ export const ImaCloudLibraryPanel: React.FC<{
                         title: previewItem.title.replace(/\.[^.]+$/, ''),
                         subtitle: '来源：公开 IMA《法律法规案例库》正文提取版',
                         markdownBody: previewDoc.text,
+                        includeAiDisclaimer: false,
                       },
                       `${previewItem.title.replace(/\.[^.]+$/, '')}_可编辑版.docx`
                     );
@@ -1506,11 +1586,18 @@ export const ImaCloudLibraryPanel: React.FC<{
           <div className="p-4 bg-[#FAF9F6]">
             {previewView === 'pdf' && previewItem.kind === 'pdf' ? (
               <div className="space-y-2">
-                <iframe
-                  title={previewItem.title}
-                  src={buildFileUrl(previewItem, false)}
-                  className="w-full h-[62vh] rounded border border-[#DED8CC] bg-white"
-                />
+                {pdfTicketLoading || !pdfTicketUrl ? (
+                  <div className="py-12 text-center text-xs text-slate-500 flex items-center justify-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin text-[#0E223D]" />
+                    正在签发 60 秒一次性 PDF 阅读凭据…
+                  </div>
+                ) : (
+                  <iframe
+                    title={previewItem.title}
+                    src={pdfTicketUrl}
+                    className="w-full h-[62vh] rounded border border-[#DED8CC] bg-white"
+                  />
+                )}
                 <p className="text-[11px] text-slate-500 text-center">
                   微信或手机端如遇 PDF 缩放不便，可切换上方「纯净文字版」流畅阅读，或点「下载原件」。
                 </p>
@@ -1533,12 +1620,13 @@ export const ImaCloudLibraryPanel: React.FC<{
                       查看原版 PDF
                     </button>
                   )}
-                  <a
-                    href={buildFileUrl(previewItem, true)}
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadOriginal(previewItem)}
                     className="rounded border border-amber-400 bg-white px-3 py-1.5 text-xs font-semibold text-amber-950"
                   >
                     下载原件
-                  </a>
+                  </button>
                 </div>
               </div>
             ) : previewDoc?.isScannedPdf ? (

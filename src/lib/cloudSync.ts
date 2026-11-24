@@ -20,6 +20,8 @@ export interface CloudSyncPrefs {
   enabled: boolean;
   syncByok: boolean;
   syncWorkspace: boolean;
+  /** Strictly OFF by default: meeting scratchpads & calculation history stay device-local unless explicitly opted in */
+  syncSensitiveNotes: boolean;
   useE2eePassphrase: boolean;
 }
 
@@ -79,6 +81,7 @@ export const DEFAULT_CLOUD_SYNC_PREFS: CloudSyncPrefs = {
   enabled: true,
   syncByok: true,
   syncWorkspace: true,
+  syncSensitiveNotes: false,
   useE2eePassphrase: false,
 };
 
@@ -91,6 +94,7 @@ export function getCloudSyncPrefs(): CloudSyncPrefs {
       enabled: parsed.enabled !== false,
       syncByok: parsed.syncByok !== false,
       syncWorkspace: parsed.syncWorkspace !== false,
+      syncSensitiveNotes: parsed.syncSensitiveNotes === true,
       useE2eePassphrase: Boolean(parsed.useE2eePassphrase),
     };
   } catch {
@@ -202,8 +206,8 @@ export function buildLocalSyncSnapshot(prefs: CloudSyncPrefs): CloudSyncSnapshot
       starredLaws: toolboxStorage.getStarredLaws(),
       deadlines: toolboxStorage.getDeadlines(),
       checklists: toolboxStorage.getChecklists(),
-      scratchpads: toolboxStorage.getScratchpads(),
-      history: toolboxStorage.getHistory(),
+      scratchpads: prefs.syncSensitiveNotes ? toolboxStorage.getScratchpads() : [],
+      history: prefs.syncSensitiveNotes ? toolboxStorage.getHistory() : [],
       lawyerProfile: toolboxStorage.getLawyerProfile(),
       savedPrompts: toolboxStorage.getSavedPrompts(),
       feeSheetRaw,
@@ -241,10 +245,10 @@ export function applyCloudSyncSnapshot(
     if (Array.isArray(ws.checklists)) {
       toolboxStorage.saveChecklists(ws.checklists);
     }
-    if (Array.isArray(ws.scratchpads)) {
+    if (prefs.syncSensitiveNotes && Array.isArray(ws.scratchpads)) {
       toolboxStorage.saveScratchpads(ws.scratchpads);
     }
-    if (Array.isArray(ws.history)) {
+    if (prefs.syncSensitiveNotes && Array.isArray(ws.history)) {
       try {
         localStorage.setItem('cn_lawyer_box_calc_history_v1', JSON.stringify(ws.history.slice(0, 40)));
       } catch {

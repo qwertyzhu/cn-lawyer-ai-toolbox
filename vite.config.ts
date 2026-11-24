@@ -6,11 +6,10 @@ export default defineConfig({
   plugins: [react()],
   build: {
     target: 'es2022',
-    chunkSizeWarningLimit: 1200,
     rollupOptions: {
       output: {
         manualChunks: {
-          'vendor-react': ['react', 'react-dom', 'react-router-dom'],
+          'vendor-react': ['react', 'react-dom'],
           'vendor-pdf': ['pdf-lib'],
           'vendor-icons': ['lucide-react'],
         },

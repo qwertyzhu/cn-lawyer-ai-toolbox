@@ -40,8 +40,14 @@ import {
 import { useToolbox } from '../context/ToolboxContext';
 import { ImageRedactModal } from '../components/ImageRedactModal';
 import { LegalMarkdownView } from '../components/LegalMarkdownView';
+import { AI_LEGAL_DISCLAIMER } from '../data/legalDataManifest';
 import { AI_SPECIALISTS_REGISTRY } from '../data/toolRegistry';
-import { resolveVisionModel, streamAiCompletion, type ChatTurn } from '../lib/aiClient';
+import {
+  AiDirectConnectError,
+  resolveVisionModel,
+  streamAiCompletion,
+  type ChatTurn,
+} from '../lib/aiClient';
 import { copyToClipboard } from '../lib/clipboard';
 import { decryptWithPassphrase } from '../lib/cryptoVault';
 import { downloadMarkdownReportDocx } from '../lib/docxBuilder';
@@ -126,6 +132,31 @@ function stripMarkdownForWechat(text: string): string {
     .trim();
 }
 
+interface PendingOutboundPreview {
+  isFollowUp: boolean;
+  effectiveText: string;
+  outboundCustomNote: string;
+  attachedImgs: AiImageAttachment[];
+}
+
+function renderHighlightedOutboundPreview(text: string): React.ReactNode {
+  const parts = text.split(
+    /(\[(?:当事人|公司主体|身份证号|统一信用代码|银行账号|联系电话|电子邮箱|关联案号|详细地址|涉密主体)[^\]]{0,16}\])/g
+  );
+  return parts.map((part, idx) =>
+    idx % 2 === 1 ? (
+      <mark
+        key={idx}
+        className="mx-0.5 rounded bg-emerald-100 border border-emerald-300/80 px-1 py-0.5 font-semibold text-emerald-950"
+      >
+        {part}
+      </mark>
+    ) : (
+      <React.Fragment key={idx}>{part}</React.Fragment>
+    )
+  );
+}
+
 export const AiHubTab: React.FC = () => {
   const {
     isOnline,
@@ -167,11 +198,17 @@ export const AiHubTab: React.FC = () => {
   const [streamingReasoning, setStreamingReasoning] = useState('');
   const [expandedReasoningIds, setExpandedReasoningIds] = useState<Record<string, boolean>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [isCorsDirectError, setIsCorsDirectError] = useState(false);
   const [usedModelName, setUsedModelName] = useState('');
 
   const [sessionMappings, setSessionMappings] = useState<RedactionMapping[]>([]);
   const [autoRestoreView, setAutoRestoreView] = useState(true);
   const [formattedView, setFormattedView] = useState(true);
+  const [skipPreviewThisSession, setSkipPreviewThisSession] = useState(false);
+  const [customSensitiveTerms, setCustomSensitiveTerms] = useState<string[]>([]);
+  const [customTermDraft, setCustomTermDraft] = useState('');
+  const [pendingPreview, setPendingPreview] = useState<PendingOutboundPreview | null>(null);
+  const [confirmDisableRedactOpen, setConfirmDisableRedactOpen] = useState(false);
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [uiTurns, setUiTurns] = useState<UiConversationTurn[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -375,27 +412,16 @@ export const AiHubTab: React.FC = () => {
     throw new Error('尚未配置大模型 API Key，请点击前往「我的配置」填入个人密钥');
   };
 
-  const runGeneration = async (isFollowUp = false, overridePrompt?: string) => {
-    if (!isOnline) {
-      setErrorMsg('当前设备处于离线状态，AI 功能需要联网调用第三方大模型接口。');
-      return;
-    }
-
-    const rawText = (overridePrompt !== undefined ? overridePrompt : isFollowUp ? followUpInput : inputText).trim();
-    const attachedImgs = isFollowUp ? [...followUpImages] : [...inputImages];
-
-    if (!rawText && attachedImgs.length === 0) {
-      showToast('请先输入案件文字、导入 .docx 文档或上传截图');
-      return;
-    }
-
-    const effectiveText =
-      rawText ||
-      (isFollowUp
-        ? '请结合我刚刚补充上传的截图内容，更新并完善上一轮的法律分析与改稿建议。'
-        : '请先完整识别上方截图中的关键文字、主体、时间与金额信息，并严格按照当前专席要求输出专业法律分析。');
-
+  const executeGeneration = async (params: {
+    isFollowUp: boolean;
+    effectiveText: string;
+    outboundCustomNote: string;
+    attachedImgs: AiImageAttachment[];
+  }) => {
+    const { isFollowUp, effectiveText, outboundCustomNote: rawCustomNote, attachedImgs } = params;
     setErrorMsg(null);
+    setIsCorsDirectError(false);
+
     let resolvedKey = '';
     try {
       resolvedKey = await resolveApiKeyWithVault();
@@ -406,19 +432,21 @@ export const AiHubTab: React.FC = () => {
 
     // Apply automatic local redaction with incremental placeholder continuation across turns!
     let outboundText = effectiveText;
-    let outboundCustomNote = customSceneNote.trim();
+    let outboundCustomNote = rawCustomNote;
     const baseMappings = isFollowUp || uiTurns.length === 0 ? sessionMappings : [];
     let nextMappings = [...baseMappings];
 
     if (byok.autoRedactPrompt) {
       const red = redactLegalText(effectiveText, {
         existingMappings: baseMappings,
+        customTerms: customSensitiveTerms,
       });
       outboundText = red.redactedText;
       nextMappings = red.mappings;
       if (!isFollowUp && outboundCustomNote) {
         const noteRed = redactLegalText(outboundCustomNote, {
           existingMappings: nextMappings,
+          customTerms: customSensitiveTerms,
         });
         outboundCustomNote = noteRed.redactedText;
         nextMappings = noteRed.mappings;
@@ -496,6 +524,7 @@ export const AiHubTab: React.FC = () => {
       setStreamingUserText('');
       setStreamingUserImages([]);
     } catch (err) {
+      setIsCorsDirectError(err instanceof AiDirectConnectError);
       setErrorMsg(err instanceof Error ? err.message : '生成中断');
       if (isFollowUp && attachedImgs.length > 0) {
         setFollowUpImages(attachedImgs);
@@ -505,6 +534,70 @@ export const AiHubTab: React.FC = () => {
       abortRef.current = null;
     }
   };
+
+  const runGeneration = async (isFollowUp = false, overridePrompt?: string) => {
+    if (!isOnline) {
+      setErrorMsg('当前设备处于离线状态，AI 功能需要联网调用第三方大模型接口。');
+      return;
+    }
+
+    const rawText = (overridePrompt !== undefined ? overridePrompt : isFollowUp ? followUpInput : inputText).trim();
+    const attachedImgs = isFollowUp ? [...followUpImages] : [...inputImages];
+
+    if (!rawText && attachedImgs.length === 0) {
+      showToast('请先输入案件文字、导入 .docx 文档或上传截图');
+      return;
+    }
+
+    const effectiveText =
+      rawText ||
+      (isFollowUp
+        ? '请结合我刚刚补充上传的截图内容，更新并完善上一轮的法律分析与改稿建议。'
+        : '请先完整识别上方截图中的关键文字、主体、时间与金额信息，并严格按照当前专席要求输出专业法律分析。');
+
+    const pendingPayload: PendingOutboundPreview = {
+      isFollowUp,
+      effectiveText,
+      outboundCustomNote: isFollowUp ? '' : customSceneNote.trim(),
+      attachedImgs,
+    };
+
+    // L-2: Show Outbound Redaction Preview before leaving device unless opted out for this session
+    if (byok.autoRedactPrompt && !skipPreviewThisSession) {
+      setPendingPreview(pendingPayload);
+      return;
+    }
+
+    await executeGeneration(pendingPayload);
+  };
+
+  const livePreviewResult = useMemo(() => {
+    if (!pendingPreview) return null;
+    const baseMappings =
+      pendingPreview.isFollowUp || uiTurns.length === 0 ? sessionMappings : [];
+    const textRed = redactLegalText(pendingPreview.effectiveText, {
+      existingMappings: baseMappings,
+      customTerms: customSensitiveTerms,
+    });
+    let noteText = pendingPreview.outboundCustomNote;
+    let totalReplaced = textRed.totalReplaced;
+    let mergedMappings = textRed.mappings;
+    if (!pendingPreview.isFollowUp && noteText) {
+      const noteRed = redactLegalText(noteText, {
+        existingMappings: mergedMappings,
+        customTerms: customSensitiveTerms,
+      });
+      noteText = noteRed.redactedText;
+      totalReplaced += noteRed.totalReplaced;
+      mergedMappings = noteRed.mappings;
+    }
+    return {
+      redactedText: textRed.redactedText,
+      redactedNote: noteText,
+      totalReplaced,
+      mappings: mergedMappings,
+    };
+  }, [pendingPreview, uiTurns.length, sessionMappings, customSensitiveTerms]);
 
   const undoLastRound = () => {
     if (streaming || uiTurns.length <= 1) return;
@@ -587,6 +680,14 @@ export const AiHubTab: React.FC = () => {
             }`}
           />
           <span className="font-semibold text-[#0E223D] max-w-[130px] truncate">{providerShortName}</span>
+          {activeProvider?.useCorsRelayFallback && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-amber-100 border border-amber-300/80 px-2 py-0.5 text-[10px] font-bold text-amber-900"
+              title="您已在配置中显式开启服务器无状态转发；默认直连模式下请求不经过站点服务器"
+            >
+              经服务器转发
+            </span>
+          )}
           {resolvedVisionModel && (
             <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-[#F5F0E4] px-2 py-0.5 text-[10px] font-medium text-[#7D5E29]">
               <Eye className="h-2.5 w-2.5" /> 识图就绪
@@ -621,7 +722,7 @@ export const AiHubTab: React.FC = () => {
                 首次使用请配置您个人的大模型 API Key（BYOK 自带密钥）
               </div>
               <p className="mt-0.5 text-xs text-slate-300 leading-5">
-                支持 DeepSeek、阿里云百炼、硅基流动、Kimi、智谱等，密钥仅加密保存于本机浏览器，零额外平台费。
+                支持 DeepSeek、阿里云百炼、硅基流动、Kimi、智谱等，密钥仅加密保存于您本机或个人同步槽位，零额外平台费。
               </p>
             </div>
           </div>
@@ -778,11 +879,18 @@ export const AiHubTab: React.FC = () => {
                 type="button"
                 role="switch"
                 aria-checked={byok.autoRedactPrompt}
-                onClick={() => updateByok({ ...byok, autoRedactPrompt: !byok.autoRedactPrompt })}
+                onClick={() => {
+                  if (byok.autoRedactPrompt) {
+                    setConfirmDisableRedactOpen(true);
+                  } else {
+                    updateByok({ ...byok, autoRedactPrompt: true });
+                    showToast('已开启本地自动脱敏与发送前出站预览');
+                  }
+                }}
                 className={`inline-flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
                   byok.autoRedactPrompt
                     ? 'bg-emerald-50/90 text-emerald-900 border border-emerald-200/80'
-                    : 'bg-white/70 text-slate-500 border border-[#E3DCC9]'
+                    : 'bg-amber-50/90 text-amber-900 border border-amber-300'
                 }`}
               >
                 <ShieldCheck
@@ -1236,9 +1344,18 @@ export const AiHubTab: React.FC = () => {
           {errorMsg && (
             <div className="mx-4 sm:mx-5 mt-3.5 rounded-xl bg-red-50 border border-red-200 p-3 text-xs text-red-900 flex items-start gap-2.5">
               <AlertCircle className="h-4 w-4 flex-none text-red-600 mt-0.5" />
-              <div className="space-y-0.5">
+              <div className="space-y-1.5 flex-1">
                 <div className="font-bold">请求未能完成</div>
                 <p className="leading-5 text-red-800">{errorMsg}</p>
+                {isCorsDirectError && (
+                  <button
+                    type="button"
+                    onClick={() => navigateTab('settings')}
+                    className="inline-flex items-center gap-1 rounded-lg bg-[#0E223D] hover:bg-[#17345D] px-3 py-1.5 text-[11px] font-bold text-[#F6F4EF]"
+                  >
+                    前往「我的配置」显式开启跨域中转 →
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -1430,6 +1547,9 @@ export const AiHubTab: React.FC = () => {
                             {visibleAns}
                           </div>
                         )}
+                        <div className="pt-2 border-t border-[#EFEAE0] text-[11px] text-[#8A6529]">
+                          {AI_LEGAL_DISCLAIMER}
+                        </div>
                       </div>
                     </div>
                   );
@@ -1590,11 +1710,11 @@ export const AiHubTab: React.FC = () => {
               </div>
             )}
 
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
               <span>
                 {willUseVision && resolvedVisionModel
-                  ? `视觉模式就绪：${resolvedVisionModel}（请复核识图文字与法源）`
-                  : '提示：AI 辅助初稿请由主办律师复核事实与法源后使用'}
+                  ? `视觉模式就绪：${resolvedVisionModel} ｜ ${AI_LEGAL_DISCLAIMER}`
+                  : AI_LEGAL_DISCLAIMER}
               </span>
               <button
                 type="button"
@@ -1607,6 +1727,202 @@ export const AiHubTab: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* L-2: Outbound Redaction Preview Modal */}
+      {pendingPreview && livePreviewResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0B172A]/60 backdrop-blur-[2px] p-4">
+          <div className="w-full max-w-2xl rounded-2xl border border-[#D8CEB9] bg-white shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+            <div className="bg-[#0E223D] px-5 py-3.5 text-[#F6F4EF] flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                <span className="font-display text-sm sm:text-base font-bold">
+                  脱敏出站预览 · 发送前核对
+                </span>
+                <span className="rounded-full bg-emerald-500/20 border border-emerald-400/40 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-200">
+                  本次已替换 {livePreviewResult.totalReplaced} 处
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingPreview(null)}
+                className="rounded-lg p-1 text-slate-300 hover:bg-white/10 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 space-y-3.5 overflow-y-auto flex-1">
+              <div className="rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs leading-5 text-amber-950 flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 flex-none text-amber-700 mt-0.5" />
+                <div>
+                  <strong>规则引擎边界提示：</strong>
+                  自动脱敏基于规则识别，可能遗漏生僻人名、品牌简称、项目代号或特殊商号，发送至第三方大模型前请人工扫读下方将发出的脱敏文本；如发现漏网词汇，可立即在下方追加自定义敏感词。
+                </div>
+              </div>
+
+              {/* Add custom sensitive term inline */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={customTermDraft}
+                    onChange={(e) => setCustomTermDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const t = customTermDraft.trim();
+                        if (t.length >= 2 && !customSensitiveTerms.includes(t)) {
+                          setCustomSensitiveTerms((prev) => [...prev, t]);
+                          setCustomTermDraft('');
+                        }
+                      }
+                    }}
+                    placeholder="发现遗漏的真实姓名/简称/项目名？输入后按回车立即追加遮蔽…"
+                    className="flex-1 rounded-lg border border-[#D8CEB9] bg-[#FAF9F6] px-3 py-2 text-xs text-[#11151C] focus:bg-white focus:border-[#0E223D] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const t = customTermDraft.trim();
+                      if (t.length < 2) {
+                        showToast('自定义敏感词至少需要 2 个字符');
+                        return;
+                      }
+                      if (!customSensitiveTerms.includes(t)) {
+                        setCustomSensitiveTerms((prev) => [...prev, t]);
+                      }
+                      setCustomTermDraft('');
+                    }}
+                    className="flex-none rounded-lg bg-[#0E223D] hover:bg-[#17345D] px-3.5 py-2 text-xs font-bold text-[#F6F4EF]"
+                  >
+                    追加遮蔽词
+                  </button>
+                </div>
+                {customSensitiveTerms.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] font-semibold text-slate-500">已追加敏感词：</span>
+                    {customSensitiveTerms.map((term) => (
+                      <span
+                        key={term}
+                        className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 text-[11px] font-medium text-emerald-900"
+                      >
+                        {term}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCustomSensitiveTerms((prev) => prev.filter((x) => x !== term))
+                          }
+                          className="text-emerald-700 hover:text-red-700"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Actual Outbound Text Preview */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600">
+                  <span>即将发往外部大模型（{providerShortName}）的实际文本：</span>
+                  {activeProvider?.useCorsRelayFallback ? (
+                    <span className="text-amber-800">传输路径：经服务器无状态转发</span>
+                  ) : (
+                    <span className="text-emerald-800">传输路径：浏览器直连 HTTPS</span>
+                  )}
+                </div>
+                <div className="max-h-[34vh] overflow-y-auto rounded-xl border border-[#DDD5C3] bg-[#FAF8F3] p-3.5 text-xs leading-6 text-[#14181F] whitespace-pre-wrap break-words">
+                  {livePreviewResult.redactedNote && (
+                    <div className="mb-2 pb-2 border-b border-[#E5DEC9]">
+                      <span className="font-bold text-[#7A5922]">【补充特别要求】</span>
+                      {renderHighlightedOutboundPreview(livePreviewResult.redactedNote)}
+                    </div>
+                  )}
+                  {renderHighlightedOutboundPreview(livePreviewResult.redactedText)}
+                </div>
+              </div>
+
+              {pendingPreview.attachedImgs.length > 0 && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-[11px] text-amber-900">
+                  另附 <strong>{pendingPreview.attachedImgs.length}</strong> 张截图原图：图片画面不经文本脱敏规则处理，请确认已用「涂抹打码」遮盖敏感信息。
+                </div>
+              )}
+
+              <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer pt-1">
+                <input
+                  type="checkbox"
+                  checked={skipPreviewThisSession}
+                  onChange={(e) => setSkipPreviewThisSession(e.target.checked)}
+                  className="h-4 w-4 rounded accent-[#0E223D]"
+                />
+                <span>本次页面会话不再弹出出站预览（仍继续执行本地自动脱敏；刷新页面后恢复弹窗核对）</span>
+              </label>
+            </div>
+
+            <div className="border-t border-[#EAE2D0] bg-[#FAF8F3] px-5 py-3 flex flex-wrap items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingPreview(null)}
+                className="rounded-lg border border-[#D4CEC2] bg-white hover:border-[#0E223D] px-4 py-2 text-xs font-semibold text-slate-700"
+              >
+                返回修改原文
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const target = pendingPreview;
+                  setPendingPreview(null);
+                  executeGeneration(target);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345D] px-4 py-2 text-xs font-bold text-[#F6F4EF]"
+              >
+                <Send className="h-3.5 w-3.5 text-[#E0C38A]" /> 确认按此脱敏稿发送
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* L-2: Explicit Confirmation Modal when turning OFF Auto-Redaction */}
+      {confirmDisableRedactOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0B172A]/60 backdrop-blur-[2px] p-4">
+          <div className="w-full max-w-md rounded-2xl border border-amber-300 bg-white shadow-2xl overflow-hidden">
+            <div className="bg-amber-600 px-5 py-3.5 text-white flex items-center gap-2">
+              <AlertTriangle className="h-4 w-4 flex-none" />
+              <span className="font-display text-sm font-bold">确认关闭本地自动脱敏？</span>
+            </div>
+            <div className="p-5 space-y-3 text-xs leading-6 text-slate-700">
+              <p>
+                关闭<strong>「文本自动脱敏」</strong>后，您在输入框或导入 Word 中的<strong>真实当事人姓名、公司全称、身份证号、手机号、银行账号及法院案号</strong>将直接原文发往外部第三方大模型接口。
+              </p>
+              <p className="text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                如处理的是公开裁判文书、法规条款或已人工脱敏的草稿，可以临时关闭；若涉及真实委托人未公开案情，强烈建议保持开启。
+              </p>
+            </div>
+            <div className="border-t border-[#EFEAE0] bg-[#FAF8F3] px-5 py-3 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDisableRedactOpen(false)}
+                className="rounded-lg bg-[#0E223D] px-4 py-2 text-xs font-bold text-white"
+              >
+                保持开启（推荐）
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  updateByok({ ...byok, autoRedactPrompt: false });
+                  setConfirmDisableRedactOpen(false);
+                  showToast('已临时关闭自动脱敏，请注意不要发送未脱敏涉密案情');
+                }}
+                className="rounded-lg border border-amber-400 bg-white hover:bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-900"
+              >
+                我已知晓风险，确认关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ImageRedactModal
         image={redactingImageTarget?.image || null}
