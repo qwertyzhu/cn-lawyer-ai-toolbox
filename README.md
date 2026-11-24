@@ -163,4 +163,4 @@ npm run test:guard
 
 - **开源协议**：本项目遵循 **[Apache License 2.0](./LICENSE)** 开源，商用与二次开发友好，再分发或基于本项目搭建衍生服务时请依据 Apache-2.0 第 4(d) 条保留 [NOTICE](./NOTICE) 中的原始版权署名，并遵守第 6 条商标与非背书边界。
 - **法律免责声明**：使用前请务必阅读 **[DISCLAIMER.md](./DISCLAIMER.md)**。本工具仅作为法律专业人员的效率辅助工具，不构成正式法律意见；所有 AI 输出、计算结果与文书草稿均须由执业律师独立复核现行有效法条与案件证据后方可使用。
-- **原作者**：由 **朱思浩律师（浙江天冉律师事务所，[@qwertyzhu](https://github.com/qwertyzhu)）** 发起并开源维护。如果这个工具帮您省下了宝贵的办案时间，欢迎点亮右上角 ⭐ **Star**，并收藏分享持续更新的 [《法律法规案例库》](https://ima.qq.com/wiki/?shareId=a5d4993fac94797dc3892f0157c5a4011efd105c495d2b0e45ac311dc7dda91b)！
+- **原作者**：由 **lawyer朱思浩（[@qwertyzhu](https://github.com/qwertyzhu)）** 发起并开源维护。如果这个工具帮您省下了宝贵的办案时间，欢迎点亮右上角 ⭐ **Star**，并收藏分享持续更新的 [《法律法规案例库》](https://ima.qq.com/wiki/?shareId=a5d4993fac94797dc3892f0157c5a4011efd105c495d2b0e45ac311dc7dda91b)！

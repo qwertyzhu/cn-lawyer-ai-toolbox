@@ -685,7 +685,7 @@ export const ImaCloudLibraryPanel: React.FC<{
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="inline-flex items-center gap-1 rounded-full bg-[#B89254]/20 border border-[#D1B27A]/40 px-2.5 py-0.5 text-[11px] font-semibold text-[#D1B27A]">
-                <Cloud className="h-3 w-3" /> 开源作者维护公开库（朱思浩律师）· 持续更新
+                <Cloud className="h-3 w-3" /> 开源作者维护公开库（lawyer朱思浩）· 持续更新
               </span>
               <span className="rounded-full bg-white/10 px-2.5 py-0.5 font-num text-[11px] font-bold text-emerald-300">
                 {lawCasesMeta?.contentCount
