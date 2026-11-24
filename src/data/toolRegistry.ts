@@ -8,7 +8,7 @@ export interface OfflineToolMeta {
   shortTitle: string;
   kicker: string;
   desc: string;
-  sourceTag: '官网升级' | '律师新增';
+  sourceTag: '本地核心' | '律师新增';
   iconName: string;
   keywords: string[];
   aiTarget?: AiSpecialistId;
@@ -36,7 +36,7 @@ export const TOOL_CATEGORIES_META: {
     id: 'labor_injury',
     title: '劳动争议与工伤人损',
     en: 'LABOR & PERSONAL INJURY',
-    subtitle: '浙江及杭州最新口径经济补偿金、双倍工资、工伤基金/单位拆分及道交人损测算。',
+    subtitle: '支持自定义全国各省市社平工资、5–10 级工伤医疗/就业补助月数及城乡人均可支配收入（修改后自动保存本机）。',
   },
   {
     id: 'privacy_doc',
@@ -68,7 +68,7 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '诉讼费计算',
     kicker: '受理费 · 保全费 · 执行费',
     desc: '依据《诉讼费用交纳办法》，一单测算一审、简易减半、财产保全费、二审与执行费，联动律师费报价。',
-    sourceTag: '官网升级',
+    sourceTag: '本地核心',
     iconName: 'Calculator',
     keywords: ['诉讼费', '保全费', '执行费', '减半', '受理费'],
     aiTarget: 'client-wechat-reply',
@@ -94,7 +94,7 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: 'LPR与迟延金',
     kicker: '2019–2026完整LPR分段',
     desc: '内置央行完整 1年/5年期 LPR 历史表，自动按调息日分段拆算逾期利息及日万分之 1.75 加倍迟延履行金。',
-    sourceTag: '官网升级',
+    sourceTag: '本地核心',
     iconName: 'Percent',
     keywords: ['LPR', '利息', '逾期', '迟延履行', '1.75', '违约金'],
     aiTarget: 'timeline-elements',
@@ -119,7 +119,7 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '期间与时效',
     kicker: '节假日顺延 · 黄金37天',
     desc: '内置 2025–2026 法定节假日与调休安排，按《民法典》第203条自动顺延届满日，一键写入手机系统日历。',
-    sourceTag: '官网升级',
+    sourceTag: '本地核心',
     iconName: 'CalendarDays',
     keywords: ['期间', '上诉期', '15天', '37天', '诉讼时效', '举证期', '节假日'],
   },
@@ -139,26 +139,26 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     id: 'labor-compensation',
     code: '08',
     category: 'labor_injury',
-    title: '劳动争议经济补偿金测算器（杭州口径）',
+    title: '劳动争议经济补偿金测算器（可自定地区口径）',
     shortTitle: '劳动补偿金',
-    kicker: 'N / N+1 / 2N · 三倍社平封顶',
-    desc: '测算经济补偿金、代通知金、违法解除 2N 与未签合同双倍工资，自动识别浙江 2026 三倍社平封顶规则。',
-    sourceTag: '官网升级',
+    kicker: 'N / N+1 / 2N · 三倍社平封顶可自改',
+    desc: '测算经济补偿金、代通知金、违法解除 2N 与未签合同双倍工资；内置参考基数，支持按本省市自由修改地区名称与三倍社平封顶并自动保存本机。',
+    sourceTag: '本地核心',
     iconName: 'Briefcase',
-    keywords: ['劳动', '经济补偿', '2N', 'N+1', '双倍工资', '辞退', '裁员'],
+    keywords: ['劳动', '经济补偿', '2N', 'N+1', '双倍工资', '辞退', '裁员', '社平工资'],
     aiTarget: 'client-wechat-reply',
   },
   {
     id: 'injury-compensation',
     code: '09',
     category: 'labor_injury',
-    title: '工伤与人身损害赔偿计算器（浙江2026）',
+    title: '工伤与人身损害赔偿计算器（可自定省市标准）',
     shortTitle: '工伤与人损',
-    kicker: '浙人社发〔2026〕52号口径',
-    desc: '清晰拆分浙江工伤社保基金支付与单位自付金额，同步支持交通事故人身损害城乡统一标准与责任比例折算。',
-    sourceTag: '官网升级',
+    kicker: '全国通用 · 社平/补助月数/人损基数全可改',
+    desc: '清晰拆分工伤社保基金支付与单位自付金额，支持自由编辑本省市统计基数及 5–10 级医疗/就业补助月数并自动保存本机，同步支持道交人损城乡统一标准与责比折算。',
+    sourceTag: '本地核心',
     iconName: 'HardHat',
-    keywords: ['工伤', '人身损害', '伤残', '交通事故', '一次性伤残', '医疗费'],
+    keywords: ['工伤', '人身损害', '伤残', '交通事故', '一次性伤残', '医疗费', '补助金'],
     aiTarget: 'client-wechat-reply',
   },
   {
@@ -182,7 +182,7 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '证据PDF工具',
     kicker: '支持50MB+大卷宗 · 自动分卷 · 页码水印',
     desc: '100% 浏览器本地处理：支持 50MB+ 大卷宗合并与截图压缩，可按 10MB（法院网上立案）或 50MB（仲裁/大卷宗）一键自动分卷拆分，并加盖连续证据页码与举证水印。',
-    sourceTag: '官网升级',
+    sourceTag: '本地核心',
     iconName: 'Layers',
     keywords: ['PDF', '证据', '合并', '压缩', '50MB', '分卷', '页码', '水印', '拆分'],
   },

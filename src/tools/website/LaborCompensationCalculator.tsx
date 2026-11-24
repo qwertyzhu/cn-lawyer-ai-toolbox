@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from '../../components/ToolboxBridgeLink';
 import {
   ArrowLeft,
@@ -46,7 +46,26 @@ const SCENARIOS: { id: CompensationScenario; title: string; badge: string; desc:
 const fmtYuan = (n: number) =>
   `¥ ${n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+const LABOR_REGION_STORAGE_KEY = 'toolbox_labor_region_config_v1';
+const DEFAULT_LABOR_REGION_NAME = '自定义地区（默认参考浙江2026）';
+const DEFAULT_LABOR_TRIPLE_CAP = '25611';
+
+function loadSavedLaborRegion(): { regionName: string; tripleCap: string } {
+  try {
+    const raw = localStorage.getItem(LABOR_REGION_STORAGE_KEY);
+    if (!raw) return { regionName: DEFAULT_LABOR_REGION_NAME, tripleCap: DEFAULT_LABOR_TRIPLE_CAP };
+    const parsed = JSON.parse(raw);
+    return {
+      regionName: typeof parsed.regionName === 'string' && parsed.regionName.trim() ? parsed.regionName : DEFAULT_LABOR_REGION_NAME,
+      tripleCap: typeof parsed.tripleCap === 'string' && parsed.tripleCap.trim() ? parsed.tripleCap : DEFAULT_LABOR_TRIPLE_CAP,
+    };
+  } catch {
+    return { regionName: DEFAULT_LABOR_REGION_NAME, tripleCap: DEFAULT_LABOR_TRIPLE_CAP };
+  }
+}
+
 export const LaborCompensationCalculator: React.FC = () => {
+  const initialRegion = useMemo(() => loadSavedLaborRegion(), []);
   const [scenario, setScenario] = useState<CompensationScenario>('n');
   const [tenureMode, setTenureMode] = useState<'dates' | 'manual'>('manual');
   const [startDate, setStartDate] = useState('2023-03-01');
@@ -58,9 +77,21 @@ export const LaborCompensationCalculator: React.FC = () => {
   const [lastMonthSalary, setLastMonthSalary] = useState('12000');
   const [unsignedMonths, setUnsignedMonths] = useState('6');
 
-  // Zhejiang 2026 3x social average wage reference (浙人社发〔2026〕52号: 8,537 * 3 = 25,611 元/月, editable)
-  const [tripleCap, setTripleCap] = useState('25611');
+  // Editable & locally persisted regional 3x social average wage cap (default reference 25,611 元/月)
+  const [regionName, setRegionName] = useState(initialRegion.regionName);
+  const [tripleCap, setTripleCap] = useState(initialRegion.tripleCap);
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        LABOR_REGION_STORAGE_KEY,
+        JSON.stringify({ regionName: regionName.trim() || DEFAULT_LABOR_REGION_NAME, tripleCap })
+      );
+    } catch {
+      // ignore storage quota error
+    }
+  }, [regionName, tripleCap]);
 
   const tenure = useMemo(() => {
     let totalMonths = 0;
@@ -160,8 +191,10 @@ export const LaborCompensationCalculator: React.FC = () => {
 
   const currentScenarioObj = SCENARIOS.find((s) => s.id === scenario) || SCENARIOS[0];
 
+  const activeRegionLabel = regionName.trim() || DEFAULT_LABOR_REGION_NAME;
+
   const summaryText = [
-    `【杭州劳动争议经济补偿测算 · ${currentScenarioObj.title}】`,
+    `【${activeRegionLabel} · 劳动争议经济补偿测算 · ${currentScenarioObj.title}】`,
     scenario === 'double_wage'
       ? `未签合同计薪月数：${calc.effectiveN} 个月`
       : `折算工龄：${tenure.nMonths} 个月（${tenure.fullYears}年${tenure.remMonths}个月）`,
@@ -204,13 +237,13 @@ export const LaborCompensationCalculator: React.FC = () => {
           <div>
             <div className="flex items-center gap-2.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-[#9A773E]">
               <Briefcase className="h-3.5 w-3.5 text-[#B89254]" />
-              <span>LABOR COMPENSATION · 杭州口径 · 劳动合同法第47/87条</span>
+              <span>LABOR COMPENSATION · 全国通用 · 地区社平口径可自改并保存本机</span>
             </div>
             <h1 className="mt-3 font-display text-2xl font-bold text-[#11151C] sm:text-4xl">
               经济补偿金测算器（N / N+1 / 2N）
             </h1>
             <p className="mt-2.5 max-w-2xl text-sm leading-7 text-slate-600">
-              在线测算协商解除（N）、代通知金（N+1）、违法解除赔偿金（2N）及未签书面合同双倍工资差额，自动识别高薪三倍社平封顶与 12 年上限规则。
+              在线测算协商解除（N）、代通知金（N+1）、违法解除赔偿金（2N）及未签书面合同双倍工资差额，支持自由修改本省市地区名称与三倍社平封顶基数（修改自动保存当前浏览器）。
             </p>
           </div>
           <button
@@ -221,11 +254,12 @@ export const LaborCompensationCalculator: React.FC = () => {
               setManualMonths('4');
               setAvgSalary('12000');
               setLastMonthSalary('12000');
-              setTripleCap('25611');
+              setRegionName(DEFAULT_LABOR_REGION_NAME);
+              setTripleCap(DEFAULT_LABOR_TRIPLE_CAP);
             }}
             className="inline-flex flex-none items-center gap-1.5 rounded-[2px] border border-[#D4CEC2] bg-white px-3.5 py-2 text-xs font-medium text-slate-600 hover:border-[#11151C]"
           >
-            <RotateCcw className="h-3.5 w-3.5" /> 重置数值
+            <RotateCcw className="h-3.5 w-3.5" /> 恢复默认参考值
           </button>
         </div>
 
@@ -393,22 +427,39 @@ export const LaborCompensationCalculator: React.FC = () => {
                   <span className="mt-1 block text-[11px] text-slate-400">代通知金按上月工资计，不受三倍社平/12年限制</span>
                 </label>
               ) : scenario !== 'double_wage' ? (
-                <label className="block">
-                  <span className="text-xs font-bold text-[#11151C]">
-                    当地三倍社平工资封顶参考（元/月）
-                  </span>
-                  <input
-                    type="number"
-                    min={1000}
-                    step="100"
-                    value={tripleCap}
-                    onChange={(e) => setTripleCap(e.target.value)}
-                    className="mt-1.5 w-full rounded-[2px] border border-[#D8D2C6] bg-[#FAF9F6] px-3.5 py-2.5 font-num text-base font-bold text-[#11151C]"
-                  />
-                  <span className="mt-1 block text-[11px] text-slate-400">
-                    默认按浙人社发〔2026〕52号全口径加权社平 3 倍（8,537 × 3 = 25,611 元）预设，支持按各地口径微调
-                  </span>
-                </label>
+                <div className="space-y-3">
+                  <label className="block">
+                    <span className="flex items-center justify-between text-xs font-bold text-[#11151C]">
+                      <span>当地三倍社平工资封顶（元/月）</span>
+                      <span className="rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">
+                        修改自动保存本机
+                      </span>
+                    </span>
+                    <input
+                      type="number"
+                      min={1000}
+                      step="100"
+                      value={tripleCap}
+                      onChange={(e) => setTripleCap(e.target.value)}
+                      className="mt-1.5 w-full rounded-[2px] border border-[#D8D2C6] bg-[#FAF9F6] px-3.5 py-2.5 font-num text-base font-bold text-[#11151C]"
+                    />
+                    <span className="mt-1 block text-[11px] text-slate-400">
+                      请按本省市人社部门最新公布的上年度职工月均工资 × 3 填写（默认参考 25,611 元，修改后永久保存在本机浏览器）
+                    </span>
+                  </label>
+                  <label className="block">
+                    <span className="text-[11px] font-semibold text-slate-600">
+                      当前地区口径备注（随测算明细一起复制）
+                    </span>
+                    <input
+                      type="text"
+                      value={regionName}
+                      onChange={(e) => setRegionName(e.target.value)}
+                      placeholder="例：北京市 / 上海市 / 深圳市 / 杭州市"
+                      className="mt-1 w-full rounded-[2px] border border-[#D8D2C6] bg-[#FAF9F6] px-3 py-1.5 text-xs font-medium text-[#11151C]"
+                    />
+                  </label>
+                </div>
               ) : null}
             </div>
           </div>
@@ -466,7 +517,7 @@ export const LaborCompensationCalculator: React.FC = () => {
               </div>
 
               <Link
-                to={`/contact?type=${encodeURIComponent('劳动争议')}&sourceTool=${encodeURIComponent('经济补偿金测算器（杭州口径）')}&note=${encodeURIComponent(`${summaryText}\n希望结合具体解除通知、考勤薪酬及程序合法性由律师进一步评估。`)}`}
+                to={`/contact?type=${encodeURIComponent('劳动争议')}&sourceTool=${encodeURIComponent(`经济补偿金测算器（${activeRegionLabel}）`)}&note=${encodeURIComponent(`${summaryText}\n希望结合具体解除通知、考勤薪酬及程序合法性由律师进一步评估。`)}`}
                 onClick={() => trackEvent('tool_to_contact')}
                 className="inline-flex w-full items-center justify-center gap-2 rounded-[2px] bg-[#11151C] px-5 py-3 text-xs font-semibold text-[#F6F4EF] hover:bg-[#0E223D]"
               >
