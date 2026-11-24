@@ -1,0 +1,51 @@
+{
+  "name": "cn-lawyer-ai-toolbox",
+  "version": "2.0.0",
+  "license": "Apache-2.0",
+  "description": "中国律师 AI 工具箱 (CN Lawyer AI Toolbox) — 离线优先 PWA + 最高法 14 类要素式起诉状 + 4,111 条离线法典 + BYOK 脱敏法律 AI 智囊舱",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qwertyzhu/cn-lawyer-ai-toolbox.git"
+  },
+  "keywords": [
+    "legal-tech",
+    "china-law",
+    "lawyer-tools",
+    "pwa",
+    "byok",
+    "offline-first",
+    "docx-generator"
+  ],
+  "scripts": {
+    "dev": "vite --port 3680",
+    "build:data": "node scripts/build-laws-data.mjs && node scripts/prepare-lawyer-fee-workbench.mjs",
+    "build": "node scripts/build-laws-data.mjs && node scripts/prepare-lawyer-fee-workbench.mjs && tsc -b && vite build && node scripts/inject-sw-manifest.mjs",
+    "preview": "vite preview --port 3680",
+    "start": "node server/index.mjs",
+    "init-keys": "node scripts/init-license-keys.mjs",
+    "keygen": "node scripts/generate-license.mjs",
+    "build:keygen": "node scripts/build-admin-keygen-app.mjs",
+    "test": "node --test tests/core.test.mjs",
+    "test:guard": "python3 tests/oss_guard.py"
+  },
+  "dependencies": {
+    "lucide-react": "^0.563.0",
+    "pdf-lib": "^1.17.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.18.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.18",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "autoprefixer": "^10.4.24",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.18",
+    "typescript": "~5.9.3",
+    "vite": "^6.3.5"
+  }
+}

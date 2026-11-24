@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.DS_Store
+*.local
+.env
+.env.*
+!.env.example
+.ima-credentials.json
+.account-registry.json
+ops/.ssh/
+ops/.keys/
+*发码器*.html
+*激活码生成器*.html
+*账号密码*.xlsx
+*账号密码*.csv
+*账号密码*.html
+*.app/

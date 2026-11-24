@@ -1,0 +1,15 @@
+中国律师 AI 工具箱 (CN Lawyer AI Toolbox)
+Copyright 2026 朱思浩律师 / 浙江天冉律师事务所 (@qwertyzhu)
+
+本项目基于 Apache License, Version 2.0 开源发布，包含由原项目作者（朱思浩律师 / 浙江天冉律师事务所）原创开发及整理的软件代码、要素式起诉状本地 OOXML 生成引擎、法条实务提示（litTips / nonLitTips）与工作流编排。
+
+一、署名留存义务（Apache-2.0 第 4(d) 条）
+任何再分发本项目源码、编译产物或基于本项目构建的衍生作品（包括用于律所内部私有部署或商业 SaaS 集成），均须在衍生作品的 NOTICE 文件、文档或关于界面中保留本声明中的原始版权与来源署名信息。
+
+二、商标与非背书边界（Apache-2.0 第 6 条）
+Apache-2.0 许可不授予任何使用「浙江天冉律师事务所」「天冉律师」商号、商标、徽标或原项目作者个人执业身份进行背书、宣传、暗示关联或合作关系的权利。第三方基于本项目部署自建站或商业产品时，请使用自有品牌名称、徽标与服务条款，并明确声明其服务与原作者及浙江天冉律师事务所无关。
+
+三、第三方开源组件与公共法源声明
+1. 字体资源：`public/fonts/ofl-noto-sans-sc-medium.woff2` 为 Noto Sans SC 子集字体，遵循 SIL Open Font License 1.1 协议（完整许可证见 `public/fonts/OFL-LICENSE.txt`），用于本地浏览器端离线中文 PDF 页码与举证水印合成。
+2. 法律法规原文：`public/data/laws-offline.json` 中收录的中华人民共和国法律、司法解释及官方示范文本条文原文均来源于国家立法与司法机关公开发布文件（依据《中华人民共和国著作权法》第五条不适用著作权保护）；随附的检索索引结构及实务办案提示（litTips / nonLitTips）由本项目作者整理编纂并随本项目一并按 Apache-2.0 许可开放。
+3. 开源依赖包：React、Vite、Tailwind CSS、Lucide Icons、pdf-lib 等第三方依赖均遵循各自开源协议（详见 `package.json`）。
