@@ -1,0 +1,47 @@
+name: 📍 补充或更新某省市计算口径
+description: 协助补充或更新当地社平工资、工伤补助月数、人均可支配收入或律师费收费标准
+title: "[地方口径] "
+labels: ["regional-standard"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢同行共建地方实务口径！请尽量附上官方发文文号或公开政府/人社/统计局/律协链接，便于核验后合入默认参考表。
+  - type: input
+    id: region
+    attributes:
+      label: 省 / 市 / 地区
+      placeholder: 例如：北京市 / 上海市 / 广东省深圳市 / 江苏省南京市
+    validations:
+      required: true
+  - type: dropdown
+    id: module
+    attributes:
+      label: 涉及计算模块
+      options:
+        - 劳动争议经济补偿金（三倍社平封顶基数）
+        - 工伤与人身损害赔偿（社平工资 / 5–10级医疗与就业补助月数 / 城乡人均可支配收入）
+        - 全国 31 省律师费参考标准
+        - 法律期间与法定节假日 / LPR 利率表
+        - 其他计算模块
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: 现行口径与数值说明
+      description: 请列明具体金额、比例或月数，以及生效年份。
+      placeholder: |
+        例如：
+        - 2026 年度社平工资：xxx 元/月（三倍封顶 xxx 元/月）
+        - 5–10 级一次性工伤医疗补助金月数：...
+        - 5–10 级一次性伤残就业补助金月数：...
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: 官方发文文号或公开来源链接
+      placeholder: 例如：×人社发〔2026〕×号，或政府官网公告链接
+    validations:
+      required: false

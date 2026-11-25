@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 🚀 在线样板体验站（免注册即用）
+    url: https://qwertyzhu.github.io/cn-lawyer-ai-toolbox/
+    about: 打开 GitHub Pages 纯静态样板站，直接体验 113 份要素式示范文本、离线法典、证据 PDF 分卷与前置脱敏 AI 助手。
+  - name: 🔒 安全漏洞与隐私合规报告（请勿公开提交敏感信息）
+    url: https://github.com/qwertyzhu/cn-lawyer-ai-toolbox/blob/main/SECURITY.md
+    about: 如发现安全隐患或需要私密沟通，请先查阅 SECURITY.md 中的反馈渠道；切勿在公开 Issue 中粘贴真实案件当事人信息或 API Key。
+  - name: 📚 公共法律法规案例库（持续更新）
+    url: https://ima.qq.com/wiki/?shareId=a5d4993fac94797dc3892f0157c5a4011efd105c495d2b0e45ac311dc7dda91b
+    about: 免费直达作者持续维护的公开法律法规与裁判案例检索库。

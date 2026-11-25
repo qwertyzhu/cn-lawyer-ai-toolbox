@@ -1,0 +1,48 @@
+name: 📄 反馈要素式示范文本差异或 Word 排版问题
+description: 反馈某地法院现行要素式起诉状/答辩状表格与内置最高法《法〔2025〕82号》原表的差异，或导出的 .docx 排版细节
+title: "[示范文本] "
+labels: ["spc-template"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > ⚠️ **保密提醒**：请勿在公开 Issue 或截图中包含真实当事人姓名、身份证号、公司全称、案号等客户保密信息，上传前请先打码脱敏。
+  - type: input
+    id: template_name
+    attributes:
+      label: 对应示范文本名称 / 案由
+      placeholder: 例如：买卖合同纠纷民事起诉状 / 侵害著作权及邻接权纠纷民事起诉状
+    validations:
+      required: true
+  - type: input
+    id: court_region
+    attributes:
+      label: 受案法院所在地区（选填）
+      placeholder: 例如：浙江省杭州市 / 广东省广州市
+    validations:
+      required: false
+  - type: dropdown
+    id: issue_type
+    attributes:
+      label: 问题类型
+      options:
+        - 地方法院表格栏目与内置原表有细微差异
+        - 导出 Word（.docx）表格排版/字体/分页异常
+        - AI 单案/批量转写漏填或勾选项识别问题
+        - 希望新增或优化其他示范文本
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 具体差异或问题描述
+      placeholder: 请描述具体栏目名称、期望显示效果或打开软件（Microsoft Word / WPS / Pages）中的表现。
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_check
+    attributes:
+      label: 隐私与保密确认
+      options:
+        - label: 我已确认本 Issue 的文字与附件不含真实当事人隐私、未公开案情或个人 API Key
+          required: true

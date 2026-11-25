@@ -1,0 +1,54 @@
+name: 🛠️ Bug 反馈与实务功能建议
+description: 反馈使用故障，或提出贴合中国律师日常办案动线的新功能建议
+title: "[反馈] "
+labels: ["triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > ⚠️ **保密提醒**：请勿在公开 Issue 中粘贴真实当事人信息、案件材料原文、激活码或个人大模型 API Key。
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 反馈类型
+      options:
+        - Bug / 异常报错
+        - 实务功能建议 / 体验优化
+        - 部署与自建问题（Docker / Node / 静态托管）
+    validations:
+      required: true
+  - type: dropdown
+    id: env
+    attributes:
+      label: 使用环境
+      options:
+        - 在线体验站（GitHub Pages）
+        - 本地运行（npm start / npm run dev）
+        - 自建服务器 / Docker（AUTH_MODE=open）
+        - 律所团队模式（AUTH_MODE=license）
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: 浏览器与设备（选填）
+      placeholder: 例如：Chrome 桌面端 / Safari iPhone / 微信内置浏览器
+    validations:
+      required: false
+  - type: textarea
+    id: detail
+    attributes:
+      label: 详细说明 / 复现步骤
+      placeholder: |
+        - 您在做什么操作：
+        - 实际发生了什么（如有报错信息请贴脱敏后的文字）：
+        - 您期望的表现或实务场景说明：
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_check
+    attributes:
+      label: 隐私与保密确认
+      options:
+        - label: 我已确认本 Issue 不包含真实客户信息、未公开案情或个人 API Key
+          required: true
