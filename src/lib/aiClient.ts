@@ -88,18 +88,6 @@ export const AI_PROVIDER_PRESETS: ProviderPreset[] = [
     guide: '登录火山方舟控制台 → API Key 管理创建密钥，并在模型栏填入开通的模型 ID 或接入点 ep-xxxx。',
   },
   {
-    id: 'opencode-go',
-    name: 'OpenCode Go 订阅（GLM / Kimi / MiniMax / DeepSeek 等）',
-    protocol: 'openai',
-    baseUrl: 'https://opencode.ai/inference/go/openai/v1',
-    fastModel: 'glm-5.3-flash',
-    reasoningModel: 'glm-5.3',
-    visionModel: 'glm-5.3-flash',
-    applyUrl: 'https://opencode.ai/auth',
-    badge: '月付订阅 · ZDR 零留存 · 多模型',
-    guide: '登录 OpenCode Console（opencode.ai）订阅 Go / Go Plus / Go Teams 并复制 API Key 粘贴到下方；点「一键自动拉取」可自由切换 glm-5.3、glm-5.3-flash、kimi-k3、kimi-k3.1-pro、minimax-m3.1-flash、qwen4-max 等（系统自动附带官方文档要求的 x-opencode-session 会话头；因 OpenCode Go 网关暂不放行浏览器跨域预检，请在自建 Node 后端并启用 ENABLE_AI_RELAY=1 时勾选下方「启用无状态透明跨域转发兜底」使用；如需调用 DeepSeek 系列，请在 OpenCode Console → Settings → Privacy 中将 Regions 设为 Global）。',
-  },
-  {
     id: 'custom-openai',
     name: '自定义 OpenAI 兼容接口 / 个人中转站',
     protocol: 'openai',
@@ -109,7 +97,7 @@ export const AI_PROVIDER_PRESETS: ProviderPreset[] = [
     visionModel: '',
     applyUrl: '',
     badge: 'OpenAI /v1/chat/completions',
-    guide: '支持任意兼容 OpenAI 协议的网关（如 OpenRouter、OneAPI 等），如该模型原生支持视觉识图（如 gpt-4o / gemini-2.5-pro），直接填入视觉模型名即可。',
+    guide: '支持任意兼容 OpenAI 协议的网关与第三方订阅接口（填入 Base URL 与 API Key 后可一键拉取可用模型；如接口不支持浏览器跨域直连，可在自建后端开启转发后勾选下方无状态转发兜底）。',
   },
   {
     id: 'custom-anthropic',

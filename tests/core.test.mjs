@@ -1177,26 +1177,25 @@ test('PWA Service Worker never silently calls skipWaiting on install and awaits 
   assert.ok(!mainSrc.includes('window.location.reload()'));
 });
 
-test('OpenCode Go preset, x-opencode-session header injection, and non-chat model filtering work cleanly', () => {
-  const preset = AI_PROVIDER_PRESETS.find((p) => p.id === 'opencode-go');
-  assert.ok(preset);
-  assert.equal(preset.baseUrl, 'https://opencode.ai/inference/go/openai/v1');
-  assert.equal(preset.fastModel, 'glm-5.3-flash');
-  assert.equal(preset.reasoningModel, 'glm-5.3');
+test('Custom OpenAI endpoint cleanly supports opencode.ai session headers and non-chat model filtering without standalone preset', () => {
+  assert.equal(
+    AI_PROVIDER_PRESETS.some((p) => p.id === 'opencode-go'),
+    false
+  );
   assert.equal(isOpenCodeEndpoint('https://opencode.ai/inference/go/openai/v1'), true);
   assert.equal(isOpenCodeEndpoint('https://opencode.ai/zen/go/v1'), true);
   assert.equal(isOpenCodeEndpoint('https://api.deepseek.com/v1'), false);
 
   const ocHeaders = buildProviderRequestHeaders(
     {
-      id: 'oc1',
-      presetId: 'opencode-go',
-      name: preset.name,
+      id: 'custom-1',
+      presetId: 'custom-openai',
+      name: '自定义 OpenAI 兼容接口',
       protocol: 'openai',
-      baseUrl: preset.baseUrl,
+      baseUrl: 'https://opencode.ai/inference/go/openai/v1',
       apiKey: 'oc-key',
-      fastModel: preset.fastModel,
-      reasoningModel: preset.reasoningModel,
+      fastModel: 'glm-5.3-flash',
+      reasoningModel: 'glm-5.3',
     },
     'oc-key',
     'ses_oss_001'

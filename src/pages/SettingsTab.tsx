@@ -1296,15 +1296,11 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             {isOpenCodeEndpoint(activeProvider.baseUrl, activeProvider.presetId) &&
               !activeProvider.useCorsRelayFallback && (
                 <div className="rounded-lg border border-amber-300 bg-amber-50 p-2.5 text-[11px] leading-5 text-amber-950">
-                  <strong>OpenCode Go 接入提示：</strong>系统已自动附带官方要求的{' '}
-                  <code className="rounded bg-amber-100 px-1 font-mono text-[10px]">
-                    x-opencode-session
-                  </code>{' '}
-                  会话头。因 OpenCode Go 网关暂不放行浏览器跨域预检，请在自建 Node 后端并开启{' '}
+                  <strong>自定义网关提示：</strong>系统已自动为该接口附带所需的会话路由头；如该网关暂不放行浏览器跨域预检，请在自建 Node 后端并开启{' '}
                   <code className="rounded bg-amber-100 px-1 font-mono text-[10px]">
                     ENABLE_AI_RELAY=1
                   </code>{' '}
-                  时勾选下方<strong>「启用无状态透明跨域转发兜底」</strong>（纯静态体验站无中转后端；如选用 DeepSeek 系列，请在 OpenCode Console → Settings → Privacy 中开启 Global 区域）。
+                  时手动勾选下方<strong>「启用无状态透明跨域转发兜底」</strong>（纯静态体验站无中转后端）。
                 </div>
               )}
 
