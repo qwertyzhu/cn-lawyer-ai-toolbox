@@ -10,9 +10,12 @@ import {
 } from '../src/lib/financeUtils.ts';
 import { redactLegalText, restoreRedactedText } from '../src/lib/redactor.ts';
 import {
+  AI_PROVIDER_PRESETS,
   AiDirectConnectError,
+  buildProviderRequestHeaders,
   buildProviderRequestPayload,
   fetchAvailableModels,
+  isOpenCodeEndpoint,
   normalizeModelsEndpoints,
   parseModelsResponsePayload,
   streamAiCompletion,
@@ -1172,6 +1175,43 @@ test('PWA Service Worker never silently calls skipWaiting on install and awaits 
   assert.ok(!swSrc.includes('.then(() => self.skipWaiting())'));
   assert.ok(swSrc.includes("event.data.type === 'SKIP_WAITING'"));
   assert.ok(!mainSrc.includes('window.location.reload()'));
+});
+
+test('OpenCode Go preset, x-opencode-session header injection, and non-chat model filtering work cleanly', () => {
+  const preset = AI_PROVIDER_PRESETS.find((p) => p.id === 'opencode-go');
+  assert.ok(preset);
+  assert.equal(preset.baseUrl, 'https://opencode.ai/inference/go/openai/v1');
+  assert.equal(preset.fastModel, 'glm-5.3-flash');
+  assert.equal(preset.reasoningModel, 'glm-5.3');
+  assert.equal(isOpenCodeEndpoint('https://opencode.ai/inference/go/openai/v1'), true);
+  assert.equal(isOpenCodeEndpoint('https://opencode.ai/zen/go/v1'), true);
+  assert.equal(isOpenCodeEndpoint('https://api.deepseek.com/v1'), false);
+
+  const ocHeaders = buildProviderRequestHeaders(
+    {
+      id: 'oc1',
+      presetId: 'opencode-go',
+      name: preset.name,
+      protocol: 'openai',
+      baseUrl: preset.baseUrl,
+      apiKey: 'oc-key',
+      fastModel: preset.fastModel,
+      reasoningModel: preset.reasoningModel,
+    },
+    'oc-key',
+    'ses_oss_001'
+  );
+  assert.equal(ocHeaders['x-opencode-session'], 'ses_oss_001');
+
+  const parsed = parseModelsResponsePayload({
+    data: [
+      { id: 'glm-5.3-flash', type: 'chat' },
+      { id: 'glm-5.3', type: 'chat' },
+      { id: 'jev-1.14', type: 'decision' },
+      { id: 'text-embedding-3-small', type: 'embedding' },
+    ],
+  });
+  assert.deepEqual(parsed.sort(), ['glm-5.3', 'glm-5.3-flash']);
 });
 
 

@@ -2075,8 +2075,11 @@ const server = http.createServer(async (req, res) => {
         payload.targetUrl
       );
       const upstreamMethod = String(payload.method || 'POST').toUpperCase() === 'GET' ? 'GET' : 'POST';
+      const sanitized = sanitizeRelayHeaders(payload.headers);
+      const hasUserAgent = Object.keys(sanitized).some((k) => k.toLowerCase() === 'user-agent');
       const upstreamHeaders = {
-        ...sanitizeRelayHeaders(payload.headers),
+        ...sanitized,
+        ...(hasUserAgent ? {} : { 'User-Agent': 'cn-lawyer-ai-toolbox/1.6' }),
         Host: parsed.host,
       };
       const bodyStr =

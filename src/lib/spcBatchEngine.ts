@@ -195,6 +195,7 @@ export type BatchCompletionFn = (args: {
   messages: ChatTurn[];
   temperature?: number;
   signal?: AbortSignal;
+  sessionId?: string;
   onChunk?: (delta: string) => void;
 }) => Promise<{ content: string }>;
 
@@ -302,6 +303,7 @@ export async function runSpcBatchQueue(options: RunSpcBatchOptions): Promise<Run
         modelSlot,
         temperature: 0.1,
         signal,
+        sessionId: `ses_batch_${item.id}`,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userContent },

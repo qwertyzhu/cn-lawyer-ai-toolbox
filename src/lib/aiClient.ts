@@ -88,6 +88,18 @@ export const AI_PROVIDER_PRESETS: ProviderPreset[] = [
     guide: '登录火山方舟控制台 → API Key 管理创建密钥，并在模型栏填入开通的模型 ID 或接入点 ep-xxxx。',
   },
   {
+    id: 'opencode-go',
+    name: 'OpenCode Go 订阅（GLM / Kimi / MiniMax / DeepSeek 等）',
+    protocol: 'openai',
+    baseUrl: 'https://opencode.ai/inference/go/openai/v1',
+    fastModel: 'glm-5.3-flash',
+    reasoningModel: 'glm-5.3',
+    visionModel: 'glm-5.3-flash',
+    applyUrl: 'https://opencode.ai/auth',
+    badge: '月付订阅 · ZDR 零留存 · 多模型',
+    guide: '登录 OpenCode Console（opencode.ai）订阅 Go / Go Plus / Go Teams 并复制 API Key 粘贴到下方；点「一键自动拉取」可自由切换 glm-5.3、glm-5.3-flash、kimi-k3、kimi-k3.1-pro、minimax-m3.1-flash、qwen4-max 等（系统自动附带官方文档要求的 x-opencode-session 会话头；因 OpenCode Go 网关暂不放行浏览器跨域预检，请在自建 Node 后端并启用 ENABLE_AI_RELAY=1 时勾选下方「启用无状态透明跨域转发兜底」使用；如需调用 DeepSeek 系列，请在 OpenCode Console → Settings → Privacy 中将 Regions 设为 Global）。',
+  },
+  {
     id: 'custom-openai',
     name: '自定义 OpenAI 兼容接口 / 个人中转站',
     protocol: 'openai',
@@ -125,7 +137,69 @@ export interface StreamOptions {
   messages: ChatTurn[];
   temperature?: number;
   signal?: AbortSignal;
+  sessionId?: string;
   onChunk: (deltaContent: string, deltaReasoning?: string) => void;
+}
+
+const OPENCODE_SESSION_KEY = 'toolbox_opencode_session_id_v1';
+
+export function isOpenCodeEndpoint(baseUrl: string, presetId?: string): boolean {
+  if (presetId === 'opencode-go' || presetId === 'opencode-zen') return true;
+  const raw = String(baseUrl || '').trim();
+  if (!raw) return false;
+  try {
+    const parsed = new URL(raw);
+    return /(?:^|\.)opencode\.ai$/i.test(parsed.hostname);
+  } catch {
+    return /^https?:\/\/[^/]*opencode\.ai(?:\/|$)/i.test(raw);
+  }
+}
+
+export function getOrCreateOpenCodeSessionId(customSessionId?: string): string {
+  if (customSessionId && customSessionId.trim()) {
+    const clean = customSessionId.trim().replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64);
+    if (clean) return clean;
+  }
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      const existing = sessionStorage.getItem(OPENCODE_SESSION_KEY);
+      if (existing && existing.trim()) return existing.trim();
+      const rand =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID().replace(/-/g, '').slice(0, 20)
+          : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+      const fresh = `ses_tb_${rand}`;
+      sessionStorage.setItem(OPENCODE_SESSION_KEY, fresh);
+      return fresh;
+    }
+  } catch {
+    // ignore storage errors in restricted WebViews or Node
+  }
+  return `ses_tb_${Date.now().toString(36)}`;
+}
+
+export function buildProviderRequestHeaders(
+  provider: AiProviderConfig,
+  apiKey: string,
+  sessionId?: string
+): Record<string, string> {
+  const headers: Record<string, string> =
+    provider.protocol === 'anthropic'
+      ? {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        }
+      : {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        };
+
+  if (isOpenCodeEndpoint(provider.baseUrl, provider.presetId)) {
+    headers['x-opencode-session'] = getOrCreateOpenCodeSessionId(sessionId);
+  }
+  return headers;
 }
 
 export function resolveVisionModel(provider: AiProviderConfig | undefined): string {
@@ -133,9 +207,13 @@ export function resolveVisionModel(provider: AiProviderConfig | undefined): stri
   if (provider.visionModel?.trim()) return provider.visionModel.trim();
   const preset = AI_PROVIDER_PRESETS.find((p) => p.id === provider.presetId);
   if (preset?.visionModel) return preset.visionModel;
-  // Detect inherently multimodal custom models (e.g. gpt-4o, gemini, claude, qwen-vl)
+  // Detect inherently multimodal models (including OpenCode Go multimodal chat models)
   const fallbackModel = (provider.fastModel || provider.reasoningModel || '').trim();
-  if (/gpt-4o|gpt-4\.1|gemini|claude|vl|vision|omni|4v/i.test(fallbackModel)) {
+  if (
+    /gpt-4o|gpt-4\.1|gpt-5|gpt-6|gemini|claude|vl|vision|omni|4v|glm-5\.3-flash|kimi-k3|kimi-k2\.7|minimax-m3|deepseek-v4\.1|mimo-v2\.6|qwen3\.[78]|qwen4/i.test(
+      fallbackModel
+    )
+  ) {
     return fallbackModel;
   }
   return '';
@@ -187,7 +265,9 @@ export function parseModelsResponsePayload(json: unknown): string[] {
     if (typeof item === 'string') {
       id = item.trim();
     } else if (item && typeof item === 'object') {
-      const rec = item as { id?: unknown; name?: unknown; model?: unknown };
+      const rec = item as { id?: unknown; name?: unknown; model?: unknown; type?: unknown };
+      // Skip explicit non-chat models (e.g. OpenCode Go embedding / decision models)
+      if (rec.type === 'embedding' || rec.type === 'decision') continue;
       id = String(rec.id || rec.model || rec.name || '').trim();
     }
     if (!id) continue;
@@ -218,9 +298,9 @@ export function suggestModelSlots(models: string[]): {
   const pool = chatModels.length > 0 ? chatModels : models;
 
   const strongReasoningRe = /(reasoner|r1|qwq|thinking|o1|o3|o4-mini|opus)/i;
-  const fallbackReasoningRe = /(pro|max)/i;
-  const visionRe = /(vl|vision|4o|4\.1|4\.5|gpt-5|gpt-6|gemini|claude|omni|4v|qvq|pixtral)/i;
-  const fastRe = /(chat|flash|mini|turbo|plus|sonnet|haiku|v3|v4|glm-4|moonshot|kimi)/i;
+  const fallbackReasoningRe = /(pro|max|^glm-5\.3$)/i;
+  const visionRe = /(vl|vision|4o|4\.1|4\.5|gpt-5|gpt-6|gemini|claude|omni|4v|qvq|pixtral|glm-5\.3-flash|kimi-k3|minimax-m3|deepseek-v4\.1)/i;
+  const fastRe = /(chat|flash|mini|turbo|plus|sonnet|haiku|v3|v4|glm-4|glm-5\.3-flash|moonshot|kimi)/i;
 
   const fastModel =
     pool.find((m) => fastRe.test(m) && !/(reasoner|r1|qwq|thinking|vl|vision)/i.test(m)) ||
@@ -390,18 +470,7 @@ export async function streamAiCompletion(opts: StreamOptions): Promise<{
   );
 
   const endpoint = normalizeEndpoint(provider);
-  const headers: Record<string, string> =
-    provider.protocol === 'anthropic'
-      ? {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        }
-      : {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        };
+  const headers = buildProviderRequestHeaders(provider, apiKey, opts.sessionId);
 
   const bodyStr = JSON.stringify(payload);
   const allowRelay = Boolean(provider.useCorsRelayFallback);
@@ -480,7 +549,7 @@ export async function streamAiCompletion(opts: StreamOptions): Promise<{
           const delta = evt?.choices?.[0]?.delta;
           if (delta) {
             const c = delta.content || '';
-            const r = delta.reasoning_content || '';
+            const r = delta.reasoning_content || delta.reasoning || '';
             if (c || r) {
               fullContent += c;
               fullReasoning += r;

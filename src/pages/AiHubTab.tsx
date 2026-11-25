@@ -263,6 +263,9 @@ export const AiHubTab: React.FC = () => {
   const [pinUnlockInput, setPinUnlockInput] = useState('');
 
   const abortRef = useRef<AbortController | null>(null);
+  const conversationSessionIdRef = useRef<string>(
+    `ses_aihub_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  );
   const fileRef = useRef<HTMLInputElement>(null);
   const imageRef = useRef<HTMLInputElement>(null);
   const followUpImageRef = useRef<HTMLInputElement>(null);
@@ -438,6 +441,9 @@ export const AiHubTab: React.FC = () => {
     setSessionMappings([]);
     setErrorMsg(null);
     setUsedModelName('');
+    conversationSessionIdRef.current = `ses_aihub_${Date.now().toString(36)}_${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
     try {
       localStorage.removeItem(AI_HUB_LOCAL_DRAFT_KEY);
     } catch {
@@ -631,6 +637,7 @@ export const AiHubTab: React.FC = () => {
         modelSlot,
         messages: nextTurns,
         signal: ctrl.signal,
+        sessionId: conversationSessionIdRef.current,
         onChunk: (c, r) => {
           if (c) {
             partialContent += c;
