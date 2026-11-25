@@ -1383,7 +1383,7 @@ export const AiHubTab: React.FC = () => {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.2em] text-[#DFC086] truncate">
-                  ✦ TIANRAN COUNSEL DESK · 多轮研判工作舱
+                  ✦ CN LAWYER COUNSEL DESK · 多轮研判工作舱
                 </span>
                 {uiTurns.length > 0 && (
                   <span className="rounded-full bg-emerald-400/15 border border-emerald-400/30 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 flex-none">

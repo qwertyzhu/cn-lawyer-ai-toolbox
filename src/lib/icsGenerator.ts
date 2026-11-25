@@ -43,7 +43,7 @@ export function buildIcsContent(events: CalendarEventInput[]): string {
   const lines: string[] = [
     'BEGIN:VCALENDAR',
     'VERSION:2.0',
-    'PRODID:-//Zhejiang Tianran Law Firm//Tianran AI Toolbox//CN',
+    'PRODID:-//CN Lawyer AI Toolbox//Legal Deadline Calendar//CN',
     'CALSCALE:GREGORIAN',
     'METHOD:PUBLISH',
     'X-WR-CALNAME:律师办案期限提醒',
