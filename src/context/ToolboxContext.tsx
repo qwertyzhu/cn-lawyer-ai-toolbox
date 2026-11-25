@@ -117,12 +117,51 @@ interface ToolboxContextValue {
 
 const ToolboxContext = createContext<ToolboxContextValue | null>(null);
 
+const VALID_TABS: readonly MainTabId[] = ['home', 'tools', 'ai', 'laws', 'settings'];
+const VALID_TOOLS: readonly OfflineToolId[] = [
+  'elements-complaint',
+  'litigation-fee-calculator',
+  'lpr-interest-calculator',
+  'date-calculator',
+  'labor-compensation',
+  'injury-compensation',
+  'evidence-pdf-toolkit',
+  'local-redactor',
+  'lawyer-fee-quote',
+  'preservation-deadline',
+  'rmb-debt-offset',
+  'meeting-scratchpad',
+];
+
+function parseRouteHash(): { tab: MainTabId; toolId: OfflineToolId | null } {
+  if (typeof window === 'undefined') return { tab: 'home', toolId: null };
+  const raw = window.location.hash.replace(/^#/, '').trim();
+  if (!raw) return { tab: 'home', toolId: null };
+  const params = new URLSearchParams(raw);
+  const tool = params.get('tool') as OfflineToolId | null;
+  if (tool && (VALID_TOOLS as readonly string[]).includes(tool)) {
+    return { tab: 'tools', toolId: tool };
+  }
+  const tab = params.get('tab') as MainTabId | null;
+  if (tab && (VALID_TABS as readonly string[]).includes(tab)) {
+    return { tab, toolId: null };
+  }
+  return { tab: 'home', toolId: null };
+}
+
+function buildRouteHash(tab: MainTabId, toolId: OfflineToolId | null): string {
+  if (tab === 'tools' && toolId) return `#tool=${encodeURIComponent(toolId)}`;
+  if (tab !== 'home') return `#tab=${encodeURIComponent(tab)}`;
+  return '';
+}
+
 export const ToolboxProvider: React.FC<{
   license?: VerifiedLicenseInfo | null;
   children: React.ReactNode;
 }> = ({ license = null, children }) => {
-  const [activeTab, setActiveTab] = useState<MainTabId>('home');
-  const [activeToolId, setActiveToolId] = useState<OfflineToolId | null>(null);
+  const initialRoute = parseRouteHash();
+  const [activeTab, setActiveTab] = useState<MainTabId>(initialRoute.tab);
+  const [activeToolId, setActiveToolId] = useState<OfflineToolId | null>(initialRoute.toolId);
   const [activeSpecialistId, setActiveSpecialistId] = useState<AiSpecialistId>('contract-review');
   const [lawsInitialQuery, setLawsInitialQuery] = useState('');
   const [lawsSubView, setLawsSubView] = useState<'statutes' | 'ima_cloud' | 'checklists'>('statutes');
@@ -183,6 +222,30 @@ export const ToolboxProvider: React.FC<{
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
     };
+  }, []);
+
+  // Sync active tab / open tool to URL hash so browser reloads restore exact working location
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const nextHash = buildRouteHash(activeTab, activeToolId);
+    if (window.location.hash !== nextHash) {
+      const nextUrl = `${window.location.pathname}${window.location.search}${nextHash}`;
+      try {
+        window.history.replaceState(null, '', nextUrl);
+      } catch {
+        // ignore history error in restricted WebViews
+      }
+    }
+  }, [activeTab, activeToolId]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const parsed = parseRouteHash();
+      setActiveTab(parsed.tab);
+      setActiveToolId(parsed.toolId);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
   const showToast = useCallback((msg: string) => {

@@ -8,7 +8,7 @@ export interface OfflineToolMeta {
   shortTitle: string;
   kicker: string;
   desc: string;
-  sourceTag: '本地核心' | '律师新增';
+  runtimeLabel?: string;
   iconName: string;
   keywords: string[];
   aiTarget?: AiSpecialistId;
@@ -54,8 +54,8 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     title: '要素式起诉状 / 答辩状 / 申请书（最高法 2025 官方全量版）',
     shortTitle: '要素式文书',
     kicker: '最高法法〔2025〕82号 · 67类113份官方原表 · Word导出',
-    desc: '100% 对照最高人民法院《法〔2025〕82号》全国统一示范文本，完整内置 9 大领域、67 类纠纷、113 份官方原表（起诉状 / 答辩状 / 申请书 / 第三人意见陈述书及知产证据清单附表）；支持离线一键勾选填表、下载官方空白表、AI 转写传统诉状与立案退件预警核验，导出与最高法格式一致的真 Word (.docx)。',
-    sourceTag: '律师新增',
+    desc: '100% 对照最高人民法院《法〔2025〕82号》全国统一示范文本，完整内置 9 大领域、67 类纠纷、113 份官方原表；支持离线逐项填表、AI 单案/批量转写传统起诉状、多轮对话微调与真 Word (.docx) / ZIP 打包导出。',
+    runtimeLabel: '离线填表 · AI 转写需联网',
     iconName: 'FileSpreadsheet',
     keywords: ['要素式', '起诉状', '答辩状', '申请书', '示范文本', '最高法', '法〔2025〕82号', '行政起诉状', '强制执行申请书', '表格', '立案', 'docx', 'Word', '买卖', '民间借贷', '劳动争议', '著作权'],
     aiTarget: 'de-ai-polish',
@@ -68,7 +68,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '诉讼费计算',
     kicker: '受理费 · 保全费 · 执行费',
     desc: '依据《诉讼费用交纳办法》，一单测算一审、简易减半、财产保全费、二审与执行费，联动律师费报价。',
-    sourceTag: '本地核心',
     iconName: 'Calculator',
     keywords: ['诉讼费', '保全费', '执行费', '减半', '受理费'],
     aiTarget: 'client-wechat-reply',
@@ -81,7 +80,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '律师费与报价单',
     kicker: '31省标准 · 多方案A4报价 · 批量维权',
     desc: '内置全国 31 省 A/B 级核验标准与自定义落款模板，支持常规/半风险/全风险跳档/计时/知产批量维权测算、可现场点字改价的 A4 客户报价单、工时合理开支测算单与全国对比。',
-    sourceTag: '律师新增',
     iconName: 'BadgeDollarSign',
     keywords: ['律师费', '报价', '报价单', '31省', '本所标准', '风险代理', '批量维权', '合理开支', '工时', '对比', '18%'],
     aiTarget: 'client-wechat-reply',
@@ -94,7 +92,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: 'LPR与迟延金',
     kicker: '2019–2026完整LPR分段',
     desc: '内置央行完整 1年/5年期 LPR 历史表，自动按调息日分段拆算逾期利息及日万分之 1.75 加倍迟延履行金。',
-    sourceTag: '本地核心',
     iconName: 'Percent',
     keywords: ['LPR', '利息', '逾期', '迟延履行', '1.75', '违约金'],
     aiTarget: 'timeline-elements',
@@ -107,7 +104,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '大写与债冲抵',
     kicker: '财务大写 · 先息后本冲抵',
     desc: '标准法院文书人民币大写转换、多笔赔偿维权开支累加，以及《民法典》第561条（费用→利息→本金）多期还款冲抵表。',
-    sourceTag: '律师新增',
     iconName: 'Coins',
     keywords: ['大写', '人民币', '561', '冲抵', '先息后本', '还款'],
   },
@@ -119,7 +115,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '期间与时效',
     kicker: '节假日顺延 · 黄金37天',
     desc: '内置 2025–2026 法定节假日与调休安排，按《民法典》第203条自动顺延届满日，一键写入手机系统日历。',
-    sourceTag: '本地核心',
     iconName: 'CalendarDays',
     keywords: ['期间', '上诉期', '15天', '37天', '诉讼时效', '举证期', '节假日'],
   },
@@ -131,7 +126,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '保全续封预警',
     kicker: '账户1年 · 动产2年 · 不动产3年',
     desc: '精准核算银行冻结、动产、不动产/股权查封到期日及提前 30 日续封红线，保存台账并导出手机 .ics 闹钟。',
-    sourceTag: '律师新增',
     iconName: 'BellRing',
     keywords: ['保全', '查封', '冻结', '续封', '执行', '闹钟', 'ics'],
   },
@@ -143,7 +137,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '劳动补偿金',
     kicker: 'N / N+1 / 2N · 三倍社平封顶可自改',
     desc: '测算经济补偿金、代通知金、违法解除 2N 与未签合同双倍工资；内置参考基数，支持按本省市自由修改地区名称与三倍社平封顶并自动保存本机。',
-    sourceTag: '本地核心',
     iconName: 'Briefcase',
     keywords: ['劳动', '经济补偿', '2N', 'N+1', '双倍工资', '辞退', '裁员', '社平工资'],
     aiTarget: 'client-wechat-reply',
@@ -156,7 +149,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '工伤与人损',
     kicker: '全国通用 · 社平/补助月数/人损基数全可改',
     desc: '清晰拆分工伤社保基金支付与单位自付金额，支持自由编辑本省市统计基数及 5–10 级医疗/就业补助月数并自动保存本机，同步支持道交人损城乡统一标准与责比折算。',
-    sourceTag: '本地核心',
     iconName: 'HardHat',
     keywords: ['工伤', '人身损害', '伤残', '交通事故', '一次性伤残', '医疗费', '补助金'],
     aiTarget: 'client-wechat-reply',
@@ -169,7 +161,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '案件隐私脱敏',
     kicker: 'AI前置安全盾 · 零上传',
     desc: '100% 手机本地识别替换当事人姓名、公司全称、身份证、信用代码、手机、银行卡与案号，AI 生成后一键反向还原。',
-    sourceTag: '律师新增',
     iconName: 'ShieldAlert',
     keywords: ['脱敏', '匿名', '隐私', '保密', '还原', '身份证'],
     aiTarget: 'contract-review',
@@ -182,7 +173,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '证据PDF工具',
     kicker: '支持50MB+大卷宗 · 自动分卷 · 页码水印',
     desc: '100% 浏览器本地处理：支持 50MB+ 大卷宗合并与截图压缩，可按 10MB（法院网上立案）或 50MB（仲裁/大卷宗）一键自动分卷拆分，并加盖连续证据页码与举证水印。',
-    sourceTag: '本地核心',
     iconName: 'Layers',
     keywords: ['PDF', '证据', '合并', '压缩', '50MB', '分卷', '页码', '水印', '拆分'],
   },
@@ -194,7 +184,6 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     shortTitle: '办案结构速记',
     kicker: '计时防丢 · 一键转AI纪要',
     desc: '看守所会见、法庭庭审或客户面谈时按「核心事实/争议焦点/待补证据/待办事项」分栏离线速记，防切后台丢失。',
-    sourceTag: '律师新增',
     iconName: 'NotebookPen',
     keywords: ['速记', '会见', '笔录', '庭审', '咨询', '看守所', '笔记'],
     aiTarget: 'client-wechat-reply',

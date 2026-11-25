@@ -15,6 +15,7 @@ import {
   FolderOutput,
   ImagePlus,
   KeyRound,
+  Layers,
   Loader2,
   Lock,
   MessageSquare,
@@ -22,6 +23,7 @@ import {
   Plus,
   Printer,
   RotateCcw,
+  Save,
   Search,
   Send,
   ShieldCheck,
@@ -79,8 +81,53 @@ import {
   type SpcTemplateCorpus,
 } from '../../lib/spcOfficialTemplates';
 import type { AiImageAttachment, RedactionMapping } from '../../types/toolbox';
+import {
+  clearSpcBatchQueueLocal,
+  loadSpcBatchQueueLocal,
+  saveSpcBatchQueueLocal,
+  type SpcBatchItem,
+} from '../../lib/spcBatchEngine';
+import { SpcBatchPanel } from './SpcBatchPanel';
 
 const DRAFT_STORAGE_KEY = 'spc2025_elements_doc_draft_v2';
+const WORKSPACE_STORAGE_KEY = 'cn_lawyer_spc_workspace_v1';
+
+interface AiRefineTurnItem {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  changedLabels?: string[];
+  excludedLabels?: string[];
+  addedLabels?: string[];
+  missingChecklist?: string[];
+}
+
+interface SavedSpcWorkspaceState {
+  activeMode: 'ai' | 'batch' | 'form' | 'preview';
+  sourceText: string;
+  autoRedact: boolean;
+  extractModelSlot: 'fast' | 'reasoning';
+  showAiCopilot: boolean;
+  aiRefineTurns: AiRefineTurnItem[];
+  aiSessionMappings: RedactionMapping[];
+  companionCourt: string;
+  companionAuthScope: 'special' | 'general';
+  companionPreserveAmt: string;
+  companionInvestigateOrg: string;
+  editingBatchItemId: string | null;
+  updatedAt: number;
+}
+
+function loadSpcWorkspaceLocal(): Partial<SavedSpcWorkspaceState> | null {
+  try {
+    const raw = localStorage.getItem(WORKSPACE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedSpcWorkspaceState>;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
 const ORG_TYPE_OPTIONS = [
   '有限责任公司',
@@ -644,11 +691,17 @@ export const ElementsComplaintTool: React.FC = () => {
     showToast,
   } = useToolbox();
 
+  const initialWsRef = useRef<Partial<SavedSpcWorkspaceState> | null>(loadSpcWorkspaceLocal());
+  const initialWs = initialWsRef.current;
+
   const [corpus, setCorpus] = useState<SpcTemplateCorpus | null>(null);
   const [loadError, setLoadError] = useState('');
   const [draft, setDraft] = useState<OfficialSpcDraftState | null>(null);
 
-  const [activeMode, setActiveMode] = useState<'ai' | 'form' | 'preview'>('form');
+  const [activeMode, setActiveMode] = useState<'ai' | 'batch' | 'form' | 'preview'>(() => {
+    const m = initialWs?.activeMode;
+    return m === 'ai' || m === 'batch' || m === 'form' || m === 'preview' ? m : 'form';
+  });
   const [domainFilter, setDomainFilter] = useState<'popular' | SpcDomainId>('popular');
   const [roleFilter, setRoleFilter] = useState<'all' | SpcDocRole>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -662,41 +715,55 @@ export const ElementsComplaintTool: React.FC = () => {
   );
   const [uploadingTpl, setUploadingTpl] = useState(false);
   const [showPlaceholderGuide, setShowPlaceholderGuide] = useState(false);
-  const [companionCourt, setCompanionCourt] = useState('');
-  const [companionAuthScope, setCompanionAuthScope] = useState<'special' | 'general'>('special');
-  const [companionPreserveAmt, setCompanionPreserveAmt] = useState('');
-  const [companionInvestigateOrg, setCompanionInvestigateOrg] = useState('');
+  const [companionCourt, setCompanionCourt] = useState(() => initialWs?.companionCourt || '');
+  const [companionAuthScope, setCompanionAuthScope] = useState<'special' | 'general'>(
+    () => (initialWs?.companionAuthScope === 'general' ? 'general' : 'special')
+  );
+  const [companionPreserveAmt, setCompanionPreserveAmt] = useState(
+    () => initialWs?.companionPreserveAmt || ''
+  );
+  const [companionInvestigateOrg, setCompanionInvestigateOrg] = useState(
+    () => initialWs?.companionInvestigateOrg || ''
+  );
   const customTplInputRef = useRef<HTMLInputElement>(null);
 
   // AI Convert & Multi-Turn Table Copilot state
-  const [sourceText, setSourceText] = useState('');
+  const [sourceText, setSourceText] = useState(() => initialWs?.sourceText || '');
   const [sourceImages, setSourceImages] = useState<AiImageAttachment[]>([]);
-  const [autoRedact, setAutoRedact] = useState(true);
-  const [extractModelSlot, setExtractModelSlot] = useState<'fast' | 'reasoning'>('fast');
+  const [autoRedact, setAutoRedact] = useState(() =>
+    typeof initialWs?.autoRedact === 'boolean' ? initialWs.autoRedact : true
+  );
+  const [extractModelSlot, setExtractModelSlot] = useState<'fast' | 'reasoning'>(
+    () => (initialWs?.extractModelSlot === 'reasoning' ? 'reasoning' : 'fast')
+  );
   const [extracting, setExtracting] = useState(false);
   const [extractLog, setExtractLog] = useState('');
   const [extractError, setExtractError] = useState('');
   const [pinInput, setPinInput] = useState('');
   const [redactingImg, setRedactingImg] = useState<AiImageAttachment | null>(null);
 
-  const [showAiCopilot, setShowAiCopilot] = useState(false);
+  const [showAiCopilot, setShowAiCopilot] = useState(() => Boolean(initialWs?.showAiCopilot));
   const [aiRefineInput, setAiRefineInput] = useState('');
   const [aiRefining, setAiRefining] = useState(false);
   const [aiRefineLog, setAiRefineLog] = useState('');
   const [aiRefineError, setAiRefineError] = useState('');
-  const [aiSessionMappings, setAiSessionMappings] = useState<RedactionMapping[]>([]);
+  const [aiSessionMappings, setAiSessionMappings] = useState<RedactionMapping[]>(() =>
+    Array.isArray(initialWs?.aiSessionMappings) ? initialWs.aiSessionMappings : []
+  );
   const [draftUndoStack, setDraftUndoStack] = useState<OfficialSpcDraftState[]>([]);
-  const [aiRefineTurns, setAiRefineTurns] = useState<
-    {
-      id: string;
-      role: 'user' | 'assistant';
-      text: string;
-      changedLabels?: string[];
-      excludedLabels?: string[];
-      addedLabels?: string[];
-      missingChecklist?: string[];
-    }[]
-  >([]);
+  const [aiRefineTurns, setAiRefineTurns] = useState<AiRefineTurnItem[]>(() =>
+    Array.isArray(initialWs?.aiRefineTurns) ? initialWs.aiRefineTurns : []
+  );
+
+  // Batch Multi-Complaint Queue state (persisted locally in IndexedDB, never uploaded to server)
+  const [batchItems, setBatchItems] = useState<SpcBatchItem[]>([]);
+  const [batchSharedInstruction, setBatchSharedInstruction] = useState('');
+  const [batchConcurrency, setBatchConcurrency] = useState<1 | 2 | 3>(2);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchHydrated, setBatchHydrated] = useState(false);
+  const [editingBatchItemId, setEditingBatchItemId] = useState<string | null>(
+    () => initialWs?.editingBatchItemId || null
+  );
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
@@ -719,6 +786,27 @@ export const ElementsComplaintTool: React.FC = () => {
     };
   }, []);
 
+  // Load local-only batch queue from IndexedDB on mount
+  useEffect(() => {
+    let alive = true;
+    loadSpcBatchQueueLocal()
+      .then((saved) => {
+        if (!alive) return;
+        if (saved) {
+          setBatchItems(saved.items);
+          setBatchSharedInstruction(saved.sharedInstruction);
+          setBatchConcurrency(saved.concurrency);
+        }
+        setBatchHydrated(true);
+      })
+      .catch(() => {
+        if (alive) setBatchHydrated(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // Auto-persist local draft
   useEffect(() => {
     if (!draft) return;
@@ -728,6 +816,82 @@ export const ElementsComplaintTool: React.FC = () => {
       // ignore quota error
     }
   }, [draft]);
+
+  // Auto-persist single-case workspace state (imported sourceText, AI copilot turns, mode, companion fields)
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const payload: SavedSpcWorkspaceState = {
+          activeMode,
+          sourceText: sourceText.slice(0, 80_000),
+          autoRedact,
+          extractModelSlot,
+          showAiCopilot,
+          aiRefineTurns: aiRefineTurns.slice(-20),
+          aiSessionMappings: aiSessionMappings.slice(0, 300),
+          companionCourt,
+          companionAuthScope,
+          companionPreserveAmt,
+          companionInvestigateOrg,
+          editingBatchItemId,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(payload));
+      } catch {
+        // ignore quota error
+      }
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeMode,
+    sourceText,
+    autoRedact,
+    extractModelSlot,
+    showAiCopilot,
+    aiRefineTurns,
+    aiSessionMappings,
+    companionCourt,
+    companionAuthScope,
+    companionPreserveAmt,
+    companionInvestigateOrg,
+    editingBatchItemId,
+  ]);
+
+  // Auto-persist batch queue into local IndexedDB
+  useEffect(() => {
+    if (!batchHydrated) return;
+    const timer = window.setTimeout(() => {
+      saveSpcBatchQueueLocal({
+        templateId: draft?.templateId || '',
+        sharedInstruction: batchSharedInstruction,
+        autoRedact,
+        modelSlot: extractModelSlot,
+        concurrency: batchConcurrency,
+        items: batchItems,
+        updatedAt: Date.now(),
+      }).catch(() => {});
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    batchHydrated,
+    draft?.templateId,
+    batchSharedInstruction,
+    autoRedact,
+    extractModelSlot,
+    batchConcurrency,
+    batchItems,
+  ]);
+
+  // Warn before accidental refresh / tab close while AI extraction or batch queue is running
+  useEffect(() => {
+    if (!extracting && !aiRefining && !batchRunning) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [extracting, aiRefining, batchRunning]);
 
   const tpl: OfficialSpcTemplate | null = useMemo(() => {
     if (!corpus || !draft) return null;
@@ -818,6 +982,7 @@ export const ElementsComplaintTool: React.FC = () => {
     setAiRefineTurns([]);
     setDraftUndoStack([]);
     setAiSessionMappings([]);
+    setEditingBatchItemId(null);
     showToast(`已切换最高法官方模板：${nextTpl.displayName}`);
   };
 
@@ -1447,7 +1612,81 @@ ${JSON.stringify(editableRowSpecs)}`;
     setAiRefineTurns([]);
     setDraftUndoStack([]);
     setAiSessionMappings([]);
+    setEditingBatchItemId(null);
+    try {
+      localStorage.removeItem(WORKSPACE_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
     showToast(`已重置《${tpl.displayName}》为最高法官方空白初始模板`);
+  };
+
+  const editingBatchInfo = useMemo(() => {
+    if (!editingBatchItemId) return null;
+    const idx = batchItems.findIndex((x) => x.id === editingBatchItemId);
+    if (idx === -1) return null;
+    return { index: idx, item: batchItems[idx] };
+  }, [editingBatchItemId, batchItems]);
+
+  const handleOpenBatchItemInEditor = (item: SpcBatchItem) => {
+    if (!item.draft) return;
+    setDraft(item.draft);
+    setSourceText(item.sourceText);
+    setCompanionCourt(item.courtName || '');
+    setEditingBatchItemId(item.id);
+    setDraftUndoStack([]);
+    setAiSessionMappings([]);
+    setAiRefineTurns(
+      item.summary || (item.missingChecklist && item.missingChecklist.length > 0)
+        ? [
+            {
+              id: `batch-open-${item.id}`,
+              role: 'assistant',
+              text:
+                item.summary ||
+                `已载入批量队列案件《${item.caseLabel}》，可直接逐项修改或通过下方 AI 改表助手微调。`,
+              missingChecklist: item.missingChecklist || [],
+            },
+          ]
+        : []
+    );
+    setShowAiCopilot(Boolean(item.missingChecklist && item.missingChecklist.length > 0));
+    setActiveMode('form');
+    showToast(`已载入《${item.caseLabel}》精修，改完点击顶部「保存修改回队列」即可同步导出`);
+  };
+
+  const handleSaveDraftBackToBatch = () => {
+    if (!editingBatchItemId || !draft) return;
+    setBatchItems((prev) =>
+      prev.map((it) =>
+        it.id === editingBatchItemId
+          ? {
+              ...it,
+              draft: {
+                ...draft,
+                rowValues: { ...draft.rowValues },
+                gridValues: Object.fromEntries(
+                  Object.entries(draft.gridValues).map(([k, arr]) => [k, [...arr]])
+                ),
+                extraRows: draft.extraRows.map((x) => ({ ...x })),
+                excludedRowIds: [...(draft.excludedRowIds || [])],
+              },
+              courtName: companionCourt.trim() || it.courtName,
+              updatedAt: Date.now(),
+            }
+          : it
+      )
+    );
+    setEditingBatchItemId(null);
+    setActiveMode('batch');
+    showToast('已将精修后的文书保存回批量队列，打包 ZIP 将直接使用最新版！');
+  };
+
+  const handleClearBatchQueue = () => {
+    setBatchItems([]);
+    setEditingBatchItemId(null);
+    clearSpcBatchQueueLocal().catch(() => {});
+    showToast('已清空本机批量转写队列');
   };
 
   const roleBadgeClass = (role: SpcDocRole) => {
@@ -1810,15 +2049,20 @@ ${JSON.stringify(editableRowSpecs)}`;
               {tpl.docSubtitle ? ` ${tpl.docSubtitle}` : ''}（共 {tpl.rows.length} 行官方表格结构
               {tpl.attachments.length > 0 ? ` + ${tpl.attachments.length} 份官方附件` : ''}）
             </span>
-            <span className="text-slate-500 font-mono text-[10px]">
-              依据：最高人民法院 {corpus.standard}（{corpus.effectiveDate} 起全国推广）
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                <CheckCircle2 className="h-3 w-3 text-emerald-600" /> 已自动暂存本机（刷新不丢）
+              </span>
+              <span className="text-slate-500 font-mono text-[10px]">
+                依据：最高人民法院 {corpus.standard}（{corpus.effectiveDate} 起全国推广）
+              </span>
+            </div>
           </div>
         </div>
       </section>
 
-      {/* 3-Tab Mode Switcher */}
-      <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-[#DED8CC] bg-white p-1.5 shadow-xs">
+      {/* 4-Tab Mode Switcher */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 rounded-xl border border-[#DED8CC] bg-white p-1.5 shadow-xs">
         <button
           type="button"
           onClick={() => setActiveMode('form')}
@@ -1845,6 +2089,29 @@ ${JSON.stringify(editableRowSpecs)}`;
         </button>
         <button
           type="button"
+          onClick={() => setActiveMode('batch')}
+          className={`flex items-center justify-center gap-1.5 rounded-lg py-2.5 px-2 text-xs font-bold transition-colors ${
+            activeMode === 'batch'
+              ? 'bg-[#0E223D] text-[#F6F4EF] shadow-xs'
+              : 'text-slate-600 hover:bg-[#F6F4EF]'
+          }`}
+        >
+          <Layers className="h-3.5 w-3.5 text-[#D1B27A]" />
+          <span>批量转写（多案）</span>
+          {batchItems.length > 0 && (
+            <span
+              className={`rounded-full px-1.5 py-0.2 text-[10px] font-bold ${
+                activeMode === 'batch'
+                  ? 'bg-[#B89254] text-[#11151C]'
+                  : 'bg-[#0E223D]/10 text-[#0E223D]'
+              }`}
+            >
+              {batchItems.length}
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
           onClick={() => setActiveMode('preview')}
           className={`flex items-center justify-center gap-1.5 rounded-lg py-2.5 px-2 text-xs font-bold transition-colors ${
             activeMode === 'preview'
@@ -1856,6 +2123,70 @@ ${JSON.stringify(editableRowSpecs)}`;
           <span>官方 A4 预览导出</span>
         </button>
       </div>
+
+      {/* Sticky Write-Back Banner when fine-tuning a single case from Batch Queue */}
+      {editingBatchInfo && activeMode !== 'batch' && (
+        <div className="rounded-xl border border-[#B89254] bg-[#FBF7EE] px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs shadow-xs">
+          <div className="flex items-center gap-2 font-semibold text-[#0E223D]">
+            <Layers className="h-4 w-4 text-[#9A773E] flex-none" />
+            <span>
+              正在精修批量队列第 #{String(editingBatchInfo.index + 1).padStart(2, '0')} 案：
+              <strong>《{editingBatchInfo.item.caseLabel}》</strong>
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleSaveDraftBackToBatch}
+              className="inline-flex items-center gap-1 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-3 py-1.5 text-xs font-bold text-[#F6F4EF]"
+            >
+              <Save className="h-3.5 w-3.5 text-[#D1B27A]" /> 保存修改回队列并返回
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setEditingBatchItemId(null);
+                setActiveMode('batch');
+              }}
+              className="rounded-lg border border-[#D8D1C3] bg-white hover:bg-slate-50 px-2.5 py-1.5 text-xs font-semibold text-slate-600"
+            >
+              不保存，返回队列
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* MODE BATCH: Multi-Complaint Queue -> Batch Generate & ZIP Export */}
+      {activeMode === 'batch' && (
+        <SpcBatchPanel
+          corpus={corpus}
+          tpl={tpl}
+          items={batchItems}
+          onItemsChange={setBatchItems}
+          sharedInstruction={batchSharedInstruction}
+          onSharedInstructionChange={setBatchSharedInstruction}
+          autoRedact={autoRedact}
+          onAutoRedactChange={setAutoRedact}
+          modelSlot={extractModelSlot}
+          onModelSlotChange={setExtractModelSlot}
+          concurrency={batchConcurrency}
+          onConcurrencyChange={setBatchConcurrency}
+          batchRunning={batchRunning}
+          onBatchRunningChange={setBatchRunning}
+          isOnline={isOnline}
+          activeProvider={activeProvider}
+          hasApiKey={hasApiKey}
+          needsPinUnlock={needsPinUnlock}
+          pinInput={pinInput}
+          onPinInputChange={setPinInput}
+          sessionUnlockedPin={sessionUnlockedPin}
+          onUnlockPinSuccess={setSessionUnlockedPin}
+          onNavigateSettings={() => navigateTab('settings')}
+          onOpenItemInEditor={handleOpenBatchItemInEditor}
+          onClearAllQueue={handleClearBatchQueue}
+          showToast={showToast}
+        />
+      )}
 
       {/* MODE 1: AI Convert Traditional Doc -> Official SPC 2025 Rows */}
       {activeMode === 'ai' && (

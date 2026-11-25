@@ -4,13 +4,16 @@ import {
   BookOpen,
   Home,
   Loader2,
+  RefreshCw,
   Search,
   Settings,
   Sparkles,
   Wifi,
   WifiOff,
   Wrench,
+  X,
 } from 'lucide-react';
+import { applyPwaUpdate, onPwaUpdateAvailable } from './lib/pwaUpdate';
 import { BrandLogo } from './components/BrandLogo';
 import { CommandSearchModal } from './components/CommandSearchModal';
 import { InstallPwaSheet } from './components/InstallPwaSheet';
@@ -67,8 +70,16 @@ const ToolboxShell: React.FC<{
   const [searchOpen, setSearchOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [weChatTipDismissed, setWeChatTipDismissed] = useState(false);
+  const [pwaUpdateReady, setPwaUpdateReady] = useState(false);
+  const [pwaBannerDismissed, setPwaBannerDismissed] = useState(false);
   const isWeChat =
     typeof navigator !== 'undefined' && /MicroMessenger/i.test(navigator.userAgent);
+
+  useEffect(() => {
+    return onPwaUpdateAvailable((ready) => {
+      if (ready) setPwaUpdateReady(true);
+    });
+  }, []);
 
   useEffect(() => {
     if (justAutoActivatedName) {
@@ -353,6 +364,46 @@ const ToolboxShell: React.FC<{
           </div>
         </nav>
       </div>
+
+      {/* Non-intrusive PWA Update Banner (never force-reloads during active lawyer work) */}
+      {pwaUpdateReady && !pwaBannerDismissed && (
+        <div className="fixed bottom-20 lg:bottom-6 right-4 z-50 max-w-sm rounded-xl border border-[#B89254]/60 bg-[#0E223D] px-4 py-3 text-xs text-[#F6F4EF] shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="font-bold text-[#E6CD9E] flex items-center gap-1.5">
+                <RefreshCw className="h-3.5 w-3.5" /> 发现工作台新版本
+              </div>
+              <p className="text-[11px] leading-relaxed text-slate-300">
+                为避免打断您的办案与 AI 任务，系统不会自动刷新。当前草稿已自动暂存本机，空闲时可手动刷新升级。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPwaBannerDismissed(true)}
+              className="rounded p-1 text-slate-400 hover:bg-white/10 hover:text-white"
+              title="稍后提醒"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="mt-2.5 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setPwaBannerDismissed(true)}
+              className="rounded-lg border border-white/15 px-2.5 py-1 text-[11px] text-slate-300 hover:bg-white/10"
+            >
+              稍后再说
+            </button>
+            <button
+              type="button"
+              onClick={() => applyPwaUpdate()}
+              className="rounded-lg bg-[#B89254] px-3 py-1 text-[11px] font-bold text-[#11151C] hover:bg-[#C9A465]"
+            >
+              立即刷新升级
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Global Toast */}
       {toastMessage && (

@@ -45,7 +45,12 @@ import {
   buildElementsComplaintDocxBytes,
   buildMarkdownReportDocxBytes,
   buildOfficialSpcDocxBytes,
+  buildZipBundleBytes,
 } from '../src/lib/docxBuilder.ts';
+import {
+  buildSpcBatchZipEntries,
+  runSpcBatchQueue,
+} from '../src/lib/spcBatchEngine.ts';
 import {
   applyPartyQuickFillToCellText,
   applySpcAiPatch,
@@ -1046,6 +1051,127 @@ test('L-2: Synthetic 30-paragraph legal redaction regression suite achieves >=95
     assert.equal(restoreRedactedText(res.redactedText, res.mappings), sc.text);
   }
   assert.ok(maskedEntities / totalEntities >= 0.95);
+});
+
+test('Batch SPC conversion engine isolates per-case redaction, handles partial errors, and supports ZIP bundle export', async () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const corpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/spc-2025-templates.json'), 'utf8')
+  );
+  const tpl = corpus.templates.find((t) => t.id === 'spc2025_035');
+  assert.ok(tpl, 'spc2025_035 template must exist');
+
+  const items = [
+    {
+      id: 'case-1',
+      sourceFilename: '《星河夜雨》起诉状.docx',
+      caseLabel: '《星河夜雨》起诉状',
+      sourceText:
+        '原告：杭州甲影业有限公司，住所地杭州市西湖区1号。被告：北京乙网络科技有限公司。作品《星河夜雨》，诉请赔偿经济损失30000元。此致杭州市西湖区人民法院。',
+      templateId: tpl.id,
+      templateName: tpl.displayName,
+      status: 'pending',
+      updatedAt: Date.now(),
+    },
+    {
+      id: 'case-2',
+      sourceFilename: '《故障测试》起诉状.docx',
+      caseLabel: '《故障测试》起诉状',
+      sourceText: 'SIMULATE_API_ERROR_CASE',
+      templateId: tpl.id,
+      templateName: tpl.displayName,
+      status: 'pending',
+      updatedAt: Date.now(),
+    },
+    {
+      id: 'case-3',
+      sourceFilename: '《春风十里》起诉状.docx',
+      caseLabel: '《春风十里》起诉状',
+      sourceText:
+        '原告：上海丙传媒有限公司，住所地上海市徐汇区9号。被告：深圳丁科技有限公司。作品《春风十里》，诉请赔偿经济损失50000元。此致上海市徐汇区人民法院。',
+      templateId: tpl.id,
+      templateName: tpl.displayName,
+      status: 'pending',
+      updatedAt: Date.now(),
+    },
+  ];
+
+  const stateMap = new Map(items.map((x) => [x.id, { ...x }]));
+
+  const summary = await runSpcBatchQueue({
+    items,
+    tpl,
+    provider: {
+      id: 'mock',
+      presetId: 'deepseek',
+      name: 'Mock',
+      protocol: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'sk-test',
+      fastModel: 'mock-fast',
+      reasoningModel: 'mock-reason',
+    },
+    modelSlot: 'fast',
+    autoRedact: true,
+    sharedInstruction: '统一勾选主张诉讼费用',
+    concurrency: 2,
+    completeFn: async ({ messages }) => {
+      const userText = messages[1].content;
+      if (userText.includes('SIMULATE_API_ERROR_CASE')) {
+        throw new Error('429 模拟接口限流');
+      }
+      assert.ok(!userText.includes('杭州甲影业有限公司'));
+      assert.ok(!userText.includes('上海丙传媒有限公司'));
+      assert.ok(userText.includes('[公司主体A]'));
+      const isCase1 = userText.includes('《星河夜雨》');
+      const pMatch = userText.match(/原告：(\[[^\]]+\])/);
+      const dMatch = userText.match(/被告：(\[[^\]]+\])/);
+      assert.ok(pMatch && dMatch);
+      return {
+        content: JSON.stringify({
+          rowValues: {
+            r03: `名称：${pMatch[1]}`,
+            r06: `名称：${dMatch[1]}`,
+            r11: isCase1 ? '判令被告停止侵害《星河夜雨》信息网络传播权。' : '判令被告停止侵害《春风十里》信息网络传播权。',
+          },
+          signerName: pMatch[1],
+          courtName: isCase1 ? '杭州市西湖区人民法院' : '上海市徐汇区人民法院',
+          summary: isCase1 ? '已填充星河夜雨案要素' : '已填充春风十里案要素',
+          missingChecklist: ['原告统一社会信用代码'],
+        }),
+      };
+    },
+    onItemUpdate: (id, patch) => {
+      stateMap.set(id, { ...stateMap.get(id), ...patch });
+    },
+  });
+
+  assert.equal(summary.totalTargeted, 3);
+  assert.equal(summary.succeeded, 2);
+  assert.equal(summary.failed, 1);
+  const c1 = stateMap.get('case-1');
+  const c2 = stateMap.get('case-2');
+  const c3 = stateMap.get('case-3');
+  assert.equal(c1.draft.rowValues.r03, '名称：杭州甲影业有限公司');
+  assert.equal(c3.draft.rowValues.r03, '名称：上海丙传媒有限公司');
+  assert.equal(c2.status, 'error');
+
+  const built = buildSpcBatchZipEntries(corpus, [c1, c2, c3]);
+  assert.equal(built.exportedCount, 2);
+  assert.equal(built.skippedCount, 1);
+  const zipBytes = buildZipBundleBytes(built.entries);
+  assert.equal(zipBytes[0], 0x50);
+  assert.equal(zipBytes[1], 0x4b);
+  assert.ok(Buffer.from(zipBytes).toString('utf8').includes('00_批量生成核对清单.txt'));
+});
+
+test('PWA Service Worker never silently calls skipWaiting on install and awaits explicit SKIP_WAITING message', () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const swSrc = fs.readFileSync(path.resolve(__dirname, '../public/sw.js'), 'utf8');
+  const mainSrc = fs.readFileSync(path.resolve(__dirname, '../src/main.tsx'), 'utf8');
+  assert.ok(!swSrc.includes('.then(() => self.skipWaiting())'));
+  assert.ok(swSrc.includes("event.data.type === 'SKIP_WAITING'"));
+  assert.ok(!mainSrc.includes('window.location.reload()'));
 });
 
 

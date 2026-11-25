@@ -292,6 +292,8 @@ export function resetLocalUserWorkspaceForAccountSwitch(): void {
     'cn_lawyer_box_active_case_id_v1',
     'cn_lawyer_box_elements_complaint_draft_v1',
     'spc2025_elements_doc_draft_v2',
+    'cn_lawyer_spc_workspace_v1',
+    'cn_lawyer_aihub_local_draft_v1',
     FEE_SHEET_KEY,
     'lf-sheet-author-manual',
     SYNC_META_KEY,
@@ -302,6 +304,13 @@ export function resetLocalUserWorkspaceForAccountSwitch(): void {
     } catch {
       // ignore
     }
+  }
+  try {
+    if (typeof indexedDB !== 'undefined') {
+      indexedDB.deleteDatabase('cn_lawyer_spc_batch_db_v1');
+    }
+  } catch {
+    // ignore
   }
 }
 

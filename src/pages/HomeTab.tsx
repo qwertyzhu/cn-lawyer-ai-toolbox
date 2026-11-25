@@ -410,15 +410,6 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
                 <div className="rounded-lg bg-[#F6F4EF] p-2 text-[#0E223D] group-hover:bg-[#0E223D] group-hover:text-[#D1B27A] transition-colors">
                   <ToolIcon name={tool.iconName} className="h-4 w-4" />
                 </div>
-                <span
-                  className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                    tool.sourceTag === '律师新增'
-                      ? 'bg-[#F3ECE0] text-[#7A5922]'
-                      : 'bg-slate-100 text-slate-600'
-                  }`}
-                >
-                  {tool.sourceTag}
-                </span>
               </div>
               <div className="mt-2.5">
                 <div className="font-display text-sm font-bold text-[#11151C]">

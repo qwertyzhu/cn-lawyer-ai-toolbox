@@ -228,14 +228,8 @@ export const ToolsTab: React.FC = () => {
                       </div>
 
                       <div className="mt-4 pt-3 border-t border-[#F1EDE4] flex items-center justify-between text-xs">
-                        <span
-                          className={`rounded px-2 py-0.5 text-[10px] font-semibold ${
-                            tool.sourceTag === '律师新增'
-                              ? 'bg-[#F3ECE0] text-[#7A5922]'
-                              : 'bg-slate-100 text-slate-600'
-                          }`}
-                        >
-                          {tool.sourceTag} · 离线秒开
+                        <span className="rounded px-2 py-0.5 text-[10px] font-medium bg-[#F6F4EF] text-slate-500">
+                          {tool.runtimeLabel || '本地离线可用'}
                         </span>
                         <span className="inline-flex items-center gap-1 font-bold text-[#0E223D] group-hover:translate-x-0.5 transition-transform">
                           打开工具 <ArrowRight className="h-3.5 w-3.5 text-[#B89254]" />

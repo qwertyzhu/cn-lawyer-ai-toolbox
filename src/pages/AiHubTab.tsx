@@ -7,6 +7,7 @@ import {
   BrainCircuit,
   Camera,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -157,6 +158,34 @@ function renderHighlightedOutboundPreview(text: string): React.ReactNode {
   );
 }
 
+const AI_HUB_LOCAL_DRAFT_KEY = 'cn_lawyer_aihub_local_draft_v1';
+
+interface SavedAiHubLocalDraft {
+  specialistId: AiSpecialistId;
+  modelSlot: 'fast' | 'reasoning';
+  selectedPreset: string;
+  customSceneNote: string;
+  inputText: string;
+  followUpInput: string;
+  chatHistory: ChatTurn[];
+  uiTurns: UiConversationTurn[];
+  sessionMappings: RedactionMapping[];
+  customSensitiveTerms: string[];
+  usedModelName: string;
+  updatedAt: number;
+}
+
+function loadAiHubLocalDraft(): Partial<SavedAiHubLocalDraft> | null {
+  try {
+    const raw = localStorage.getItem(AI_HUB_LOCAL_DRAFT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SavedAiHubLocalDraft>;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export const AiHubTab: React.FC = () => {
   const {
     isOnline,
@@ -177,13 +206,24 @@ export const AiHubTab: React.FC = () => {
     showToast,
   } = useToolbox();
 
-  const [specialistId, setSpecialistId] = useState<AiSpecialistId>(activeSpecialistId);
-  const [modelSlot, setModelSlot] = useState<'fast' | 'reasoning'>(byok.defaultModelSlot);
-  const [selectedPreset, setSelectedPreset] = useState<string>('');
-  const [customSceneNote, setCustomSceneNote] = useState<string>('');
-  const [inputText, setInputText] = useState('');
+  const initialDraftRef = useRef<Partial<SavedAiHubLocalDraft> | null>(loadAiHubLocalDraft());
+  const initialDraft = initialDraftRef.current;
+
+  const [specialistId, setSpecialistId] = useState<AiSpecialistId>(
+    () => (initialDraft?.specialistId as AiSpecialistId) || activeSpecialistId
+  );
+  const [modelSlot, setModelSlot] = useState<'fast' | 'reasoning'>(
+    () => initialDraft?.modelSlot || byok.defaultModelSlot
+  );
+  const [selectedPreset, setSelectedPreset] = useState<string>(
+    () => initialDraft?.selectedPreset || ''
+  );
+  const [customSceneNote, setCustomSceneNote] = useState<string>(
+    () => initialDraft?.customSceneNote || ''
+  );
+  const [inputText, setInputText] = useState(() => initialDraft?.inputText || '');
   const [inputImages, setInputImages] = useState<AiImageAttachment[]>([]);
-  const [followUpInput, setFollowUpInput] = useState('');
+  const [followUpInput, setFollowUpInput] = useState(() => initialDraft?.followUpInput || '');
   const [followUpImages, setFollowUpImages] = useState<AiImageAttachment[]>([]);
   const [compressingImages, setCompressingImages] = useState(false);
   const [redactingImageTarget, setRedactingImageTarget] = useState<{
@@ -199,18 +239,26 @@ export const AiHubTab: React.FC = () => {
   const [expandedReasoningIds, setExpandedReasoningIds] = useState<Record<string, boolean>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isCorsDirectError, setIsCorsDirectError] = useState(false);
-  const [usedModelName, setUsedModelName] = useState('');
+  const [usedModelName, setUsedModelName] = useState(() => initialDraft?.usedModelName || '');
 
-  const [sessionMappings, setSessionMappings] = useState<RedactionMapping[]>([]);
+  const [sessionMappings, setSessionMappings] = useState<RedactionMapping[]>(
+    () => (Array.isArray(initialDraft?.sessionMappings) ? initialDraft.sessionMappings : [])
+  );
   const [autoRestoreView, setAutoRestoreView] = useState(true);
   const [formattedView, setFormattedView] = useState(true);
   const [skipPreviewThisSession, setSkipPreviewThisSession] = useState(false);
-  const [customSensitiveTerms, setCustomSensitiveTerms] = useState<string[]>([]);
+  const [customSensitiveTerms, setCustomSensitiveTerms] = useState<string[]>(
+    () => (Array.isArray(initialDraft?.customSensitiveTerms) ? initialDraft.customSensitiveTerms : [])
+  );
   const [customTermDraft, setCustomTermDraft] = useState('');
   const [pendingPreview, setPendingPreview] = useState<PendingOutboundPreview | null>(null);
   const [confirmDisableRedactOpen, setConfirmDisableRedactOpen] = useState(false);
-  const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
-  const [uiTurns, setUiTurns] = useState<UiConversationTurn[]>([]);
+  const [chatHistory, setChatHistory] = useState<ChatTurn[]>(
+    () => (Array.isArray(initialDraft?.chatHistory) ? initialDraft.chatHistory : [])
+  );
+  const [uiTurns, setUiTurns] = useState<UiConversationTurn[]>(
+    () => (Array.isArray(initialDraft?.uiTurns) ? initialDraft.uiTurns : [])
+  );
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pinUnlockInput, setPinUnlockInput] = useState('');
 
@@ -241,13 +289,90 @@ export const AiHubTab: React.FC = () => {
     byok.pinEnabled && !activeProvider?.apiKey && activeProvider?.apiKeyEncrypted && !sessionUnlockedPin
   );
 
-  // Sync preset & recommended model slot when switching specialist
+  // Sync preset & recommended model slot ONLY when user switches specialist after initial mount
+  const prevSpecialistIdRef = useRef<AiSpecialistId | null>(null);
   useEffect(() => {
-    setModelSlot(specialist.recommendedSlot);
-    setSelectedPreset(specialist.presetOptions?.[0]?.value || '');
-    setCustomSceneNote('');
-    setErrorMsg(null);
-  }, [specialist]);
+    if (prevSpecialistIdRef.current === null) {
+      prevSpecialistIdRef.current = specialist.id;
+      if (!selectedPreset && specialist.presetOptions?.[0]?.value) {
+        setSelectedPreset(specialist.presetOptions[0].value);
+      }
+      return;
+    }
+    if (prevSpecialistIdRef.current !== specialist.id) {
+      prevSpecialistIdRef.current = specialist.id;
+      setModelSlot(specialist.recommendedSlot);
+      setSelectedPreset(specialist.presetOptions?.[0]?.value || '');
+      setCustomSceneNote('');
+      setErrorMsg(null);
+    }
+  }, [specialist, selectedPreset]);
+
+  // Auto-persist local-only AI Hub draft (NEVER synced to cloud; strips heavy image dataUrls to stay lightweight)
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const hasContent =
+          Boolean(inputText.trim()) ||
+          Boolean(followUpInput.trim()) ||
+          uiTurns.length > 0 ||
+          chatHistory.length > 0;
+        if (!hasContent) {
+          localStorage.removeItem(AI_HUB_LOCAL_DRAFT_KEY);
+          return;
+        }
+        const compactHistory: ChatTurn[] = chatHistory.slice(-24).map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        const compactTurns: UiConversationTurn[] = uiTurns.slice(-12).map((t) => ({
+          ...t,
+          userImages: [],
+        }));
+        const payload: SavedAiHubLocalDraft = {
+          specialistId,
+          modelSlot,
+          selectedPreset,
+          customSceneNote,
+          inputText: inputText.slice(0, 60_000),
+          followUpInput: followUpInput.slice(0, 12_000),
+          chatHistory: compactHistory,
+          uiTurns: compactTurns,
+          sessionMappings: sessionMappings.slice(0, 300),
+          customSensitiveTerms: customSensitiveTerms.slice(0, 100),
+          usedModelName,
+          updatedAt: Date.now(),
+        };
+        localStorage.setItem(AI_HUB_LOCAL_DRAFT_KEY, JSON.stringify(payload));
+      } catch {
+        // ignore storage quota errors
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [
+    specialistId,
+    modelSlot,
+    selectedPreset,
+    customSceneNote,
+    inputText,
+    followUpInput,
+    chatHistory,
+    uiTurns,
+    sessionMappings,
+    customSensitiveTerms,
+    usedModelName,
+  ]);
+
+  // Warn before accidental refresh / tab close while AI response is actively streaming
+  useEffect(() => {
+    if (!streaming) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [streaming]);
 
   // Consume cross-tool AI handoff payload
   useEffect(() => {
@@ -313,6 +438,11 @@ export const AiHubTab: React.FC = () => {
     setSessionMappings([]);
     setErrorMsg(null);
     setUsedModelName('');
+    try {
+      localStorage.removeItem(AI_HUB_LOCAL_DRAFT_KEY);
+    } catch {
+      // ignore
+    }
   };
 
   const handleUnlockPin = async () => {
@@ -493,6 +623,8 @@ export const AiHubTab: React.FC = () => {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
+    let partialContent = '';
+    let partialReasoning = '';
     try {
       const res = await streamAiCompletion({
         provider: { ...activeProvider, apiKey: resolvedKey },
@@ -500,8 +632,14 @@ export const AiHubTab: React.FC = () => {
         messages: nextTurns,
         signal: ctrl.signal,
         onChunk: (c, r) => {
-          if (c) setStreamingOutput((prev) => prev + c);
-          if (r) setStreamingReasoning((prev) => prev + r);
+          if (c) {
+            partialContent += c;
+            setStreamingOutput((prev) => prev + c);
+          }
+          if (r) {
+            partialReasoning += r;
+            setStreamingReasoning((prev) => prev + r);
+          }
         },
       });
       setUsedModelName(res.usedModel);
@@ -526,6 +664,25 @@ export const AiHubTab: React.FC = () => {
     } catch (err) {
       setIsCorsDirectError(err instanceof AiDirectConnectError);
       setErrorMsg(err instanceof Error ? err.message : '生成中断');
+      // Preserve partial output received before interruption so work is never lost
+      if (partialContent.trim()) {
+        const preservedText = `${partialContent}\n\n> *(传输中断，以上为已接收内容，可点击重新生成或继续追问)*`;
+        setUiTurns((prev) => [
+          ...(isFollowUp ? prev : []),
+          {
+            id: `turn-partial-${Date.now()}`,
+            roundNo: (isFollowUp ? prev.length : 0) + 1,
+            userDisplayText: effectiveText,
+            userImages: attachedImgs,
+            assistantRaw: preservedText,
+            reasoning: partialReasoning,
+            usedModel: activeModelDisplay || '',
+          },
+        ]);
+        setChatHistory([...nextTurns, { role: 'assistant', content: partialContent }]);
+        setStreamingOutput('');
+        setStreamingReasoning('');
+      }
       if (isFollowUp && attachedImgs.length > 0) {
         setFollowUpImages(attachedImgs);
       }
@@ -663,38 +820,45 @@ export const AiHubTab: React.FC = () => {
           </div>
         </div>
 
-        {/* Right: Active Provider Quick Switch Pill */}
-        <button
-          type="button"
-          onClick={() => navigateTab('settings')}
-          className="group inline-flex items-center gap-2 rounded-full border border-[#DFD7C5] bg-white/90 hover:bg-white hover:border-[#B89254] px-3.5 py-1.5 text-xs shadow-[0_4px_14px_-10px_rgba(14,34,61,0.22)] transition-all"
-          title="前往「我的配置」切换模型或服务商"
-        >
-          <span
-            className={`h-2 w-2 rounded-full ${
-              !isOnline
-                ? 'bg-amber-400'
-                : hasReadyKey
-                ? 'bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.16)]'
-                : 'bg-rose-400'
-            }`}
-          />
-          <span className="font-semibold text-[#0E223D] max-w-[130px] truncate">{providerShortName}</span>
-          {activeProvider?.useCorsRelayFallback && (
+        {/* Right: Local Auto-Save Badge + Active Provider Quick Switch Pill */}
+        <div className="flex flex-wrap items-center gap-2">
+          {(inputText.trim() || uiTurns.length > 0) && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-[10.5px] font-semibold text-emerald-800">
+              <CheckCircle2 className="h-3 w-3 text-emerald-600" /> 草稿已暂存本机（刷新不丢）
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => navigateTab('settings')}
+            className="group inline-flex items-center gap-2 rounded-full border border-[#DFD7C5] bg-white/90 hover:bg-white hover:border-[#B89254] px-3.5 py-1.5 text-xs shadow-[0_4px_14px_-10px_rgba(14,34,61,0.22)] transition-all"
+            title="前往「我的配置」切换模型或服务商"
+          >
             <span
-              className="inline-flex items-center gap-1 rounded-full bg-amber-100 border border-amber-300/80 px-2 py-0.5 text-[10px] font-bold text-amber-900"
-              title="您已在配置中显式开启服务器无状态转发；默认直连模式下请求不经过站点服务器"
-            >
-              经服务器转发
-            </span>
-          )}
-          {resolvedVisionModel && (
-            <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-[#F5F0E4] px-2 py-0.5 text-[10px] font-medium text-[#7D5E29]">
-              <Eye className="h-2.5 w-2.5" /> 识图就绪
-            </span>
-          )}
-          <ChevronRight className="h-3.5 w-3.5 text-slate-400 group-hover:text-[#0E223D] group-hover:translate-x-0.5 transition-all" />
-        </button>
+              className={`h-2 w-2 rounded-full ${
+                !isOnline
+                  ? 'bg-amber-400'
+                  : hasReadyKey
+                  ? 'bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.16)]'
+                  : 'bg-rose-400'
+              }`}
+            />
+            <span className="font-semibold text-[#0E223D] max-w-[130px] truncate">{providerShortName}</span>
+            {activeProvider?.useCorsRelayFallback && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-amber-100 border border-amber-300/80 px-2 py-0.5 text-[10px] font-bold text-amber-900"
+                title="您已在配置中显式开启服务器无状态转发；默认直连模式下请求不经过部署服务器"
+              >
+                经服务器转发
+              </span>
+            )}
+            {resolvedVisionModel && (
+              <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-[#F5F0E4] px-2 py-0.5 text-[10px] font-medium text-[#7D5E29]">
+                <Eye className="h-2.5 w-2.5" /> 识图就绪
+              </span>
+            )}
+            <ChevronRight className="h-3.5 w-3.5 text-slate-400 group-hover:text-[#0E223D] group-hover:translate-x-0.5 transition-all" />
+          </button>
+        </div>
       </div>
 
       {/* Offline Banner */}
@@ -1212,7 +1376,7 @@ export const AiHubTab: React.FC = () => {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.2em] text-[#DFC086] truncate">
-                  ✦ CN LAWYER COUNSEL DESK · 多轮研判工作舱
+                  ✦ TIANRAN COUNSEL DESK · 多轮研判工作舱
                 </span>
                 {uiTurns.length > 0 && (
                   <span className="rounded-full bg-emerald-400/15 border border-emerald-400/30 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 flex-none">

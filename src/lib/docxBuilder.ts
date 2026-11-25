@@ -1254,3 +1254,47 @@ export function downloadMarkdownReportDocx(
   const bytes = buildMarkdownReportDocxBytes(input);
   triggerDocxDownload(bytes, filename);
 }
+
+export interface GenericZipEntry {
+  name: string;
+  data: Uint8Array | string;
+}
+
+/**
+ * Packs arbitrary binary/text files into a standard PKZIP (STORE, UTF-8 filenames, IEEE CRC32) archive.
+ * Automatically deduplicates colliding entry names so batch exports never overwrite files.
+ */
+export function buildZipBundleBytes(entries: GenericZipEntry[]): Uint8Array {
+  const encoder = new TextEncoder();
+  const seenNames = new Map<string, number>();
+  const normalized: ZipEntryInput[] = entries.map((entry) => {
+    const rawName = String(entry.name || 'file').replace(/^[/\\]+/, '');
+    const key = rawName.toLowerCase();
+    const count = seenNames.get(key) || 0;
+    seenNames.set(key, count + 1);
+    let finalName = rawName;
+    if (count > 0) {
+      const dotIdx = rawName.lastIndexOf('.');
+      finalName =
+        dotIdx > 0
+          ? `${rawName.slice(0, dotIdx)}_${count + 1}${rawName.slice(dotIdx)}`
+          : `${rawName}_${count + 1}`;
+    }
+    const content = typeof entry.data === 'string' ? encoder.encode(entry.data) : entry.data;
+    return { name: finalName, content };
+  });
+  return createZipStore(normalized);
+}
+
+export function downloadZipBundle(entries: GenericZipEntry[], zipFilename: string): void {
+  const bytes = buildZipBundleBytes(entries);
+  const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/zip' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = zipFilename.endsWith('.zip') ? zipFilename : `${zipFilename}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
