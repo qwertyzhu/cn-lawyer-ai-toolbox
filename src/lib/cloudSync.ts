@@ -79,7 +79,7 @@ export interface CloudSyncPushResponse {
 
 export const DEFAULT_CLOUD_SYNC_PREFS: CloudSyncPrefs = {
   enabled: true,
-  syncByok: true,
+  syncByok: false,
   syncWorkspace: true,
   syncSensitiveNotes: false,
   useE2eePassphrase: false,
@@ -92,7 +92,7 @@ export function getCloudSyncPrefs(): CloudSyncPrefs {
     const parsed = JSON.parse(raw);
     return {
       enabled: parsed.enabled !== false,
-      syncByok: parsed.syncByok !== false,
+      syncByok: parsed.syncByok === true,
       syncWorkspace: parsed.syncWorkspace !== false,
       syncSensitiveNotes: parsed.syncSensitiveNotes === true,
       useE2eePassphrase: Boolean(parsed.useE2eePassphrase),

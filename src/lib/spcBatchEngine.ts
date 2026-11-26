@@ -282,17 +282,24 @@ export async function runSpcBatchQueue(options: RunSpcBatchOptions): Promise<Run
       updatedAt: Date.now(),
     });
 
-    // Strict per-case isolated redaction: NEVER share mappings across cases
+    // Strict per-case isolated redaction: NEVER share mappings across cases;
+    // ALSO redact sharedInstruction so PII in batch instructions never leaks outbound!
     let mappings: RedactionMapping[] = [];
     let promptMaterial = cleanSource;
+    let effectiveSharedInstruction = sharedInstruction;
     if (autoRedact) {
       const red = redactLegalText(cleanSource, { existingMappings: [] });
       promptMaterial = red.redactedText;
       mappings = red.mappings;
+      if (sharedInstruction && sharedInstruction.trim()) {
+        const redInst = redactLegalText(sharedInstruction, { existingMappings: mappings });
+        effectiveSharedInstruction = redInst.redactedText;
+        mappings = redInst.mappings;
+      }
     }
 
     const { systemPrompt, userContent } = buildSpcExtractionPromptPayload(tpl, promptMaterial, {
-      sharedInstruction,
+      sharedInstruction: effectiveSharedInstruction,
     });
 
     let receivedChars = 0;

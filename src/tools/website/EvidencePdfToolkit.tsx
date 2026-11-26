@@ -7,6 +7,8 @@ async function loadPdfDocumentCtor() {
   return mod.PDFDocument;
 }
 import {
+  AlertTriangle,
+  Archive,
   ArrowDown,
   ArrowLeft,
   ArrowUp,
@@ -23,6 +25,14 @@ import {
   Trash2,
 } from 'lucide-react';
 import { trackEvent } from '../../components/ToolboxBridgeLink';
+import { downloadZipBundle } from '../../lib/docxBuilder';
+import {
+  formatPdfBytes,
+  resolveLimitBytes,
+  splitPdfIntoVerifiedVolumes,
+  type PdfByteLimitUnit,
+  type VerifiedPdfSplitResult,
+} from '../../lib/pdfVolumeSplitter';
 
 type PdfTab = 'merge_build' | 'stamp_number' | 'split_extract';
 type QualityPreset = 'high' | 'balanced' | 'compact';
@@ -225,7 +235,13 @@ export const EvidencePdfToolkit: React.FC = () => {
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [quality, setQuality] = useState<QualityPreset>('balanced');
   const [targetLimitMb, setTargetLimitMb] = useState<VolumeCapMb>(50);
+  const [byteLimitUnit, setByteLimitUnit] = useState<PdfByteLimitUnit>('decimal_mb');
   const [autoSplitOnLimit, setAutoSplitOnLimit] = useState(true);
+  const [lastSplitResult, setLastSplitResult] = useState<{
+    baseName: string;
+    maxMb: number;
+    result: VerifiedPdfSplitResult;
+  } | null>(null);
   const mergeInputRef = useRef<HTMLInputElement | null>(null);
 
   // Shared Stamp & Page Number options (used by both Tab 1 optional & Tab 2)
@@ -367,61 +383,48 @@ export const EvidencePdfToolkit: React.FC = () => {
     setQueue(copy);
   };
 
-  /** Splits any PDF byte array into consecutive volumes each under maxMb MB (100% browser-local) */
-  const splitBytesIntoVolumes = async (
+  /** Splits any PDF byte array into verified volumes and tracks oversize single-page warnings */
+  const runVerifiedVolumeSplit = async (
     pdfBytes: Uint8Array,
     baseName: string,
-    maxMb: number
-  ): Promise<{ volumes: number; totalPages: number; maxVolBytes: number }> => {
-    const maxBytes = maxMb * 1024 * 1024;
-    const PdfDoc = await loadPdfDocumentCtor();
-    const src = await PdfDoc.load(pdfBytes, { ignoreEncryption: true });
-    const totalPages = src.getPageCount();
-    const avgPerPage = Math.max(20 * 1024, pdfBytes.byteLength / Math.max(1, totalPages));
+    maxMb: number,
+    unit: PdfByteLimitUnit = byteLimitUnit
+  ): Promise<VerifiedPdfSplitResult> => {
+    const res = await splitPdfIntoVerifiedVolumes({
+      pdfBytes,
+      baseName,
+      maxMb,
+      unit,
+      onProgress: (msg) => setStatusMsg(msg),
+    });
+    setLastSplitResult({ baseName, maxMb, result: res });
 
-    let cursor = 0;
-    let volIndex = 1;
-    let maxVolBytes = 0;
-
-    while (cursor < totalPages) {
-      let take = Math.max(1, Math.min(totalPages - cursor, Math.floor((maxBytes * 0.92) / avgPerPage)));
-      let chosenBytes: Uint8Array | null = null;
-      let chosenCount = take;
-
-      while (true) {
-        setStatusMsg(`正在按 ${maxMb}MB 分卷：生成第 ${volIndex} 卷（第 ${cursor + 1}–${cursor + take} 页）…`);
-        const subDoc = await PdfDoc.create();
-        const pageIndices = Array.from({ length: take }, (_, idx) => cursor + idx);
-        const copied = await subDoc.copyPages(src, pageIndices);
-        copied.forEach((p) => subDoc.addPage(p));
-        const candidate = await subDoc.save({ useObjectStreams: true });
-        chosenBytes = candidate;
-        chosenCount = take;
-        if (candidate.byteLength <= maxBytes || take === 1) break;
-        take = Math.max(1, Math.floor(take * (maxBytes / candidate.byteLength) * 0.92));
+    if (res.volumes.length <= 3) {
+      for (const vol of res.volumes) {
+        triggerDownload(vol.bytes, vol.fileName);
+        await new Promise((r) => setTimeout(r, 180));
       }
-
-      if (chosenBytes) {
-        maxVolBytes = Math.max(maxVolBytes, chosenBytes.byteLength);
-        triggerDownload(chosenBytes, `${baseName}-第${volIndex}卷.pdf`);
-        await new Promise((r) => setTimeout(r, 220));
-      }
-      cursor += chosenCount;
-      volIndex++;
+    } else {
+      downloadZipBundle(
+        res.volumes.map((v) => ({ name: v.fileName, data: v.bytes })),
+        `${baseName}-共${res.volumes.length}卷.zip`
+      );
     }
-
-    return { volumes: volIndex - 1, totalPages, maxVolBytes };
+    return res;
   };
 
-  const handleBuildMergedPdf = async () => {
+  const handleBuildMergedPdf = async (overrideQuality?: QualityPreset) => {
     if (queue.length === 0) {
       setErrorMsg('请先添加至少 1 个 PDF 或图片证据文件。');
       return;
     }
+    const effectiveQuality = overrideQuality || quality;
+    if (overrideQuality) setQuality(overrideQuality);
     setBusy(true);
     setErrorMsg('');
     setStatusMsg('正在本地浏览器合并卷宗与压缩图片...');
     setLastOutputInfo(null);
+    setLastSplitResult(null);
     try {
       const PdfDoc = await loadPdfDocumentCtor();
       const outDoc = await PdfDoc.create();
@@ -434,7 +437,7 @@ export const EvidencePdfToolkit: React.FC = () => {
           const copiedPages = await outDoc.copyPages(src, src.getPageIndices());
           copiedPages.forEach((p) => outDoc.addPage(p));
         } else {
-          const { bytes, w, h } = await compressImageToJpeg(item.file, quality);
+          const { bytes, w, h } = await compressImageToJpeg(item.file, effectiveQuality);
           const jpg = await outDoc.embedJpg(bytes);
           // Standard A4 portrait (595.28 x 841.89 pt) with clean filing margins
           const a4W = 595.28;
@@ -469,15 +472,20 @@ export const EvidencePdfToolkit: React.FC = () => {
       const fileName = `${baseName}.pdf`;
       setLastOutputBytes(outBytes);
 
-      if (targetLimitMb > 0 && autoSplitOnLimit && outBytes.byteLength > targetLimitMb * 1024 * 1024) {
-        const res = await splitBytesIntoVolumes(outBytes, baseName, targetLimitMb);
+      const limitBytes = targetLimitMb > 0 ? resolveLimitBytes(targetLimitMb, byteLimitUnit) : 0;
+      if (targetLimitMb > 0 && autoSplitOnLimit && outBytes.byteLength > limitBytes) {
+        const res = await runVerifiedVolumeSplit(outBytes, baseName, targetLimitMb, byteLimitUnit);
         setLastOutputInfo({
-          name: `${baseName}-第1至${res.volumes}卷.pdf`,
+          name: `${baseName}-第1至${res.volumes.length}卷.pdf`,
           size: outBytes.byteLength,
           pages: res.totalPages,
-          volumes: res.volumes,
+          volumes: res.volumes.length,
         });
-        setStatusMsg(`总体积 ${fmtBytes(outBytes.byteLength)}，已按 ${targetLimitMb}MB 自动拆分为 ${res.volumes} 卷并下载！`);
+        setStatusMsg(
+          res.allWithinLimit
+            ? `总体积 ${formatPdfBytes(outBytes.byteLength, byteLimitUnit)}，已按 ${targetLimitMb}MB 切分核验为 ${res.volumes.length} 卷！`
+            : `已切分为 ${res.volumes.length} 卷，但其中 ${res.oversizeVolumes.length} 卷单页本身超出 ${targetLimitMb}MB 上限，请查看下方告警！`
+        );
       } else {
         triggerDownload(outBytes, fileName);
         setLastOutputInfo({ name: fileName, size: outBytes.byteLength, pages: outDoc.getPageCount() });
@@ -520,6 +528,7 @@ export const EvidencePdfToolkit: React.FC = () => {
     }
     setBusy(true);
     setErrorMsg('');
+    setLastSplitResult(null);
     setStatusMsg('正在本地加载思源开源字体并叠加页码/水印...');
     try {
       const buf = await stampFile.file.arrayBuffer();
@@ -553,6 +562,7 @@ export const EvidencePdfToolkit: React.FC = () => {
     }
     setBusy(true);
     setErrorMsg('');
+    setLastSplitResult(null);
     setStatusMsg(`正在本地提取 ${indices.length} 页证据...`);
     try {
       const buf = await splitFile.file.arrayBuffer();
@@ -583,17 +593,22 @@ export const EvidencePdfToolkit: React.FC = () => {
     }
     setBusy(true);
     setErrorMsg('');
+    setLastSplitResult(null);
     try {
       const buf = await splitFile.file.arrayBuffer();
       const base = splitFile.file.name.replace(/\.pdf$/i, '');
-      const res = await splitBytesIntoVolumes(new Uint8Array(buf), base, capMb);
+      const res = await runVerifiedVolumeSplit(new Uint8Array(buf), base, capMb, byteLimitUnit);
       setLastOutputInfo({
-        name: `${base}-第1至${res.volumes}卷.pdf`,
+        name: `${base}-第1至${res.volumes.length}卷.pdf`,
         size: splitFile.file.size,
         pages: res.totalPages,
-        volumes: res.volumes,
+        volumes: res.volumes.length,
       });
-      setStatusMsg(`已按 ${capMb}MB/卷 自动切分为 ${res.volumes} 个 PDF 并下载！`);
+      setStatusMsg(
+        res.allWithinLimit
+          ? `已按 ${capMb}MB/卷 切分核验为 ${res.volumes.length} 个 PDF！`
+          : `已切分为 ${res.volumes.length} 卷，但其中 ${res.oversizeVolumes.length} 卷单页本身超出 ${capMb}MB 上限！`
+      );
       trackEvent('tool_result');
     } catch (e) {
       setErrorMsg(e instanceof Error ? e.message : '自动分卷失败');
@@ -801,15 +816,42 @@ export const EvidencePdfToolkit: React.FC = () => {
                   ))}
                 </div>
                 {targetLimitMb > 0 && (
-                  <label className="mt-2 flex cursor-pointer items-center gap-2 text-xs font-medium text-[#0E223D]">
-                    <input
-                      type="checkbox"
-                      checked={autoSplitOnLimit}
-                      onChange={(e) => setAutoSplitOnLimit(e.target.checked)}
-                      className="h-3.5 w-3.5 accent-[#0E223D]"
-                    />
-                    <span>合并后若超过 {targetLimitMb}MB，自动切分为「第 1 卷、第 2 卷…」下载</span>
-                  </label>
+                  <div className="mt-2.5 space-y-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-[#0E223D]">
+                      <input
+                        type="checkbox"
+                        checked={autoSplitOnLimit}
+                        onChange={(e) => setAutoSplitOnLimit(e.target.checked)}
+                        className="h-3.5 w-3.5 accent-[#0E223D]"
+                      />
+                      <span>合并后若超过 {targetLimitMb}MB，自动切分为「第 1 卷、第 2 卷…」并逐卷校验实测字节</span>
+                    </label>
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600">
+                      <span className="font-semibold text-slate-700">体积换算口径：</span>
+                      <button
+                        type="button"
+                        onClick={() => setByteLimitUnit('decimal_mb')}
+                        className={`rounded border px-2 py-0.5 ${
+                          byteLimitUnit === 'decimal_mb'
+                            ? 'border-[#0E223D] bg-[#0E223D] text-white font-semibold'
+                            : 'border-[#D8D2C6] bg-white text-slate-600'
+                        }`}
+                      >
+                        严格十进制 MB（1MB=1,000,000字节 · 推荐）
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setByteLimitUnit('binary_mib')}
+                        className={`rounded border px-2 py-0.5 ${
+                          byteLimitUnit === 'binary_mib'
+                            ? 'border-[#0E223D] bg-[#0E223D] text-white font-semibold'
+                            : 'border-[#D8D2C6] bg-white text-slate-600'
+                        }`}
+                      >
+                        二进制 MiB（1MiB=1,048,576字节）
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -875,7 +917,7 @@ export const EvidencePdfToolkit: React.FC = () => {
               <button
                 type="button"
                 disabled={busy || queue.length === 0}
-                onClick={handleBuildMergedPdf}
+                onClick={() => handleBuildMergedPdf()}
                 className="inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-[2px] bg-[#11151C] px-5 py-3 text-xs font-semibold text-[#F6F4EF] hover:bg-[#0E223D] disabled:opacity-50"
               >
                 {busy ? <Loader2 className="h-4 w-4 animate-spin text-[#D1B27A]" /> : <Download className="h-4 w-4 text-[#D1B27A]" />}
@@ -1060,8 +1102,34 @@ export const EvidencePdfToolkit: React.FC = () => {
             {splitFile && (
               <div className="space-y-4">
                 <div className="rounded-[2px] border border-[#E5DFD3] bg-[#FAF9F6] p-4 space-y-2.5">
-                  <div className="text-xs font-bold text-[#0E223D]">
-                    方式一：按目标体积一键自动分卷（适合 50MB+ 大卷宗快速达标）
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-[#0E223D]">
+                      方式一：按目标体积一键自动分卷并逐卷实测字节校验
+                    </div>
+                    <div className="flex items-center gap-1.5 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => setByteLimitUnit('decimal_mb')}
+                        className={`rounded border px-2 py-0.5 ${
+                          byteLimitUnit === 'decimal_mb'
+                            ? 'border-[#0E223D] bg-[#0E223D] text-white font-semibold'
+                            : 'border-[#D8D2C6] bg-white text-slate-600'
+                        }`}
+                      >
+                        严格十进制 MB（10⁶ 字节）
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setByteLimitUnit('binary_mib')}
+                        className={`rounded border px-2 py-0.5 ${
+                          byteLimitUnit === 'binary_mib'
+                            ? 'border-[#0E223D] bg-[#0E223D] text-white font-semibold'
+                            : 'border-[#D8D2C6] bg-white text-slate-600'
+                        }`}
+                      >
+                        二进制 MiB（2²⁰ 字节）
+                      </button>
+                    </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -1118,48 +1186,147 @@ export const EvidencePdfToolkit: React.FC = () => {
           </div>
         )}
         {lastOutputInfo && (
-          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border border-emerald-200 bg-emerald-50 px-5 py-3.5 text-xs text-emerald-900">
-            <div>
-              <strong>✅ 已生成并下载：{lastOutputInfo.name}</strong>
-              <span className="ml-3 font-num">共 {lastOutputInfo.pages} 页 · 体积 {fmtBytes(lastOutputInfo.size)}</span>
+          <div
+            className={`mt-5 space-y-3 border px-5 py-4 text-xs ${
+              lastSplitResult && !lastSplitResult.result.allWithinLimit
+                ? 'border-amber-300 bg-amber-50 text-amber-950'
+                : 'border-emerald-200 bg-emerald-50 text-emerald-900'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <strong>
+                  {lastSplitResult && !lastSplitResult.result.allWithinLimit
+                    ? `⚠ 已生成分卷（含单页超限提醒）：${lastOutputInfo.name}`
+                    : `✅ 已生成并下载：${lastOutputInfo.name}`}
+                </strong>
+                <span className="ml-3 font-num">
+                  共 {lastOutputInfo.pages} 页 · 原始总体积 {formatPdfBytes(lastOutputInfo.size, byteLimitUnit)}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold">
+                  {lastSplitResult
+                    ? lastSplitResult.result.allWithinLimit
+                      ? `✓ 全部 ${lastSplitResult.result.volumes.length} 卷实测均在 ${lastSplitResult.maxMb}${lastSplitResult.result.limitUnit === 'decimal_mb' ? 'MB（10⁶字节）' : 'MiB'} 以内`
+                      : `⚠ 共 ${lastSplitResult.result.volumes.length} 卷，其中 ${lastSplitResult.result.oversizeVolumes.length} 卷单页本身超出 ${lastSplitResult.maxMb}MB 上限`
+                    : targetLimitMb === 0
+                    ? '✓ 高清完整单文件已导出（不限体积）'
+                    : lastOutputInfo.size <= resolveLimitBytes(targetLimitMb, byteLimitUnit)
+                    ? `✓ 实测体积在 ${targetLimitMb}${byteLimitUnit === 'decimal_mb' ? 'MB（10⁶字节）' : 'MiB'} 以内，可直接提交`
+                    : `提示：体积超过 ${targetLimitMb}MB`}
+                </span>
+                {!lastOutputInfo.volumes &&
+                  lastOutputBytes &&
+                  targetLimitMb > 0 &&
+                  lastOutputInfo.size > resolveLimitBytes(targetLimitMb, byteLimitUnit) && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        try {
+                          const base = lastOutputInfo.name.replace(/\.pdf$/i, '');
+                          const res = await runVerifiedVolumeSplit(
+                            lastOutputBytes,
+                            base,
+                            targetLimitMb,
+                            byteLimitUnit
+                          );
+                          setLastOutputInfo({
+                            ...lastOutputInfo,
+                            name: `${base}-第1至${res.volumes.length}卷.pdf`,
+                            volumes: res.volumes.length,
+                          });
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                      className="rounded bg-[#0E223D] px-2.5 py-1 text-[11px] font-bold text-[#F6F4EF]"
+                    >
+                      立即按 {targetLimitMb}MB 分卷下载
+                    </button>
+                  )}
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-semibold">
-                {lastOutputInfo.volumes
-                  ? `✓ 已按 ${targetLimitMb || 50}MB 自动拆分为 ${lastOutputInfo.volumes} 卷`
-                  : targetLimitMb === 0
-                  ? '✓ 高清完整单文件已导出（不限体积）'
-                  : lastOutputInfo.size <= targetLimitMb * 1024 * 1024
-                  ? `✓ 体积在 ${targetLimitMb}MB 以内，可直接提交`
-                  : `提示：体积超过 ${targetLimitMb}MB`}
-              </span>
-              {!lastOutputInfo.volumes &&
-                lastOutputBytes &&
-                targetLimitMb > 0 &&
-                lastOutputInfo.size > targetLimitMb * 1024 * 1024 && (
+
+            {lastSplitResult && !lastSplitResult.result.allWithinLimit && (
+              <div className="rounded border border-amber-400 bg-white/90 p-3 text-[11px] leading-5 text-amber-950 space-y-2">
+                <div className="flex items-start gap-2 font-bold text-rose-800">
+                  <AlertTriangle className="h-4 w-4 flex-none mt-0.5" />
+                  <span>
+                    以下分卷已退化为「单页独立成卷」，但因该页原图/扫描流本身超过 {lastSplitResult.maxMb}
+                    {lastSplitResult.result.limitUnit === 'decimal_mb' ? 'MB' : 'MiB'}，直接上传网上立案平台仍可能被拒：
+                  </span>
+                </div>
+                <ul className="list-disc pl-5 space-y-0.5 font-mono text-[11px]">
+                  {lastSplitResult.result.oversizeVolumes.map((v) => (
+                    <li key={v.volIndex}>
+                      第 {v.volIndex} 卷（原卷第 {v.pageStart} 页）· 实测{' '}
+                      {formatPdfBytes(v.byteLength, lastSplitResult.result.limitUnit)}（{v.byteLength.toLocaleString()} 字节）
+                    </li>
+                  ))}
+                </ul>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <span className="text-slate-700">
+                    建议：将该超限页导出为图片后重新放入「证据合并 & 截图压图转 PDF」压缩，或使用打印为低分辨率 PDF。
+                  </span>
+                  {tab === 'merge_build' && quality !== 'compact' && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => handleBuildMergedPdf('compact')}
+                      className="rounded bg-[#0E223D] px-3 py-1 text-[11px] font-bold text-white hover:bg-[#17345C]"
+                    >
+                      切换「极限瘦身」档重新压缩生成
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {lastSplitResult && lastSplitResult.result.volumes.length > 0 && (
+              <div className="border-t border-black/10 pt-2.5 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold">
+                    分卷核验清单（共 {lastSplitResult.result.volumes.length} 卷，超 3 卷时已自动打包为单个 .zip 防止浏览器拦截多文件下载）：
+                  </span>
                   <button
                     type="button"
-                    disabled={busy}
-                    onClick={async () => {
-                      setBusy(true);
-                      try {
-                        const base = lastOutputInfo.name.replace(/\.pdf$/i, '');
-                        const res = await splitBytesIntoVolumes(lastOutputBytes, base, targetLimitMb);
-                        setLastOutputInfo({
-                          ...lastOutputInfo,
-                          name: `${base}-第1至${res.volumes}卷.pdf`,
-                          volumes: res.volumes,
-                        });
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                    className="rounded bg-[#0E223D] px-2.5 py-1 text-[11px] font-bold text-[#F6F4EF]"
+                    onClick={() =>
+                      downloadZipBundle(
+                        lastSplitResult.result.volumes.map((v) => ({ name: v.fileName, data: v.bytes })),
+                        `${lastSplitResult.baseName}-共${lastSplitResult.result.volumes.length}卷.zip`
+                      )
+                    }
+                    className="inline-flex items-center gap-1 rounded border border-[#0E223D] bg-white px-2.5 py-1 text-[11px] font-bold text-[#0E223D] hover:bg-[#FAF9F6]"
                   >
-                    立即按 {targetLimitMb}MB 分卷下载
+                    <Archive className="h-3.5 w-3.5" /> 一键打包全部切分卷 (.zip)
                   </button>
-                )}
-            </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {lastSplitResult.result.volumes.map((vol) => (
+                    <button
+                      key={vol.volIndex}
+                      type="button"
+                      onClick={() => triggerDownload(vol.bytes, vol.fileName)}
+                      className={`inline-flex items-center gap-1 rounded border px-2.5 py-1 text-[11px] font-mono ${
+                        vol.exceedsLimit
+                          ? 'border-rose-400 bg-rose-50 text-rose-900 font-bold'
+                          : 'border-emerald-300 bg-white text-emerald-950 hover:bg-emerald-100/50'
+                      }`}
+                    >
+                      <Download className="h-3 w-3" />
+                      <span>
+                        第{vol.volIndex}卷(P{vol.pageStart}-{vol.pageEnd}) ·{' '}
+                        {formatPdfBytes(vol.byteLength, lastSplitResult.result.limitUnit)}
+                        {vol.exceedsLimit ? ' ⚠超限' : ''}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

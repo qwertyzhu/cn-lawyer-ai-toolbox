@@ -87,10 +87,30 @@ import {
   saveSpcBatchQueueLocal,
   type SpcBatchItem,
 } from '../../lib/spcBatchEngine';
+import {
+  hasNonEmptySpcDraft,
+  hydrateSingleSpcDraft,
+  loadInitialSpcDraftsFromLocalStorage,
+  loadSpcWorkspaceIdb,
+  parseSpcDraftBundle,
+  saveSpcWorkspacePersisted,
+  serializeSpcDraftBundle,
+  switchSpcTemplatePreservingDrafts,
+} from '../../lib/spcDraftStorage';
 import { SpcBatchPanel } from './SpcBatchPanel';
 
-const DRAFT_STORAGE_KEY = 'spc2025_elements_doc_draft_v2';
 const WORKSPACE_STORAGE_KEY = 'cn_lawyer_spc_workspace_v1';
+
+interface PendingSpcAiPreflight {
+  kind: 'extract' | 'refine';
+  plainKey: string;
+  systemPrompt: string;
+  userContent: string;
+  images?: AiImageAttachment[];
+  unredactedImageCount: number;
+  mappings: RedactionMapping[];
+  refineInstruction?: string;
+}
 
 interface AiRefineTurnItem {
   id: string;
@@ -199,35 +219,6 @@ function restoreDeepStrings<T>(value: T, mappings: RedactionMapping[]): T {
     return out as T;
   }
   return value;
-}
-
-function loadSavedSpcDraft(corpus: SpcTemplateCorpus): OfficialSpcDraftState {
-  const defaultTpl =
-    corpus.templates.find((t) => t.displayName === '买卖合同纠纷民事起诉状') || corpus.templates[0];
-  try {
-    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<OfficialSpcDraftState>;
-      if (parsed && parsed.templateId) {
-        const matched = corpus.templates.find((t) => t.id === parsed.templateId);
-        if (matched) {
-          const base = createInitialSpcDraft(matched);
-          return {
-            ...base,
-            ...parsed,
-            rowValues: { ...base.rowValues, ...(parsed.rowValues || {}) },
-            gridValues: { ...base.gridValues, ...(parsed.gridValues || {}) },
-            extraRows: Array.isArray(parsed.extraRows) ? parsed.extraRows : [],
-            excludedRowIds: Array.isArray(parsed.excludedRowIds) ? parsed.excludedRowIds : [],
-            attachmentRows: { ...base.attachmentRows, ...(parsed.attachmentRows || {}) },
-          };
-        }
-      }
-    }
-  } catch {
-    // ignore corrupt draft
-  }
-  return createInitialSpcDraft(defaultTpl);
 }
 
 function buildPrintableHtml(doc: ResolvedSpcDocument): string {
@@ -697,6 +688,13 @@ export const ElementsComplaintTool: React.FC = () => {
   const [corpus, setCorpus] = useState<SpcTemplateCorpus | null>(null);
   const [loadError, setLoadError] = useState('');
   const [draft, setDraft] = useState<OfficialSpcDraftState | null>(null);
+  const [draftsByTemplate, setDraftsByTemplate] = useState<Record<string, OfficialSpcDraftState>>({});
+  const [undoStacksByTemplate, setUndoStacksByTemplate] = useState<
+    Record<string, OfficialSpcDraftState[]>
+  >({});
+  const [saveStatus, setSaveStatus] = useState<'saving' | 'saved' | 'error'>('saved');
+  const [saveErrorMsg, setSaveErrorMsg] = useState('');
+  const draftBundleInputRef = useRef<HTMLInputElement>(null);
 
   const [activeMode, setActiveMode] = useState<'ai' | 'batch' | 'form' | 'preview'>(() => {
     const m = initialWs?.activeMode;
@@ -730,6 +728,9 @@ export const ElementsComplaintTool: React.FC = () => {
   // AI Convert & Multi-Turn Table Copilot state
   const [sourceText, setSourceText] = useState(() => initialWs?.sourceText || '');
   const [sourceImages, setSourceImages] = useState<AiImageAttachment[]>([]);
+  const [redactedImageIds, setRedactedImageIds] = useState<Record<string, boolean>>({});
+  const [pendingAiPreflight, setPendingAiPreflight] = useState<PendingSpcAiPreflight | null>(null);
+  const [preflightAckUnredactedImages, setPreflightAckUnredactedImages] = useState(false);
   const [autoRedact, setAutoRedact] = useState(() =>
     typeof initialWs?.autoRedact === 'boolean' ? initialWs.autoRedact : true
   );
@@ -764,18 +765,44 @@ export const ElementsComplaintTool: React.FC = () => {
   const [editingBatchItemId, setEditingBatchItemId] = useState<string | null>(
     () => initialWs?.editingBatchItemId || null
   );
+  const [workspaceHydrated, setWorkspaceHydrated] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
 
-  // Load official 113-template corpus offline-first
+  // Load official 113-template corpus + per-template drafts & full untruncated IndexedDB workspace
   useEffect(() => {
     let alive = true;
-    loadOfficialSpcCorpus()
-      .then((data) => {
+    Promise.all([loadOfficialSpcCorpus(), loadSpcWorkspaceIdb()])
+      .then(([data, idbState]) => {
         if (!alive) return;
         setCorpus(data);
-        setDraft(loadSavedSpcDraft(data));
+        const lsInit = loadInitialSpcDraftsFromLocalStorage(data);
+        if (idbState && idbState.draftsByTemplate) {
+          const mergedMap: Record<string, OfficialSpcDraftState> = { ...lsInit.draftsByTemplate };
+          for (const [tid, rawD] of Object.entries(idbState.draftsByTemplate)) {
+            const matchedTpl = data.templates.find((t) => t.id === tid);
+            if (matchedTpl && rawD) {
+              mergedMap[tid] = hydrateSingleSpcDraft(matchedTpl, rawD);
+            }
+          }
+          const activeId =
+            idbState.activeTemplateId && data.templates.some((t) => t.id === idbState.activeTemplateId)
+              ? idbState.activeTemplateId
+              : lsInit.activeDraft.templateId;
+          const activeTpl = data.templates.find((t) => t.id === activeId) || data.templates[0];
+          const resolvedActive = mergedMap[activeTpl.id] || createInitialSpcDraft(activeTpl);
+          mergedMap[activeTpl.id] = resolvedActive;
+          setDraftsByTemplate(mergedMap);
+          setDraft(resolvedActive);
+          if (typeof idbState.sourceText === 'string' && idbState.sourceText.length > 0) {
+            setSourceText(idbState.sourceText);
+          }
+        } else {
+          setDraftsByTemplate(lsInit.draftsByTemplate);
+          setDraft(lsInit.activeDraft);
+        }
+        setWorkspaceHydrated(true);
       })
       .catch((err) => {
         if (!alive) return;
@@ -807,42 +834,54 @@ export const ElementsComplaintTool: React.FC = () => {
     };
   }, []);
 
-  // Auto-persist local draft
+  // Sync current active draft into draftsByTemplate map on every edit
   useEffect(() => {
     if (!draft) return;
-    try {
-      localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
-    } catch {
-      // ignore quota error
-    }
+    setDraftsByTemplate((prev) => {
+      if (prev[draft.templateId] === draft) return prev;
+      return { ...prev, [draft.templateId]: draft };
+    });
   }, [draft]);
 
-  // Auto-persist single-case workspace state (imported sourceText, AI copilot turns, mode, companion fields)
+  // Auto-persist full untruncated workspace & per-template drafts with live save status
   useEffect(() => {
+    if (!workspaceHydrated || !draft) return;
+    setSaveStatus('saving');
     const timer = window.setTimeout(() => {
-      try {
-        const payload: SavedSpcWorkspaceState = {
-          activeMode,
-          sourceText: sourceText.slice(0, 80_000),
+      const mergedDrafts = { ...draftsByTemplate, [draft.templateId]: draft };
+      saveSpcWorkspacePersisted(
+        {
+          activeTemplateId: draft.templateId,
+          draftsByTemplate: mergedDrafts,
+          sourceText, // Zero silent 80k truncation!
           autoRedact,
           extractModelSlot,
           showAiCopilot,
           aiRefineTurns: aiRefineTurns.slice(-20),
-          aiSessionMappings: aiSessionMappings.slice(0, 300),
+          aiSessionMappings: aiSessionMappings.slice(0, 400),
           companionCourt,
           companionAuthScope,
           companionPreserveAmt,
           companionInvestigateOrg,
           editingBatchItemId,
           updatedAt: Date.now(),
-        };
-        localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(payload));
-      } catch {
-        // ignore quota error
-      }
-    }, 300);
+        },
+        WORKSPACE_STORAGE_KEY
+      ).then((res) => {
+        if (res.ok) {
+          setSaveStatus('saved');
+          setSaveErrorMsg('');
+        } else {
+          setSaveStatus('error');
+          setSaveErrorMsg(res.error || '本机保存失败，请点击下载草稿备份');
+        }
+      });
+    }, 260);
     return () => window.clearTimeout(timer);
   }, [
+    workspaceHydrated,
+    draft,
+    draftsByTemplate,
     activeMode,
     sourceText,
     autoRedact,
@@ -977,13 +1016,62 @@ export const ElementsComplaintTool: React.FC = () => {
 
   const handleSelectTemplate = (nextTpl: OfficialSpcTemplate) => {
     if (tpl && nextTpl.id === tpl.id) return;
-    setDraft(createInitialSpcDraft(nextTpl));
+    if (tpl) {
+      setUndoStacksByTemplate((prev) => ({ ...prev, [tpl.id]: draftUndoStack }));
+    }
+    const switched = switchSpcTemplatePreservingDrafts({
+      currentDraft: draft,
+      draftsByTemplate,
+      nextTpl,
+    });
+    setDraftsByTemplate(switched.nextDraftsByTemplate);
+    setDraft(switched.nextDraft);
+    setDraftUndoStack(undoStacksByTemplate[nextTpl.id] || []);
     setOpenQuickFillRowId(null);
     setAiRefineTurns([]);
-    setDraftUndoStack([]);
     setAiSessionMappings([]);
     setEditingBatchItemId(null);
-    showToast(`已切换最高法官方模板：${nextTpl.displayName}`);
+    showToast(
+      switched.restoredExisting
+        ? `已切回《${nextTpl.displayName}》（已自动恢复您此前的本机填表草稿）`
+        : `已切换最高法官方模板：${nextTpl.displayName}（原模板草稿已自动保留在本机）`
+    );
+  };
+
+  const handleExportDraftBundle = () => {
+    if (!draft) return;
+    const merged = { ...draftsByTemplate, [draft.templateId]: draft };
+    const json = serializeSpcDraftBundle({
+      activeTemplateId: draft.templateId,
+      draftsByTemplate: merged,
+      sourceText,
+      companionCourt,
+    });
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `要素式文书草稿备份_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast('已下载本机草稿备份（含各模板已填内容与导入原文）');
+  };
+
+  const handleImportDraftBundle = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !corpus) return;
+    try {
+      const txt = await file.text();
+      const restored = parseSpcDraftBundle(txt, corpus);
+      setDraftsByTemplate((prev) => ({ ...prev, ...restored.draftsByTemplate }));
+      setDraft(restored.activeDraft);
+      if (restored.sourceText) setSourceText(restored.sourceText);
+      if (restored.companionCourt) setCompanionCourt(restored.companionCourt);
+      showToast('已成功恢复要素式文书草稿备份');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '无法解析该草稿备份文件');
+    }
   };
 
   const pushUndoSnapshot = (snap: OfficialSpcDraftState) => {
@@ -1154,21 +1242,14 @@ export const ElementsComplaintTool: React.FC = () => {
       return;
     }
 
-    setExtracting(true);
-    setExtractLog(`正在按最高法官方《${tpl.displayName}》全量逐行核验提取要素…`);
-
     let mappings: RedactionMapping[] = [];
     let promptMaterial = sourceText.trim();
     if (autoRedact && promptMaterial) {
       const res = redactLegalText(promptMaterial);
       promptMaterial = res.redactedText;
       mappings = res.mappings;
-      setAiSessionMappings(mappings);
-    } else {
-      setAiSessionMappings([]);
     }
 
-    // Build exact official row specification so the LLM inspects EVERY row without omission
     const editableRowSpecs = tpl.rows
       .filter((r) => r.kind === 'field' || r.kind === 'full_input' || r.kind === 'grid')
       .map((r) => {
@@ -1188,7 +1269,7 @@ export const ElementsComplaintTool: React.FC = () => {
 1. **逐行通扫防遗漏**：你必须逐条对照下方全部 ${editableRowSpecs.length} 行（尤其是长勾选项如“权利种类”“侵权行为方式”“赔偿经济损失”“合理费用”“是否主张诉讼费用”“发生时间地点”），只要原文有提及，就必须填入对应行并把命中的“□”改为“☑”，未命中的保持“□”！
 2. **保留官方前缀与换行**：必须完整保留每个栏目官方原文中的提示前缀、换行和选项结构（如“名称：”“住所地：”“法定代表人：”“联系电话：”“经济损失  元”“是□ 否□”），只把提取到的事实填入对应空白处。
 3. **严禁编造**：材料中未出现的统一社会信用代码、身份证号、版权登记号、具体网址、金额或日期，严禁脑补；把材料未提供但该官方表需要的重要缺口写入 "missingChecklist" 数组提醒律师人工补填。
-4. **保留脱敏占位符**：若材料含 [公司主体A]、[当事人甲]、[手机号1] 等脱敏占位符，必须原样保留在输出值中以便本机自动还原。
+4. **保留脱敏占位符**：若材料含 [公司主体A]、[当事人甲]、[联系电话1] 等脱敏占位符，必须原样保留在输出值中以便本机自动还原。
 5. 只输出一个合法 JSON 对象，格式如下：
 {
   "rowValues": {
@@ -1211,32 +1292,137 @@ ${JSON.stringify(editableRowSpecs)}`;
       ? `请逐行通扫并严格对照最高法官方《${tpl.displayName}》全部栏目，无遗漏提取以下材料并输出 JSON：\n\n${promptMaterial}`
       : `请识别所附材料图片，逐行通扫并严格对照最高法官方《${tpl.displayName}》全部栏目提取并输出 JSON。`;
 
+    const unredactedImageCount = sourceImages.filter((img) => !redactedImageIds[img.id]).length;
+    setPreflightAckUnredactedImages(false);
+    setPendingAiPreflight({
+      kind: 'extract',
+      plainKey,
+      systemPrompt,
+      userContent,
+      images: sourceImages.length > 0 ? [...sourceImages] : undefined,
+      unredactedImageCount,
+      mappings,
+    });
+  };
+
+  const executeConfirmedPreflight = async (pf: PendingSpcAiPreflight) => {
+    if (!tpl || !draft || !activeProvider) return;
+    setPendingAiPreflight(null);
+
+    if (pf.kind === 'extract') {
+      setExtracting(true);
+      setExtractError('');
+      setExtractLog(`正在按最高法官方《${tpl.displayName}》全量逐行核验提取要素…`);
+      if (pf.mappings.length > 0) {
+        setAiSessionMappings(pf.mappings);
+      } else {
+        setAiSessionMappings([]);
+      }
+
+      let fullReply = '';
+      try {
+        await streamAiCompletion({
+          provider: { ...activeProvider, apiKey: pf.plainKey },
+          modelSlot: extractModelSlot,
+          temperature: 0.1,
+          messages: [
+            { role: 'system', content: pf.systemPrompt },
+            {
+              role: 'user',
+              content: pf.userContent,
+              images: pf.images,
+            },
+          ],
+          onChunk: (delta) => {
+            fullReply += delta;
+            setExtractLog(`正在按最高法官方表全量逐行填充…（已接收 ${fullReply.length} 字）`);
+          },
+        });
+
+        const parsed = extractFirstJsonObject(fullReply);
+        if (!parsed) {
+          throw new Error('模型未能返回标准 JSON 结构，请重试或切换「深度推理」模型。');
+        }
+
+        const restored = restoreDeepStrings(parsed, pf.mappings) as SpcAiPatchPayload;
+        pushUndoSnapshot(draft);
+        const applied = applySpcAiPatch(tpl, draft, restored);
+        setDraft(applied.nextDraft);
+        if (typeof restored.courtName === 'string' && restored.courtName.trim()) {
+          setCompanionCourt(restored.courtName.trim());
+        }
+
+        const missingList = Array.isArray(restored.missingChecklist)
+          ? restored.missingChecklist.map((x) => String(x || '').trim()).filter(Boolean)
+          : [];
+        const summaryText =
+          (typeof restored.summary === 'string' && restored.summary.trim()) ||
+          `已自动填充 ${applied.changedLabels.length} 项官方要素。如发现仍有遗漏或需要增删栏目，可直接在下方继续下达修改指令。`;
+
+        setAiRefineTurns([
+          {
+            id: `round1-${Date.now()}`,
+            role: 'assistant',
+            text: summaryText,
+            changedLabels: applied.changedLabels,
+            excludedLabels: applied.excludedLabels,
+            addedLabels: applied.addedLabels,
+            missingChecklist: missingList,
+          },
+        ]);
+        setShowAiCopilot(true);
+        setActiveMode('form');
+        showToast(
+          pf.mappings.length > 0
+            ? `已按官方原表填入 ${applied.changedLabels.length} 项（本地还原 ${pf.mappings.length} 处脱敏实体），可在上方 AI 改表助手继续微调！`
+            : `已按官方原表填入 ${applied.changedLabels.length} 项，可在上方 AI 改表助手继续增删微调！`
+        );
+      } catch (err) {
+        setExtractError(err instanceof Error ? err.message : 'AI 要素提取失败');
+      } finally {
+        setExtracting(false);
+        setExtractLog('');
+      }
+      return;
+    }
+
+    // kind === 'refine'
+    setAiRefining(true);
+    setAiRefineError('');
+    setAiRefineLog('正在理解修改指令并生成精准表格补丁…');
+    if (autoRedact) setAiSessionMappings(pf.mappings);
+    if (pf.refineInstruction) {
+      setAiRefineTurns((prev) => [
+        ...prev,
+        { id: `u-${Date.now()}`, role: 'user', text: pf.refineInstruction! },
+      ]);
+      if (aiRefineInput.trim() === pf.refineInstruction) {
+        setAiRefineInput('');
+      }
+    }
+
     let fullReply = '';
     try {
       await streamAiCompletion({
-        provider: { ...activeProvider, apiKey: plainKey },
+        provider: { ...activeProvider, apiKey: pf.plainKey },
         modelSlot: extractModelSlot,
         temperature: 0.1,
         messages: [
-          { role: 'system', content: systemPrompt },
-          {
-            role: 'user',
-            content: userContent,
-            images: sourceImages.length > 0 ? sourceImages : undefined,
-          },
+          { role: 'system', content: pf.systemPrompt },
+          { role: 'user', content: pf.userContent },
         ],
         onChunk: (delta) => {
           fullReply += delta;
-          setExtractLog(`正在按最高法官方表全量逐行填充…（已接收 ${fullReply.length} 字）`);
+          setAiRefineLog(`AI 正在精准更新表格…（已接收 ${fullReply.length} 字）`);
         },
       });
 
       const parsed = extractFirstJsonObject(fullReply);
       if (!parsed) {
-        throw new Error('模型未能返回标准 JSON 结构，请重试或切换「深度推理」模型。');
+        throw new Error('模型未能返回合法表格修改 JSON，请重试或换用「深度推理」模型。');
       }
 
-      const restored = restoreDeepStrings(parsed, mappings) as SpcAiPatchPayload;
+      const restored = restoreDeepStrings(parsed, pf.mappings) as SpcAiPatchPayload;
       pushUndoSnapshot(draft);
       const applied = applySpcAiPatch(tpl, draft, restored);
       setDraft(applied.nextDraft);
@@ -1247,33 +1433,35 @@ ${JSON.stringify(editableRowSpecs)}`;
       const missingList = Array.isArray(restored.missingChecklist)
         ? restored.missingChecklist.map((x) => String(x || '').trim()).filter(Boolean)
         : [];
-      const summaryText =
+      const replySummary =
         (typeof restored.summary === 'string' && restored.summary.trim()) ||
-        `已自动填充 ${applied.changedLabels.length} 项官方要素。如发现仍有遗漏或需要增删栏目，可直接在下方继续下达修改指令。`;
+        (applied.totalOps > 0
+          ? `已完成本轮表格更新（共变更 ${applied.totalOps} 处）。`
+          : '已对照核查，当前表格未发现需要进一步改动的栏目。');
 
-      setAiRefineTurns([
+      setAiRefineTurns((prev) => [
+        ...prev,
         {
-          id: `round1-${Date.now()}`,
+          id: `a-${Date.now()}`,
           role: 'assistant',
-          text: summaryText,
+          text: replySummary,
           changedLabels: applied.changedLabels,
           excludedLabels: applied.excludedLabels,
           addedLabels: applied.addedLabels,
           missingChecklist: missingList,
         },
       ]);
-      setShowAiCopilot(true);
-      setActiveMode('form');
+
       showToast(
-        mappings.length > 0
-          ? `已按官方原表填入 ${applied.changedLabels.length} 项（本地还原 ${mappings.length} 处脱敏实体），可在上方 AI 改表助手继续微调！`
-          : `已按官方原表填入 ${applied.changedLabels.length} 项，可在上方 AI 改表助手继续增删微调！`
+        applied.totalOps > 0
+          ? `AI 已直接更新表格 ${applied.totalOps} 处（可随时点「撤销上一轮」）`
+          : 'AI 核查完毕，当前表格暂无变更项'
       );
     } catch (err) {
-      setExtractError(err instanceof Error ? err.message : 'AI 要素提取失败');
+      setAiRefineError(err instanceof Error ? err.message : 'AI 改表请求失败');
     } finally {
-      setExtracting(false);
-      setExtractLog('');
+      setAiRefining(false);
+      setAiRefineLog('');
     }
   };
 
@@ -1310,11 +1498,6 @@ ${JSON.stringify(editableRowSpecs)}`;
       }
     }
 
-    setAiRefining(true);
-    setAiRefineLog('正在理解修改指令并生成精准表格补丁…');
-    if (overrideInstruction === undefined) setAiRefineInput('');
-
-    // Build current table snapshot (with local redaction if enabled)
     let mappings = [...aiSessionMappings];
     const redactIfNeeded = (txt: string): string => {
       if (!autoRedact || !txt) return txt;
@@ -1357,7 +1540,6 @@ ${JSON.stringify(editableRowSpecs)}`;
 
     const redactedSource = sourceText.trim() ? redactIfNeeded(sourceText.trim()) : '';
     const redactedSigner = redactIfNeeded(draft.signerName || '');
-    if (autoRedact) setAiSessionMappings(mappings);
 
     const recentHistoryNotes = aiRefineTurns
       .slice(-4)
@@ -1399,73 +1581,16 @@ ${JSON.stringify(editableRowSpecs)}`;
       .filter(Boolean)
       .join('\n\n');
 
-    setAiRefineTurns((prev) => [
-      ...prev,
-      { id: `u-${Date.now()}`, role: 'user', text: instruction },
-    ]);
-
-    let fullReply = '';
-    try {
-      await streamAiCompletion({
-        provider: { ...activeProvider, apiKey: plainKey },
-        modelSlot: extractModelSlot,
-        temperature: 0.1,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        onChunk: (delta) => {
-          fullReply += delta;
-          setAiRefineLog(`AI 正在精准更新表格…（已接收 ${fullReply.length} 字）`);
-        },
-      });
-
-      const parsed = extractFirstJsonObject(fullReply);
-      if (!parsed) {
-        throw new Error('模型未能返回合法表格修改 JSON，请重试或换用「深度推理」模型。');
-      }
-
-      const restored = restoreDeepStrings(parsed, mappings) as SpcAiPatchPayload;
-      pushUndoSnapshot(draft);
-      const applied = applySpcAiPatch(tpl, draft, restored);
-      setDraft(applied.nextDraft);
-      if (typeof restored.courtName === 'string' && restored.courtName.trim()) {
-        setCompanionCourt(restored.courtName.trim());
-      }
-
-      const missingList = Array.isArray(restored.missingChecklist)
-        ? restored.missingChecklist.map((x) => String(x || '').trim()).filter(Boolean)
-        : [];
-      const replySummary =
-        (typeof restored.summary === 'string' && restored.summary.trim()) ||
-        (applied.totalOps > 0
-          ? `已完成本轮表格更新（共变更 ${applied.totalOps} 处）。`
-          : '已对照核查，当前表格未发现需要进一步改动的栏目。');
-
-      setAiRefineTurns((prev) => [
-        ...prev,
-        {
-          id: `a-${Date.now()}`,
-          role: 'assistant',
-          text: replySummary,
-          changedLabels: applied.changedLabels,
-          excludedLabels: applied.excludedLabels,
-          addedLabels: applied.addedLabels,
-          missingChecklist: missingList,
-        },
-      ]);
-
-      showToast(
-        applied.totalOps > 0
-          ? `AI 已直接更新表格 ${applied.totalOps} 处（可随时点「撤销上一轮」）`
-          : 'AI 核查完毕，当前表格暂无变更项'
-      );
-    } catch (err) {
-      setAiRefineError(err instanceof Error ? err.message : 'AI 改表请求失败');
-    } finally {
-      setAiRefining(false);
-      setAiRefineLog('');
-    }
+    setPreflightAckUnredactedImages(false);
+    setPendingAiPreflight({
+      kind: 'refine',
+      plainKey,
+      systemPrompt,
+      userContent: userPrompt,
+      unredactedImageCount: 0,
+      mappings,
+      refineInstruction: instruction,
+    });
   };
 
   const handleDownloadWord = (blankMode = false) => {
@@ -1605,19 +1730,22 @@ ${JSON.stringify(editableRowSpecs)}`;
 
   const handleResetDraft = () => {
     if (!tpl) return;
-    setDraft(createInitialSpcDraft(tpl));
-    setSourceText('');
-    setSourceImages([]);
+    if (
+      draft &&
+      hasNonEmptySpcDraft(tpl, draft) &&
+      !window.confirm(`确定清空当前《${tpl.displayName}》的已填内容吗？（其他模板已存的草稿不受影响）`)
+    ) {
+      return;
+    }
+    const fresh = createInitialSpcDraft(tpl);
+    setDraft(fresh);
+    setDraftsByTemplate((prev) => ({ ...prev, [tpl.id]: fresh }));
+    setUndoStacksByTemplate((prev) => ({ ...prev, [tpl.id]: [] }));
     setOpenQuickFillRowId(null);
     setAiRefineTurns([]);
     setDraftUndoStack([]);
     setAiSessionMappings([]);
     setEditingBatchItemId(null);
-    try {
-      localStorage.removeItem(WORKSPACE_STORAGE_KEY);
-    } catch {
-      // ignore
-    }
     showToast(`已重置《${tpl.displayName}》为最高法官方空白初始模板`);
   };
 
@@ -1912,7 +2040,46 @@ ${JSON.stringify(editableRowSpecs)}`;
               100% 对照最高人民法院 2025 年 7 月 14 日起全国推广的官方示范文本原表生成（完整保留官方《说明》、全部表格要素行、多列案号/专利表、勾选项与知识产权证据清单附件）；支持离线直接勾选填表、下载空白官方模板，或 AI 转写传统诉状。
             </p>
           </div>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                saveStatus === 'error'
+                  ? 'bg-red-100 text-red-800 border border-red-300'
+                  : saveStatus === 'saving'
+                  ? 'bg-sky-50 text-sky-800 border border-sky-200'
+                  : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+              }`}
+              title={saveErrorMsg || '按模板独立自动保存在本机浏览器（不上传服务器）'}
+            >
+              {saveStatus === 'error'
+                ? '⚠ 本机存储满额（请下载草稿）'
+                : saveStatus === 'saving'
+                ? '正在保存草稿…'
+                : '● 本机已自动保存'}
+            </span>
+            <input
+              ref={draftBundleInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleImportDraftBundle}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={handleExportDraftBundle}
+              className="inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2.5 py-2 text-xs font-semibold text-[#11151C]"
+              title="将各模板已填草稿与导入材料导出为本机 .json 文件"
+            >
+              <Save className="h-3.5 w-3.5 text-[#9A773E]" /> 下载草稿
+            </button>
+            <button
+              type="button"
+              onClick={() => draftBundleInputRef.current?.click()}
+              className="inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2.5 py-2 text-xs font-semibold text-slate-600"
+              title="从此前导出的 .json 草稿文件恢复"
+            >
+              恢复草稿
+            </button>
             <button
               type="button"
               onClick={() => handleDownloadWord(false)}
@@ -1937,6 +2104,19 @@ ${JSON.stringify(editableRowSpecs)}`;
             </button>
           </div>
         </div>
+
+        {saveStatus === 'error' && saveErrorMsg && (
+          <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-900 flex items-center justify-between gap-2">
+            <span>{saveErrorMsg}</span>
+            <button
+              type="button"
+              onClick={handleExportDraftBundle}
+              className="rounded bg-red-700 px-2.5 py-1 font-bold text-white flex-none"
+            >
+              立即下载草稿备份
+            </button>
+          </div>
+        )}
 
         {/* Official Template Search + 9 Domains + Role Filter */}
         <div className="pt-3 border-t border-[#EFECE5] space-y-2.5">
@@ -2002,6 +2182,10 @@ ${JSON.stringify(editableRowSpecs)}`;
           <div className="max-h-48 overflow-y-auto pr-1 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5">
             {filteredTemplates.map((item) => {
               const active = item.id === tpl.id;
+              const itemHasSavedDraft = hasNonEmptySpcDraft(
+                item,
+                item.id === draft.templateId ? draft : draftsByTemplate[item.id]
+              );
               return (
                 <button
                   key={item.id}
@@ -2015,15 +2199,28 @@ ${JSON.stringify(editableRowSpecs)}`;
                 >
                   <div className="flex items-center justify-between gap-1.5">
                     <span className="text-xs font-bold truncate">{item.shortCause}</span>
-                    <span
-                      className={`flex-none rounded border px-1.5 py-0.2 text-[10px] font-semibold ${
-                        active
-                          ? 'bg-[#B89254] text-[#11151C] border-[#B89254]'
-                          : roleBadgeClass(item.docRole)
-                      }`}
-                    >
-                      {roleShortTag(item.docRole)}
-                    </span>
+                    <div className="flex items-center gap-1 flex-none">
+                      {itemHasSavedDraft && (
+                        <span
+                          className={`rounded px-1 py-0.2 text-[9.5px] font-bold ${
+                            active
+                              ? 'bg-emerald-400/25 text-emerald-200'
+                              : 'bg-emerald-100 text-emerald-800'
+                          }`}
+                        >
+                          有草稿
+                        </span>
+                      )}
+                      <span
+                        className={`rounded border px-1.5 py-0.2 text-[10px] font-semibold ${
+                          active
+                            ? 'bg-[#B89254] text-[#11151C] border-[#B89254]'
+                            : roleBadgeClass(item.docRole)
+                        }`}
+                      >
+                        {roleShortTag(item.docRole)}
+                      </span>
+                    </div>
                   </div>
                   <div
                     className={`mt-0.5 text-[10px] truncate ${
@@ -3809,12 +4006,143 @@ ${JSON.stringify(editableRowSpecs)}`;
         </div>
       )}
 
+      {/* Unified Single-Case Outbound AI Preflight Modal (Zero Surprise Transmission) */}
+      {pendingAiPreflight && activeProvider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-2xl max-h-[88vh] flex flex-col rounded-xl border border-[#D1B27A] bg-white shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between gap-2 bg-[#0E223D] px-4 py-3 text-[#F6F4EF]">
+              <div className="flex items-center gap-2 text-xs sm:text-sm font-bold">
+                <ShieldCheck className="h-4 w-4 text-[#D1B27A]" />
+                <span>
+                  外发第三方模型前实际载荷预检（
+                  {pendingAiPreflight.kind === 'extract' ? 'AI 一键填入官方表' : 'AI 对话增量改表'}）
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingAiPreflight(null)}
+                className="text-slate-300 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs text-[#11151C]">
+              <div className="rounded-lg border border-[#E4DFD4] bg-[#FAF9F6] p-3 space-y-1.5 leading-5">
+                <div>
+                  <strong>目标服务商：</strong>
+                  {activeProvider.name}（<span className="font-mono">{activeProvider.baseUrl}</span>）
+                </div>
+                <div>
+                  <strong>传输路径：</strong>
+                  {activeProvider.useCorsRelayFallback
+                    ? '本机浏览器直连优先；若跨域受阻则经无状态透明中转（不落盘）'
+                    : '纯浏览器直连您自选的服务商（不经过任何中转服务器）'}
+                </div>
+                <div>
+                  <strong>文本脱敏状态：</strong>
+                  {autoRedact ? (
+                    <span className="text-emerald-800 font-semibold">
+                      已执行本地规则预脱敏（共挂载 {pendingAiPreflight.mappings.length} 条替换映射；规则无法保证识别所有口语姓名/简称，请核对下方实际出站报文）
+                    </span>
+                  ) : (
+                    <span className="text-rose-700 font-bold">
+                      ⚠ 当前已关闭自动脱敏，下方正文与表格快照将以原始明文发送！
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {pendingAiPreflight.images && pendingAiPreflight.images.length > 0 && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-2">
+                  <div className="font-bold text-amber-950">
+                    即将随请求发送 {pendingAiPreflight.images.length} 张图片附件
+                    {pendingAiPreflight.unredactedImageCount > 0
+                      ? `（其中 ${pendingAiPreflight.unredactedImageCount} 张尚未手动涂抹打码）`
+                      : '（均已完成本地涂抹打码）'}
+                  </div>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                    {pendingAiPreflight.images.map((img) => {
+                      const isRedacted = Boolean(redactedImageIds[img.id]);
+                      return (
+                        <div key={img.id} className="rounded border border-amber-200 bg-white p-1 space-y-1">
+                          <img src={img.dataUrl} alt={img.name} className="h-16 w-full object-cover rounded" />
+                          <div className="flex items-center justify-between text-[10px]">
+                            <span className={isRedacted ? 'text-emerald-700 font-bold' : 'text-amber-800'}>
+                              {isRedacted ? '已打码' : '未打码'}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPendingAiPreflight(null);
+                                setRedactingImg(img);
+                              }}
+                              className="underline font-semibold text-[#0E223D]"
+                            >
+                              去打码
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {pendingAiPreflight.unredactedImageCount > 0 && (
+                    <label className="flex items-start gap-2 pt-1 cursor-pointer text-[11.5px] font-semibold text-amber-950">
+                      <input
+                        type="checkbox"
+                        checked={preflightAckUnredactedImages}
+                        onChange={(e) => setPreflightAckUnredactedImages(e.target.checked)}
+                        className="mt-0.5 accent-[#0E223D]"
+                      />
+                      <span>
+                        我已人工核对上述未打码图片，确认不含需保密的身份证号、住址、银行账号或已获当事人外发授权
+                      </span>
+                    </label>
+                  )}
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <div className="font-bold text-[#0E223D]">
+                  实际发出的用户消息报文预览（仅发送此预览载荷）：
+                </div>
+                <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg border border-[#DED8CC] bg-[#FAF9F6] p-3 font-sans text-[11.5px] leading-5 text-slate-800">
+                  {pendingAiPreflight.userContent}
+                </pre>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[#EFECE5] bg-[#FAF9F6] px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setPendingAiPreflight(null)}
+                className="rounded-lg border border-[#D8D1C3] bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                取消（零网络请求）
+              </button>
+              <button
+                type="button"
+                disabled={
+                  pendingAiPreflight.unredactedImageCount > 0 && !preflightAckUnredactedImages
+                }
+                onClick={() => executeConfirmedPreflight(pendingAiPreflight)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-4 py-2 text-xs font-bold text-[#F6F4EF] disabled:opacity-45"
+              >
+                <Send className="h-3.5 w-3.5 text-[#D1B27A]" />
+                确认无误并发送给自选服务商
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Local Screenshot Redaction Modal */}
       <ImageRedactModal
         image={redactingImg}
         onClose={() => setRedactingImg(null)}
         onSave={(updated) => {
           setSourceImages((prev) => prev.map((x) => (x.id === updated.id ? updated : x)));
+          setRedactedImageIds((prev) => ({ ...prev, [updated.id]: true }));
           setRedactingImg(null);
           showToast('已完成本地涂抹打码，原始像素已覆盖');
         }}

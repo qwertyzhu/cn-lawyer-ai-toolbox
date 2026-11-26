@@ -74,6 +74,60 @@ function writeJson<T>(key: string, value: T): void {
   }
 }
 
+function writeJsonStrict<T>(key: string, value: T): void {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function mergeArrayById<T extends { id: string; updatedAt?: string | number; createdAt?: string | number }>(
+  localItems: T[],
+  incomingItems: T[]
+): T[] {
+  const map = new Map<string, T>();
+  for (const it of localItems) {
+    if (it && typeof it.id === 'string') map.set(it.id, it);
+  }
+  for (const inc of incomingItems) {
+    if (!inc || typeof inc.id !== 'string') continue;
+    const prev = map.get(inc.id);
+    if (!prev) {
+      map.set(inc.id, inc);
+      continue;
+    }
+    const prevTs = Date.parse(String(prev.updatedAt || prev.createdAt || '')) || Number(prev.updatedAt) || 0;
+    const incTs = Date.parse(String(inc.updatedAt || inc.createdAt || '')) || Number(inc.updatedAt) || 0;
+    if (incTs >= prevTs) {
+      map.set(inc.id, inc);
+    }
+  }
+  return Array.from(map.values());
+}
+
+const IMPORT_ROLLBACK_KEY = 'cn_lawyer_box_import_rollback_v1';
+const SPC_MULTI_DRAFTS_KEY = 'spc2025_drafts_by_tpl_v3';
+const SPC_LEGACY_DRAFT_KEY = 'spc2025_elements_doc_draft_v2';
+
+export interface WorkspaceBackupPreview {
+  app: string;
+  exportedAt: string;
+  incomingCounts: {
+    deadlines: number;
+    checklists: number;
+    scratchpads: number;
+    history: number;
+    casePockets: number;
+    spcDrafts: number;
+  };
+  localCounts: {
+    deadlines: number;
+    checklists: number;
+    scratchpads: number;
+    history: number;
+    casePockets: number;
+  };
+  keptLocalDeadlines: number;
+  keptLocalScratchpads: number;
+}
+
 export function getDefaultByokSettings(): ByokSettings {
   const ds = AI_PROVIDER_PRESETS[0];
   return {
@@ -280,6 +334,16 @@ export const toolboxStorage = {
   },
 
   exportFullWorkspaceJson(): string {
+    let spcDraftsByTemplate: unknown = null;
+    let spcLegacyDraft: unknown = null;
+    try {
+      const rawMulti = localStorage.getItem(SPC_MULTI_DRAFTS_KEY);
+      if (rawMulti) spcDraftsByTemplate = JSON.parse(rawMulti);
+      const rawLegacy = localStorage.getItem(SPC_LEGACY_DRAFT_KEY);
+      if (rawLegacy) spcLegacyDraft = JSON.parse(rawLegacy);
+    } catch {
+      // ignore
+    }
     return JSON.stringify(
       {
         app: 'cn-lawyer-ai-toolbox',
@@ -293,27 +357,222 @@ export const toolboxStorage = {
         lawyerProfile: toolboxStorage.getLawyerProfile(),
         savedPrompts: toolboxStorage.getSavedPrompts(),
         casePockets: toolboxStorage.getCasePockets(),
+        spcDraftsByTemplate,
+        spcLegacyDraft,
       },
       null,
       2
     );
   },
 
-  importFullWorkspaceJson(raw: string): void {
+  previewWorkspaceImport(raw: string): WorkspaceBackupPreview {
     const parsed = JSON.parse(raw);
     if (parsed.app !== 'cn-lawyer-ai-toolbox' && parsed.app !== 'tianran-ai-toolbox') {
       throw new Error('非本工具箱合法备份文件');
     }
-    if (Array.isArray(parsed.history)) writeJson(KEYS.HISTORY, parsed.history);
-    if (Array.isArray(parsed.deadlines)) writeJson(KEYS.DEADLINES, parsed.deadlines);
-    if (Array.isArray(parsed.checklists)) writeJson(KEYS.CHECKLISTS, parsed.checklists);
-    if (Array.isArray(parsed.scratchpads)) writeJson(KEYS.SCRATCHPADS, parsed.scratchpads);
-    if (Array.isArray(parsed.pinnedTools)) writeJson(KEYS.PINNED_TOOLS, parsed.pinnedTools);
-    if (Array.isArray(parsed.starredLaws)) writeJson(KEYS.STARRED_LAWS, parsed.starredLaws);
-    if (parsed.lawyerProfile && typeof parsed.lawyerProfile === 'object') {
-      toolboxStorage.saveLawyerProfile(parsed.lawyerProfile);
+    const incDeadlines: DeadlineReminderItem[] = Array.isArray(parsed.deadlines) ? parsed.deadlines : [];
+    const incScratchpads: ScratchpadNote[] = Array.isArray(parsed.scratchpads) ? parsed.scratchpads : [];
+    const localDeadlines = toolboxStorage.getDeadlines();
+    const localScratchpads = toolboxStorage.getScratchpads();
+    const incDeadlineIds = new Set(incDeadlines.map((d) => d?.id).filter(Boolean));
+    const incScratchpadIds = new Set(incScratchpads.map((s) => s?.id).filter(Boolean));
+
+    const spcDraftObj = parsed.spcDraftsByTemplate?.drafts;
+    const spcDraftCount =
+      spcDraftObj && typeof spcDraftObj === 'object'
+        ? Object.keys(spcDraftObj).length
+        : parsed.spcLegacyDraft
+        ? 1
+        : 0;
+
+    return {
+      app: String(parsed.app),
+      exportedAt: String(parsed.exportedAt || '未知时间'),
+      incomingCounts: {
+        deadlines: incDeadlines.length,
+        checklists: Array.isArray(parsed.checklists) ? parsed.checklists.length : 0,
+        scratchpads: incScratchpads.length,
+        history: Array.isArray(parsed.history) ? parsed.history.length : 0,
+        casePockets: Array.isArray(parsed.casePockets) ? parsed.casePockets.length : 0,
+        spcDrafts: spcDraftCount,
+      },
+      localCounts: {
+        deadlines: localDeadlines.length,
+        checklists: toolboxStorage.getChecklists().length,
+        scratchpads: localScratchpads.length,
+        history: toolboxStorage.getHistory().length,
+        casePockets: toolboxStorage.getCasePockets().length,
+      },
+      keptLocalDeadlines: localDeadlines.filter((d) => !incDeadlineIds.has(d.id)).length,
+      keptLocalScratchpads: localScratchpads.filter((s) => !incScratchpadIds.has(s.id)).length,
+    };
+  },
+
+  hasImportRollback(): boolean {
+    try {
+      return Boolean(localStorage.getItem(IMPORT_ROLLBACK_KEY));
+    } catch {
+      return false;
     }
-    if (Array.isArray(parsed.savedPrompts)) writeJson(KEYS.SAVED_PROMPTS, parsed.savedPrompts);
-    if (Array.isArray(parsed.casePockets)) writeJson(KEYS.CASE_POCKETS, parsed.casePockets);
+  },
+
+  restoreImportRollback(): void {
+    const raw = localStorage.getItem(IMPORT_ROLLBACK_KEY);
+    if (!raw) {
+      throw new Error('本机暂无可回滚的导入前快照');
+    }
+    toolboxStorage.importFullWorkspaceJson(raw, { mode: 'overwrite', skipRollbackSave: true });
+  },
+
+  importFullWorkspaceJson(
+    raw: string,
+    options?: { mode?: 'merge' | 'overwrite'; skipRollbackSave?: boolean }
+  ): void {
+    const mode = options?.mode || 'merge';
+    const parsed = JSON.parse(raw);
+    if (parsed.app !== 'cn-lawyer-ai-toolbox' && parsed.app !== 'tianran-ai-toolbox') {
+      throw new Error('非本工具箱合法备份文件');
+    }
+
+    const trackedKeys = [
+      KEYS.HISTORY,
+      KEYS.DEADLINES,
+      KEYS.CHECKLISTS,
+      KEYS.SCRATCHPADS,
+      KEYS.PINNED_TOOLS,
+      KEYS.STARRED_LAWS,
+      KEYS.LAWYER_PROFILE,
+      KEYS.SAVED_PROMPTS,
+      KEYS.CASE_POCKETS,
+      SPC_MULTI_DRAFTS_KEY,
+      SPC_LEGACY_DRAFT_KEY,
+    ];
+    const snapshotBefore = new Map<string, string | null>();
+    for (const k of trackedKeys) {
+      snapshotBefore.set(k, localStorage.getItem(k));
+    }
+
+    if (!options?.skipRollbackSave) {
+      try {
+        localStorage.setItem(IMPORT_ROLLBACK_KEY, toolboxStorage.exportFullWorkspaceJson());
+      } catch {
+        // Proceed to main import; main writes below are strictly verified
+      }
+    }
+
+    try {
+      if (Array.isArray(parsed.history)) {
+        const next =
+          mode === 'merge'
+            ? mergeArrayById(toolboxStorage.getHistory(), parsed.history).slice(0, 60)
+            : parsed.history;
+        writeJsonStrict(KEYS.HISTORY, next);
+      }
+      if (Array.isArray(parsed.deadlines)) {
+        const next =
+          mode === 'merge'
+            ? mergeArrayById(toolboxStorage.getDeadlines(), parsed.deadlines)
+            : parsed.deadlines;
+        writeJsonStrict(KEYS.DEADLINES, next);
+      }
+      if (Array.isArray(parsed.checklists)) {
+        const next =
+          mode === 'merge'
+            ? mergeArrayById(toolboxStorage.getChecklists(), parsed.checklists)
+            : parsed.checklists;
+        writeJsonStrict(KEYS.CHECKLISTS, next);
+      }
+      if (Array.isArray(parsed.scratchpads)) {
+        const next =
+          mode === 'merge'
+            ? mergeArrayById(toolboxStorage.getScratchpads(), parsed.scratchpads)
+            : parsed.scratchpads;
+        writeJsonStrict(KEYS.SCRATCHPADS, next);
+      }
+      if (Array.isArray(parsed.pinnedTools)) {
+        const next =
+          mode === 'merge'
+            ? Array.from(new Set([...toolboxStorage.getPinnedTools(), ...parsed.pinnedTools]))
+            : parsed.pinnedTools;
+        writeJsonStrict(KEYS.PINNED_TOOLS, next);
+      }
+      if (Array.isArray(parsed.starredLaws)) {
+        const next =
+          mode === 'merge'
+            ? Array.from(new Set([...toolboxStorage.getStarredLaws(), ...parsed.starredLaws]))
+            : parsed.starredLaws;
+        writeJsonStrict(KEYS.STARRED_LAWS, next);
+      }
+      if (parsed.lawyerProfile && typeof parsed.lawyerProfile === 'object') {
+        const localLp = toolboxStorage.getLawyerProfile();
+        const incLp = parsed.lawyerProfile as Partial<LawyerProfile>;
+        const nextLp: LawyerProfile =
+          mode === 'merge'
+            ? {
+                name: String(incLp.name || localLp.name || '').trim(),
+                licenseNo: String(incLp.licenseNo || localLp.licenseNo || '').trim(),
+                firmName: String(incLp.firmName || localLp.firmName || '').trim(),
+                phone: String(incLp.phone || localLp.phone || '').trim(),
+                address: String(incLp.address || localLp.address || '').trim(),
+                email: String(incLp.email || localLp.email || '').trim(),
+              }
+            : {
+                name: String(incLp.name || '').trim(),
+                licenseNo: String(incLp.licenseNo || '').trim(),
+                firmName: String(incLp.firmName || '').trim(),
+                phone: String(incLp.phone || '').trim(),
+                address: String(incLp.address || '').trim(),
+                email: String(incLp.email || '').trim(),
+              };
+        writeJsonStrict(KEYS.LAWYER_PROFILE, nextLp);
+      }
+      if (Array.isArray(parsed.savedPrompts)) {
+        const next =
+          mode === 'merge'
+            ? mergeArrayById(toolboxStorage.getSavedPrompts(), parsed.savedPrompts)
+            : parsed.savedPrompts;
+        writeJsonStrict(KEYS.SAVED_PROMPTS, next);
+      }
+      if (Array.isArray(parsed.casePockets)) {
+        const next =
+          mode === 'merge'
+            ? mergeArrayById(toolboxStorage.getCasePockets(), parsed.casePockets)
+            : parsed.casePockets;
+        writeJsonStrict(KEYS.CASE_POCKETS, next);
+      }
+      if (parsed.spcDraftsByTemplate && typeof parsed.spcDraftsByTemplate === 'object') {
+        if (mode === 'merge') {
+          const curMulti = readJson<{ activeTemplateId?: string; drafts?: Record<string, unknown> }>(
+            SPC_MULTI_DRAFTS_KEY,
+            {}
+          );
+          const mergedDrafts = {
+            ...(curMulti.drafts || {}),
+            ...(parsed.spcDraftsByTemplate.drafts || {}),
+          };
+          writeJsonStrict(SPC_MULTI_DRAFTS_KEY, {
+            activeTemplateId:
+              curMulti.activeTemplateId || parsed.spcDraftsByTemplate.activeTemplateId || '',
+            drafts: mergedDrafts,
+          });
+        } else {
+          writeJsonStrict(SPC_MULTI_DRAFTS_KEY, parsed.spcDraftsByTemplate);
+        }
+      } else if (parsed.spcLegacyDraft && typeof parsed.spcLegacyDraft === 'object') {
+        if (mode === 'overwrite' || !localStorage.getItem(SPC_LEGACY_DRAFT_KEY)) {
+          writeJsonStrict(SPC_LEGACY_DRAFT_KEY, parsed.spcLegacyDraft);
+        }
+      }
+    } catch {
+      for (const [k, prevVal] of snapshotBefore.entries()) {
+        try {
+          if (prevVal === null) localStorage.removeItem(k);
+          else localStorage.setItem(k, prevVal);
+        } catch {
+          // ignore
+        }
+      }
+      throw new Error('浏览器本地存储空间不足或写入受阻，导入未完成且已自动回滚原数据');
+    }
   },
 };

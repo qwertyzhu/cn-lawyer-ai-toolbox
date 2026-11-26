@@ -18,6 +18,7 @@ import { useToolbox } from '../context/ToolboxContext';
 import { PRACTICE_CHECKLISTS } from '../data/checklists';
 import { LEGAL_DATA_MANIFEST } from '../data/legalDataManifest';
 import { copyToClipboard } from '../lib/clipboard';
+import { searchStatuteEntries } from '../lib/statuteSearch';
 import type { ChecklistInstance } from '../types/toolbox';
 
 interface CivilArticleItem {
@@ -96,6 +97,8 @@ export const LawsAndChecklistsTab: React.FC = () => {
   const [subTab, setSubTab] = useState<'statutes' | 'ima_cloud' | 'checklists'>(lawsSubView);
   const [corpus, setCorpus] = useState<LawsCorpusPayload | null>(cachedCorpus);
   const [loading, setLoading] = useState(!cachedCorpus);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [query, setQuery] = useState(lawsInitialQuery || '');
   const [scope, setScope] = useState<ScopeFilter>('all');
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
@@ -124,24 +127,36 @@ export const LawsAndChecklistsTab: React.FC = () => {
   }, [lawsInitialQuery, lawsSubView]);
 
   useEffect(() => {
-    if (cachedCorpus) return;
+    if (cachedCorpus) {
+      setLoadError(null);
+      return;
+    }
     let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
     fetch(`${import.meta.env.BASE_URL}data/laws-offline.json`)
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data: LawsCorpusPayload) => {
         if (!cancelled) {
           cachedCorpus = data;
           setCorpus(data);
+          setLoadError(null);
           setLoading(false);
         }
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoadError('离线法典语料包尚未缓存完成或网络读取失败，请检查网络后点击重试。');
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadNonce]);
 
   const allEntries = useMemo<UnifiedLawHit[]>(() => {
     if (!corpus) return [];
@@ -207,8 +222,6 @@ export const LawsAndChecklistsTab: React.FC = () => {
 
   const filteredStatutes = useMemo(() => {
     const q = query.trim();
-    const numMatch = q.match(/^第?\s*(\d{1,4})\s*条?$/);
-    const exactNo = numMatch ? Number(numMatch[1]) : null;
 
     const matchScope = (item: UnifiedLawHit): boolean => {
       if (scope === 'starred') return starredLaws.includes(item.key);
@@ -234,7 +247,6 @@ export const LawsAndChecklistsTab: React.FC = () => {
 
     if (!q) {
       if (scope === 'starred') return scoped;
-      // Default showcase high-frequency litigation articles
       const hotKeys = new Set([
         'civil:585',
         'civil:577',
@@ -250,31 +262,7 @@ export const LawsAndChecklistsTab: React.FC = () => {
       return hot.length > 0 ? hot : scoped.slice(0, 30);
     }
 
-    if (exactNo !== null) {
-      return scoped
-        .filter((x) => x.articleNo === exactNo)
-        .sort((a, b) => (a.lawTitle === '民法典' ? -1 : b.lawTitle === '民法典' ? 1 : 0))
-        .slice(0, 40);
-    }
-
-    const keywords = q.split(/\s+/).filter(Boolean);
-    const scored: { item: UnifiedLawHit; score: number }[] = [];
-
-    for (const item of scoped) {
-      const hay = `${item.lawTitle} ${item.articleLabel} ${item.summary || ''} ${item.text}`;
-      if (!keywords.every((kw) => hay.includes(kw))) continue;
-      let score = 0;
-      if (item.summary && keywords.some((kw) => item.summary!.includes(kw))) score += 30;
-      if (item.lawTitle.includes(q)) score += 25;
-      if (item.lawTitle === '民法典') score += 5;
-      scored.push({ item, score });
-      if (scored.length >= 250) break;
-    }
-
-    return scored
-      .sort((a, b) => b.score - a.score || a.item.articleNo - b.item.articleNo)
-      .slice(0, 50)
-      .map((s) => s.item);
+    return searchStatuteEntries(scoped, q, 50);
   }, [allEntries, query, scope, starredLaws]);
 
   // Checklist Helpers
@@ -495,9 +483,20 @@ export const LawsAndChecklistsTab: React.FC = () => {
           {/* Results List */}
           {loading ? (
             <div className="py-12 text-center text-xs text-slate-500">正在加载离线法典语料包…</div>
+          ) : loadError ? (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-6 text-center text-xs text-amber-950 space-y-2.5">
+              <div className="font-bold text-sm">{loadError}</div>
+              <button
+                type="button"
+                onClick={() => setReloadNonce((n) => n + 1)}
+                className="rounded bg-[#0E223D] px-4 py-2 font-bold text-white"
+              >
+                重新加载离线法规语料包
+              </button>
+            </div>
           ) : filteredStatutes.length === 0 ? (
             <div className="rounded-lg border border-[#DED8CC] bg-white py-10 text-center text-xs text-slate-500">
-              未找到匹配的离线法条，请尝试切换上方分类范围或精简关键词。
+              内置语料库已就绪，但未匹配到“{query.trim()}”，请尝试切换上方分类范围或精简关键词。
             </div>
           ) : (
             <div className="space-y-3">
@@ -530,7 +529,17 @@ export const LawsAndChecklistsTab: React.FC = () => {
                           )}
                         </div>
                         {hit.breadcrumb && (
-                          <div className="mt-1 text-[11px] text-slate-400">{hit.breadcrumb}</div>
+                          <div className="mt-1 text-[11px] text-slate-400">
+                            {hit.breadcrumb} ·{' '}
+                            <a
+                              href="https://flk.npc.gov.cn/"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="underline hover:text-[#0E223D]"
+                            >
+                              国家法律法规数据库核对原文
+                            </a>
+                          </div>
                         )}
                       </div>
 

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Link } from '../../components/ToolboxBridgeLink';
+import { Link, trackEvent } from '../../components/ToolboxBridgeLink';
 import {
   ArrowLeft,
   ArrowRight,
@@ -11,40 +11,25 @@ import {
   RotateCcw,
   Send,
 } from 'lucide-react';
-import { trackEvent } from '../../components/ToolboxBridgeLink';
 import { checkLprDateCoverage, LEGAL_DATA_MANIFEST } from '../../data/legalDataManifest';
 import { copyToClipboard } from '../../lib/clipboard';
+import {
+  addDaysYmd,
+  diffDaysYmd,
+  getTodayChinaYmd,
+  isValidIsoYmd,
+} from '../../lib/legalCalendar';
+import {
+  evaluatePrivateLendingCap,
+  LATEST_LPR,
+  lookupLprOn,
+  LPR_HISTORY,
+  type LprTerm,
+} from '../../lib/lprEngine';
 import { ToolQuickRefSection as ToolSeoKnowledgeSection } from '../../components/ToolQuickRefSection';
 
 type CalcMode = 'lpr_floating' | 'lpr_fixed' | 'custom_rate' | 'delay_only';
-type LprTerm = '1y' | '5y';
 
-interface LprMilestone {
-  date: string; // Effective date YYYY-MM-DD (PBOC / NIFC official publication date)
-  r1y: number;  // 1-year LPR %
-  r5y: number;  // 5-year+ LPR %
-}
-
-// Verified official PBOC / 全国银行间同业拆借中心 LPR rate-change history (2019-08-20 to 2026-11-20)
-const LPR_HISTORY: LprMilestone[] = [
-  { date: '2019-08-20', r1y: 4.25, r5y: 4.85 },
-  { date: '2019-09-20', r1y: 4.20, r5y: 4.85 },
-  { date: '2019-11-20', r1y: 4.15, r5y: 4.80 },
-  { date: '2020-02-20', r1y: 4.05, r5y: 4.75 },
-  { date: '2020-04-20', r1y: 3.85, r5y: 4.65 },
-  { date: '2021-12-20', r1y: 3.80, r5y: 4.65 },
-  { date: '2022-01-20', r1y: 3.70, r5y: 4.60 },
-  { date: '2022-05-20', r1y: 3.70, r5y: 4.45 },
-  { date: '2022-08-22', r1y: 3.65, r5y: 4.30 },
-  { date: '2023-06-20', r1y: 3.55, r5y: 4.20 },
-  { date: '2023-08-21', r1y: 3.45, r5y: 4.20 },
-  { date: '2024-02-20', r1y: 3.45, r5y: 3.95 },
-  { date: '2024-07-22', r1y: 3.35, r5y: 3.85 },
-  { date: '2024-10-21', r1y: 3.10, r5y: 3.60 },
-  { date: '2025-05-20', r1y: 3.00, r5y: 3.50 },
-];
-
-const LATEST_LPR = LPR_HISTORY[LPR_HISTORY.length - 1];
 const DELAY_DAILY_RATE = 0.000175; // 《最高法关于执行程序中计算迟延履行期间的债务利息适用法律若干问题的解释》日万分之1.75
 
 interface InterestSegment {
@@ -57,44 +42,16 @@ interface InterestSegment {
   note: string;
 }
 
-function parseDate(iso: string): Date {
-  const [y, m, d] = iso.split('-').map(Number);
-  return new Date(y || 2026, (m || 1) - 1, d || 1);
-}
-
-function toIso(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-function diffDays(startIso: string, endIso: string): number {
-  const a = parseDate(startIso);
-  const b = parseDate(endIso);
-  return Math.max(0, Math.round((b.getTime() - a.getTime()) / 86400000));
-}
-
-function addDaysIso(iso: string, delta: number): string {
-  const d = parseDate(iso);
-  d.setDate(d.getDate() + delta);
-  return toIso(d);
-}
-
-function lookupLprOn(dateIso: string, term: LprTerm): { rate: number; effectiveDate: string } {
-  let active = LPR_HISTORY[0];
-  for (const item of LPR_HISTORY) {
-    if (item.date <= dateIso) active = item;
-    else break;
-  }
-  return {
-    rate: term === '1y' ? active.r1y : active.r5y,
-    effectiveDate: active.date,
-  };
+function safePositiveDiff(startIso: string, endIso: string): number {
+  const d = diffDaysYmd(startIso, endIso);
+  return Number.isFinite(d) && d > 0 ? d : 0;
 }
 
 const fmtMoney = (n: number) =>
   `¥ ${n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 export const LprInterestCalculator: React.FC = () => {
-  const todayIso = useMemo(() => toIso(new Date()), []);
+  const todayIso = useMemo(() => getTodayChinaYmd(), []);
 
   const [mode, setMode] = useState<CalcMode>('lpr_floating');
   const [unit, setUnit] = useState<'wan' | 'yuan'>('wan');
@@ -106,6 +63,11 @@ export const LprInterestCalculator: React.FC = () => {
   const [bpsStr, setBpsStr] = useState('0');
   const [customRateStr, setCustomRateStr] = useState('6');
   const [dayBasis, setDayBasis] = useState<365 | 360>(365);
+
+  // Explicit Private Lending 4x LPR Cap Verification (Contract Formation Date Benchmark)
+  const [isPrivateLending, setIsPrivateLending] = useState(false);
+  const [contractDate, setContractDate] = useState('2024-06-01');
+  const [contractDateCustomized, setContractDateCustomized] = useState(false);
 
   // Optional overlay: Execution delay doubled interest (Civil Procedure Law Art. 264)
   const [includeDelay, setIncludeDelay] = useState(false);
@@ -119,7 +81,8 @@ export const LprInterestCalculator: React.FC = () => {
   const customRate = Math.max(0, Number(customRateStr) || 0);
 
   const calc = useMemo(() => {
-    const totalDays = diffDays(startDate, endDate);
+    const validDates = isValidIsoYmd(startDate) && isValidIsoYmd(endDate);
+    const totalDays = validDates ? safePositiveDiff(startDate, endDate) : 0;
     const segments: InterestSegment[] = [];
     let normalInterest = 0;
 
@@ -151,12 +114,10 @@ export const LprInterestCalculator: React.FC = () => {
           note: `锁定起算日当期${term === '1y' ? '1年期' : '5年期'}LPR（${snap.effectiveDate} 报价 ${snap.rate.toFixed(2)}%）`,
         });
       } else {
-        // Floating LPR split across every official adjustment boundary
         const cuts: string[] = [startDate];
         for (const item of LPR_HISTORY) {
           if (item.date > startDate && item.date < endDate) {
-            // Only split if the selected term's rate actually changed at this milestone
-            const prevRate = lookupLprOn(addDaysIso(item.date, -1), term).rate;
+            const prevRate = lookupLprOn(addDaysYmd(item.date, -1), term).rate;
             const nextRate = term === '1y' ? item.r1y : item.r5y;
             if (prevRate !== nextRate) {
               cuts.push(item.date);
@@ -168,7 +129,7 @@ export const LprInterestCalculator: React.FC = () => {
         for (let i = 0; i < cuts.length - 1; i++) {
           const segFrom = cuts[i];
           const segTo = cuts[i + 1];
-          const days = diffDays(segFrom, segTo);
+          const days = safePositiveDiff(segFrom, segTo);
           if (days <= 0) continue;
           const snap = lookupLprOn(segFrom, term);
           const eff = Math.max(0, snap.rate * multiplier + bps / 100);
@@ -181,33 +142,44 @@ export const LprInterestCalculator: React.FC = () => {
             baseRate: snap.rate,
             effectiveRate: eff,
             interest,
-            note: `${term === '1y' ? '1年期' : '5年期'} LPR ${snap.rate.toFixed(2)}%`,
+            note: `${term === '1y' ? '1年期' : '5年期'} LPR ${snap.rate.toFixed(2)}%（${snap.effectiveDate} 报价）`,
           });
         }
       }
     }
 
-    // Execution doubled delay interest (日万分之1.75)
     let delayDays = 0;
     let delayInterest = 0;
     if (mode === 'delay_only') {
       delayDays = totalDays;
       delayInterest = principalYuan * DELAY_DAILY_RATE * delayDays;
-    } else if (includeDelay && principalYuan > 0) {
-      delayDays = diffDays(delayStartDate, endDate);
+    } else if (includeDelay && principalYuan > 0 && isValidIsoYmd(delayStartDate) && isValidIsoYmd(endDate)) {
+      delayDays = safePositiveDiff(delayStartDate, endDate);
       delayInterest = principalYuan * DELAY_DAILY_RATE * delayDays;
     }
 
     const totalInterest = normalInterest + delayInterest;
     const grandTotal = principalYuan + totalInterest;
-    const fourTimesLatestLpr = Number((LATEST_LPR.r1y * 4).toFixed(2));
-    const exceedsPrivateLendingCap =
-      (mode === 'custom_rate' && customRate > fourTimesLatestLpr) ||
-      (mode !== 'delay_only' && mode !== 'custom_rate' && LATEST_LPR.r1y * multiplier + bps / 100 > fourTimesLatestLpr);
+
+    const maxTestedRate =
+      mode === 'custom_rate'
+        ? customRate
+        : segments.length > 0
+        ? Math.max(...segments.map((s) => s.effectiveRate))
+        : isValidIsoYmd(startDate)
+        ? Math.max(0, lookupLprOn(startDate, term).rate * multiplier + bps / 100)
+        : 0;
+
+    const privateLendingEval = evaluatePrivateLendingCap({
+      enabled: isPrivateLending && mode !== 'delay_only',
+      contractDateIso: contractDate,
+      testedAnnualRate: maxTestedRate,
+    });
 
     const lprCoverage = checkLprDateCoverage(startDate, endDate);
 
     return {
+      validDates,
       totalDays,
       segments,
       normalInterest,
@@ -215,8 +187,7 @@ export const LprInterestCalculator: React.FC = () => {
       delayInterest,
       totalInterest,
       grandTotal,
-      fourTimesLatestLpr,
-      exceedsPrivateLendingCap,
+      privateLendingEval,
       lprCoverage,
     };
   }, [
@@ -229,6 +200,8 @@ export const LprInterestCalculator: React.FC = () => {
     bps,
     customRate,
     dayBasis,
+    isPrivateLending,
+    contractDate,
     includeDelay,
     delayStartDate,
   ]);
@@ -246,9 +219,13 @@ export const LprInterestCalculator: React.FC = () => {
     const lines = [
       '【逾期付款利息 / 迟延履行金计算明细表】',
       `计息本金：${principalYuan.toLocaleString('zh-CN', { minimumFractionDigits: 2 })} 元`,
-      `计息期间：${startDate} 至 ${endDate}（共 ${calc.totalDays} 天，基准 ${dayBasis} 天/年）`,
+      `计息期间：${startDate || '待填'} 至 ${endDate || '待填'}（共 ${calc.totalDays} 天，基准 ${dayBasis} 天/年）`,
       `计息标准：${modeLabel}`,
     ];
+
+    if (calc.privateLendingEval.enabled && calc.privateLendingEval.message) {
+      lines.push(`民间借贷上限核验：${calc.privateLendingEval.message}`);
+    }
 
     if (calc.segments.length > 0) {
       lines.push('--- 分段明细 ---');
@@ -269,8 +246,32 @@ export const LprInterestCalculator: React.FC = () => {
 
     lines.push(`应付利息合计：${calc.totalInterest.toFixed(2)} 元`);
     lines.push(`本息暂计总额：${calc.grandTotal.toFixed(2)} 元`);
+
+    if ((mode === 'lpr_floating' || mode === 'lpr_fixed') && calc.lprCoverage.staleEnd) {
+      lines.push(
+        `【数据核验提醒】截止日（${endDate}）超出本工具已核验央行 LPR 报价窗口（截至 ${calc.lprCoverage.verifiedThrough}），提交法庭前请复核最新一期央行 LPR 公告。`
+      );
+    }
+    if ((mode === 'lpr_floating' || mode === 'lpr_fixed') && calc.lprCoverage.beforeLprReform) {
+      lines.push(
+        `【历史分段提醒】起算日（${startDate}）早于 2019-08-20 LPR 改革日，2019-08-19 及之前期间请核对同期同类贷款基准利率分段规则。`
+      );
+    }
+
     return lines.join('\n');
-  }, [mode, term, multiplier, bps, customRate, principalYuan, startDate, endDate, dayBasis, delayStartDate, calc]);
+  }, [
+    mode,
+    term,
+    multiplier,
+    bps,
+    customRate,
+    principalYuan,
+    startDate,
+    endDate,
+    dayBasis,
+    delayStartDate,
+    calc,
+  ]);
 
   const copyStatement = async () => {
     try {
@@ -290,7 +291,6 @@ export const LprInterestCalculator: React.FC = () => {
   return (
     <div className="bg-[#F6F4EF] py-5 sm:py-8">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
-        {/* Breadcrumb */}
         <div className="hidden">
           <Link to="/tools" className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-[#11151C]">
             <ArrowLeft className="h-3.5 w-3.5" /> 返回实用法律工具
@@ -311,7 +311,7 @@ export const LprInterestCalculator: React.FC = () => {
               LPR 逾期付款利息与迟延履行金计算器
             </h1>
             <p className="mt-2.5 max-w-2xl text-sm leading-7 text-slate-600">
-              自动按央行历次 LPR 调息日分段拆算逾期付款利息、买卖合同 1.3–1.5 倍上浮利息、民间借贷 4 倍保护上限及《民诉法》第 264 条双倍迟延履行债务利息（日万分之 1.75），一键复制明细表附入起诉状。
+              自动按央行历次 LPR 调息日分段拆算逾期付款利息、商事合同上浮利息、民间借贷「合同成立时 4 倍 LPR」上限核验及《民诉法》第 264 条双倍迟延履行债务利息（日万分之 1.75）。
             </p>
           </div>
           <button
@@ -325,6 +325,9 @@ export const LprInterestCalculator: React.FC = () => {
               setTerm('1y');
               setMultiplierStr('1');
               setBpsStr('0');
+              setIsPrivateLending(false);
+              setContractDate('2024-06-01');
+              setContractDateCustomized(false);
               setIncludeDelay(false);
             }}
             className="inline-flex flex-none items-center gap-1.5 rounded-[2px] border border-[#D4CEC2] bg-white px-3.5 py-2 text-xs font-medium text-slate-600 hover:border-[#11151C]"
@@ -339,7 +342,7 @@ export const LprInterestCalculator: React.FC = () => {
             [
               ['lpr_floating', 'LPR 分段浮动计息', '跨调息期自动分段（判决最常用）'],
               ['lpr_fixed', '起算日 LPR 固定', '锁定起算日当期 LPR 不变'],
-              ['custom_rate', '合同约定年利率', '自定义固定年化利率并核对 4 倍红线'],
+              ['custom_rate', '合同约定年利率', '自定义固定年化利率（可选核验民间借贷上限）'],
               ['delay_only', '执行加倍迟延履行金', '固定日万分之 1.75（民诉法 264 条）'],
             ] as const
           ).map(([id, title, sub]) => (
@@ -430,7 +433,13 @@ export const LprInterestCalculator: React.FC = () => {
                 <input
                   type="date"
                   value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setStartDate(v);
+                    if (!contractDateCustomized && v) {
+                      setContractDate(v);
+                    }
+                  }}
                   className="mt-1.5 w-full rounded-[2px] border border-[#D8D2C6] bg-[#FAF9F6] px-3 py-2 text-xs font-medium"
                 />
               </label>
@@ -499,9 +508,9 @@ export const LprInterestCalculator: React.FC = () => {
                 <div className="flex flex-wrap gap-1.5">
                   {[
                     ['1', '1倍 LPR'],
-                    ['1.3', '1.3倍（上浮30%）'],
+                    ['1.3', '1.3倍（买卖合同违约参考）'],
                     ['1.5', '1.5倍（上浮50%）'],
-                    ['4', '4倍（民间借贷上限）'],
+                    ['4', '4倍（民间借贷参考）'],
                   ].map(([val, lbl]) => (
                     <button
                       key={val}
@@ -509,6 +518,7 @@ export const LprInterestCalculator: React.FC = () => {
                       onClick={() => {
                         setMultiplierStr(val);
                         setBpsStr('0');
+                        if (val === '4') setIsPrivateLending(true);
                       }}
                       className="rounded-[2px] border border-[#E4DFD4] bg-[#FAF9F6] px-2.5 py-1 text-[11px] text-slate-600 hover:border-[#11151C]"
                     >
@@ -533,12 +543,12 @@ export const LprInterestCalculator: React.FC = () => {
                   />
                 </label>
                 <p className="mt-1.5 text-[11px] text-slate-500">
-                  参考：现行民间借贷司法保护上限为 4 倍 1 年期 LPR = <strong className="font-num text-[#11151C]">{calc.fourTimesLatestLpr}%</strong>。
+                  提示：买卖/建设工程等商事违约金不直接适用民间借贷 4 倍上限；如属民间借贷，请勾选下方核验框并填入合同成立日。
                 </p>
               </div>
             )}
 
-            {/* Day basis & Execution delay overlay */}
+            {/* Day basis, Private Lending Cap Check & Execution delay overlay */}
             {mode !== 'delay_only' && (
               <div className="space-y-3 border-t border-[#EFECE5] pt-4">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -560,6 +570,39 @@ export const LprInterestCalculator: React.FC = () => {
                     </button>
                   </div>
                 </div>
+
+                {/* Private Lending Cap Opt-in */}
+                <label className="flex cursor-pointer items-start gap-2.5 border border-[#E4DFD4] bg-[#FAF9F6] p-3 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={isPrivateLending}
+                    onChange={(e) => setIsPrivateLending(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 accent-[#11151C]"
+                  />
+                  <span>
+                    <strong className="text-[#11151C]">属于民间借贷纠纷（核验合同成立时 4 倍 LPR 上限）</strong>
+                    <span className="block text-[11px] text-slate-500">
+                      按《民间借贷司法解释》第 25 条，以合同成立时一年期 LPR 四倍核定保护上限
+                    </span>
+                  </span>
+                </label>
+
+                {isPrivateLending && (
+                  <label className="block rounded border border-[#E4DFD4] bg-white p-3">
+                    <span className="text-[11px] font-bold text-[#0E223D]">
+                      借款合同成立日期（用于匹配成立当期 1 年期 LPR 报价）
+                    </span>
+                    <input
+                      type="date"
+                      value={contractDate}
+                      onChange={(e) => {
+                        setContractDate(e.target.value);
+                        setContractDateCustomized(true);
+                      }}
+                      className="mt-1.5 w-full rounded-[2px] border border-[#D8D2C6] bg-[#FAF9F6] px-3 py-2 text-xs font-medium"
+                    />
+                  </label>
+                )}
 
                 <label className="flex cursor-pointer items-start gap-2.5 border border-[#EFECE5] bg-[#FAF9F6] p-3 text-xs">
                   <input
@@ -607,8 +650,9 @@ export const LprInterestCalculator: React.FC = () => {
                 </div>
                 <button
                   type="button"
+                  disabled={!calc.validDates}
                   onClick={copyStatement}
-                  className="inline-flex items-center gap-1.5 rounded-[2px] border border-white/20 bg-white/10 px-3.5 py-2 text-xs font-medium text-white hover:bg-white/20"
+                  className="inline-flex items-center gap-1.5 rounded-[2px] border border-white/20 bg-white/10 px-3.5 py-2 text-xs font-medium text-white hover:bg-white/20 disabled:opacity-40"
                 >
                   {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5 text-[#D1B27A]" />}
                   <span>{copied ? '已复制明细表' : '复制诉状用明细表'}</span>
@@ -616,9 +660,22 @@ export const LprInterestCalculator: React.FC = () => {
               </div>
             </div>
 
-            {calc.exceedsPrivateLendingCap && (
-              <div className="border border-amber-300 bg-amber-50 px-4 py-3 text-xs leading-6 text-amber-950">
-                <strong>民间借贷利率上限提醒：</strong>当前设定年利率高于现行 4 倍 1 年期 LPR（{calc.fourTimesLatestLpr}%）。如属民间借贷纠纷，超出 4 倍部分通常不获司法保护；如属买卖/建设工程等商事违约金，请结合实际损失综合评估。
+            {calc.privateLendingEval.enabled && (
+              <div
+                className={`border px-4 py-3 text-xs leading-6 ${
+                  calc.privateLendingEval.status === 'within_cap'
+                    ? 'border-emerald-300 bg-emerald-50 text-emerald-950'
+                    : 'border-amber-300 bg-amber-50 text-amber-950'
+                }`}
+              >
+                <strong>
+                  {calc.privateLendingEval.status === 'within_cap'
+                    ? '民间借贷利率上限核验（未超限）：'
+                    : calc.privateLendingEval.status === 'exceeds_cap'
+                    ? '民间借贷利率上限提醒（超出成立时 4 倍 LPR）：'
+                    : '民间借贷利率上限核验（待人工复核）：'}
+                </strong>
+                {calc.privateLendingEval.message}
               </div>
             )}
 
@@ -690,7 +747,7 @@ export const LprInterestCalculator: React.FC = () => {
                     {calc.segments.length === 0 && calc.delayDays === 0 && (
                       <tr>
                         <td colSpan={4} className="px-3 py-6 text-center text-slate-400">
-                          请确保截止日期晚于起算日期且本金大于 0。
+                          请确保填写有效起止日期、截止日期晚于起算日期且本金大于 0。
                         </td>
                       </tr>
                     )}
@@ -708,12 +765,12 @@ export const LprInterestCalculator: React.FC = () => {
                   <span>带入本息总额算诉讼费/执行费</span>
                 </Link>
                 <Link
-                  to={`/contact?type=${encodeURIComponent('民商事争议')}&sourceTool=${encodeURIComponent('LPR 逾期利息与迟延履行金计算器')}&note=${encodeURIComponent(`${courtReadyText}\n希望预约民商事/执行律师评估起诉或强制执行回款策略。`)}`}
+                  to={`/contact?type=${encodeURIComponent('民商事争议')}&sourceTool=${encodeURIComponent('LPR 逾期利息与迟延履行金计算器')}&note=${encodeURIComponent(`${courtReadyText}\n希望评估起诉或强制执行回款策略。`)}`}
                   onClick={() => trackEvent('tool_to_contact')}
                   className="inline-flex items-center gap-2 rounded-[2px] bg-[#11151C] px-5 py-2.5 text-xs font-semibold text-[#F6F4EF] hover:bg-[#0E223D]"
                 >
                   <Send className="h-3.5 w-3.5 text-[#D1B27A]" />
-                  <span>带入利息明细预约律师</span>
+                  <span>带入利息明细转 AI 智囊</span>
                   <ArrowRight className="h-3.5 w-3.5" />
                 </Link>
               </div>

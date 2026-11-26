@@ -90,6 +90,24 @@ import {
   buildSignedAdminHeaders,
   createOpenModeLicense,
 } from '../src/lib/licenseEngine.ts';
+import crypto from 'node:crypto';
+import zlib from 'node:zlib';
+import { PDFDocument } from 'pdf-lib';
+import {
+  CN_ADJUSTED_WORKDAYS,
+  CN_HOLIDAYS,
+  calculateWorkdayInterval,
+  computeLegalDeadline,
+} from '../src/lib/legalCalendar.ts';
+import { evaluatePrivateLendingCap } from '../src/lib/lprEngine.ts';
+import {
+  parseSpcDraftBundle,
+  serializeSpcDraftBundle,
+  switchSpcTemplatePreservingDrafts,
+} from '../src/lib/spcDraftStorage.ts';
+import { searchStatuteEntries } from '../src/lib/statuteSearch.ts';
+import { toolboxStorage } from '../src/lib/storage.ts';
+import { splitPdfIntoVerifiedVolumes } from '../src/lib/pdfVolumeSplitter.ts';
 
 async function createEphemeralP256KeyPair() {
   const kp = await crypto.subtle.generateKey(
@@ -977,8 +995,9 @@ test('S-2: Direct-connect failure NEVER silently falls back to /api/ai-relay unl
 test('L-1 & L-3: Legal dataset manifest detects out-of-coverage holiday years, stale LPR windows, and embeds AI disclaimer in Word exports', () => {
   assert.equal(isDateOutsideHolidayCoverage('2025-10-01'), false);
   assert.equal(isDateOutsideHolidayCoverage('2026-05-01'), false);
+  assert.equal(isDateOutsideHolidayCoverage('2027-01-15'), false);
   assert.equal(isDateOutsideHolidayCoverage('2024-12-31'), true);
-  assert.equal(isDateOutsideHolidayCoverage('2027-01-15'), true);
+  assert.equal(isDateOutsideHolidayCoverage('2028-01-15'), true);
 
   const okLpr = checkLprDateCoverage('2024-06-01', '2026-11-24');
   assert.equal(okLpr.staleEnd, false);
@@ -1211,6 +1230,396 @@ test('Custom OpenAI endpoint cleanly supports opencode.ai session headers and no
     ],
   });
   assert.deepEqual(parsed.sort(), ['glm-5.3', 'glm-5.3-flash']);
+});
+
+test('Unified legal calendar engine enforces 2027 State Council holidays, leap-day clamping, program-specific rollover, and uncapped workday spans', () => {
+  assert.equal(CN_HOLIDAYS['2027-02-05'], '春节（除夕）');
+  assert.equal(CN_HOLIDAYS['2027-02-13'], '春节');
+  assert.equal(CN_ADJUSTED_WORKDAYS.has('2027-01-31'), true);
+  assert.equal(CN_ADJUSTED_WORKDAYS.has('2027-02-14'), true);
+  assert.equal(CN_ADJUSTED_WORKDAYS.has('2027-05-08'), true);
+  assert.equal(CN_ADJUSTED_WORKDAYS.has('2027-09-26'), true);
+  assert.equal(CN_ADJUSTED_WORKDAYS.has('2027-10-09'), true);
+
+  const labor15 = computeLegalDeadline({
+    startYmd: '2026-09-16',
+    days: 15,
+    rolloverMode: 'civil_statutory',
+  });
+  assert.equal(labor15.rawEndYmd, '2026-10-01');
+  assert.equal(labor15.finalEndYmd, '2026-10-08');
+  assert.equal(labor15.extended, true);
+
+  const appeal2027 = computeLegalDeadline({
+    startYmd: '2026-12-17',
+    days: 15,
+    rolloverMode: 'civil_statutory',
+  });
+  assert.equal(appeal2027.rawEndYmd, '2027-01-01');
+  assert.equal(appeal2027.finalEndYmd, '2027-01-04');
+  assert.equal(appeal2027.verificationStatus, 'exact');
+
+  const spring2027 = computeLegalDeadline({
+    startYmd: '2027-01-25',
+    days: 15,
+    rolloverMode: 'civil_statutory',
+  });
+  assert.equal(spring2027.rawEndYmd, '2027-02-09');
+  assert.equal(spring2027.finalEndYmd, '2027-02-14');
+
+  const leap2y = computeLegalDeadline({
+    startYmd: '2024-02-29',
+    months: 24,
+    rolloverMode: 'civil_statutory',
+  });
+  assert.equal(leap2y.rawEndYmd, '2026-02-28');
+
+  const freeze = computeLegalDeadline({
+    startYmd: '2025-10-02',
+    months: 12,
+    rolloverMode: 'preservation_freeze',
+  });
+  assert.equal(freeze.rawEndYmd, '2026-10-01');
+  assert.equal(freeze.finalEndYmd, '2026-10-01');
+  assert.equal(freeze.extended, false);
+  assert.ok(freeze.holidayWarningText.includes('不适用民事期间顺延'));
+
+  assert.equal(computeLegalDeadline({ startYmd: '', days: 15, rolloverMode: 'civil_statutory' }), null);
+  assert.equal(
+    computeLegalDeadline({ startYmd: '2026-02-30', days: 15, rolloverMode: 'civil_statutory' }),
+    null
+  );
+
+  const span = calculateWorkdayInterval('2010-01-01', '2026-01-01');
+  assert.equal(span.absDays, 5844);
+  assert.equal(span.inclusiveTotalDays, 5845);
+  assert.equal(span.workdays + span.weekendOrHoliday, 5845);
+  assert.equal(span.exceededMaxRange, false);
+});
+
+test('Private lending judicial cap compares against 4x 1-year LPR on contract formation date', () => {
+  const off = evaluatePrivateLendingCap({
+    enabled: false,
+    contractDateIso: '2024-08-01',
+    testedAnnualRate: 18,
+  });
+  assert.equal(off.status, 'disabled');
+
+  const aug2024 = evaluatePrivateLendingCap({
+    enabled: true,
+    contractDateIso: '2024-08-01',
+    testedAnnualRate: 13,
+  });
+  assert.equal(aug2024.quoteDate, '2024-07-22');
+  assert.equal(aug2024.baseRate1y, 3.35);
+  assert.equal(aug2024.capRate, 13.4);
+  assert.equal(aug2024.status, 'within_cap');
+
+  const jun2025 = evaluatePrivateLendingCap({
+    enabled: true,
+    contractDateIso: '2025-06-01',
+    testedAnnualRate: 13,
+  });
+  assert.equal(jun2025.capRate, 12);
+  assert.equal(jun2025.status, 'exceeds_cap');
+
+  const pre2019 = evaluatePrivateLendingCap({
+    enabled: true,
+    contractDateIso: '2019-05-01',
+    testedAnnualRate: 15,
+  });
+  assert.equal(pre2019.status, 'needs_manual_review');
+});
+
+test('Redactor prevents literal placeholder collisions, masks compound surnames & HK addresses, redacts batch sharedInstruction, and defaults syncByok to false', async () => {
+  assert.equal(DEFAULT_CLOUD_SYNC_PREFS.syncByok, false);
+
+  const collisionInput =
+    '原告：张三，原件批注[当事人甲]及【公司主体A】，联系手机13800138000，诉被告：杭州星河文化传媒有限公司。';
+  const redCol = redactLegalText(collisionInput);
+  assert.ok(!redCol.redactedText.includes('张三'));
+  assert.ok(!redCol.redactedText.includes('13800138000'));
+  assert.ok(!redCol.redactedText.includes('杭州星河文化传媒有限公司'));
+  assert.equal(restoreRedactedText(redCol.redactedText, redCol.mappings), collisionInput);
+
+  const narr = redactLegalText('张三于3月1日借款2万元至今未还。');
+  assert.ok(!narr.redactedText.includes('张三'));
+  assert.equal(restoreRedactedText(narr.redactedText, narr.mappings), '张三于3月1日借款2万元至今未还。');
+
+  const hk = redactLegalText('原告：欧阳修，住址：中国香港九龙弥敦道100号8楼。');
+  assert.ok(!hk.redactedText.includes('欧阳修'));
+  assert.ok(!hk.redactedText.includes('弥敦道100号'));
+  assert.equal(restoreRedactedText(hk.redactedText, hk.mappings), '原告：欧阳修，住址：中国香港九龙弥敦道100号8楼。');
+
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const corpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/spc-2025-templates.json'), 'utf8')
+  );
+  const tpl = corpus.templates[0];
+  let capturedPrompt = '';
+  await runSpcBatchQueue({
+    items: [
+      {
+        id: 'b-1',
+        sourceFilename: '案卷1.docx',
+        caseLabel: '案卷1',
+        sourceText: '被告：宁波海曙贸易有限公司拖欠货款10万元。',
+        templateId: tpl.id,
+        templateName: tpl.displayName,
+        status: 'pending',
+        updatedAt: Date.now(),
+      },
+    ],
+    tpl,
+    provider: {
+      id: 'mock',
+      presetId: 'deepseek',
+      name: 'Mock',
+      protocol: 'openai',
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'sk-test',
+      fastModel: 'mock-fast',
+      reasoningModel: 'mock-reason',
+    },
+    modelSlot: 'fast',
+    autoRedact: true,
+    sharedInstruction: '原告统一填写为杭州星河文化传媒有限公司，联系人王建军13912345678',
+    concurrency: 1,
+    completeFn: async ({ messages }) => {
+      capturedPrompt = messages[1].content;
+      return { content: JSON.stringify({ rowValues: {}, summary: 'ok', missingChecklist: [] }) };
+    },
+    onItemUpdate: () => {},
+  });
+  assert.ok(!capturedPrompt.includes('杭州星河文化传媒有限公司'));
+  assert.ok(!capturedPrompt.includes('13912345678'));
+});
+
+test('SPC multi-template draft switching (A -> B -> A) and 100k-char draft bundle roundtrip without truncation', () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const corpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/spc-2025-templates.json'), 'utf8')
+  );
+  const tplA = corpus.templates[0];
+  const tplB = corpus.templates[1];
+
+  const draftA = createInitialSpcDraft(tplA);
+  draftA.courtName = '杭州市西湖区人民法院';
+  draftA.signerName = '示例原告甲';
+
+  const toB = switchSpcTemplatePreservingDrafts({
+    currentDraft: draftA,
+    draftsByTemplate: { [tplA.id]: draftA },
+    nextTpl: tplB,
+  });
+  assert.equal(toB.nextDraft.templateId, tplB.id);
+  assert.equal(toB.restoredExisting, false);
+
+  toB.nextDraft.courtName = '上海市浦东新区人民法院';
+  const backToA = switchSpcTemplatePreservingDrafts({
+    currentDraft: toB.nextDraft,
+    draftsByTemplate: toB.nextDraftsByTemplate,
+    nextTpl: tplA,
+  });
+  assert.equal(backToA.restoredExisting, true);
+  assert.equal(backToA.nextDraft.courtName, '杭州市西湖区人民法院');
+  assert.equal(backToA.nextDraft.signerName, '示例原告甲');
+  assert.equal(backToA.nextDraftsByTemplate[tplB.id].courtName, '上海市浦东新区人民法院');
+
+  const longMaterial = '案件事实长段摘录。'.repeat(12000) + '__END_MARKER_108K__';
+  assert.ok(longMaterial.length > 100_000);
+  const json = serializeSpcDraftBundle({
+    activeTemplateId: tplA.id,
+    draftsByTemplate: backToA.nextDraftsByTemplate,
+    sourceText: longMaterial,
+    companionCourt: '杭州市西湖区人民法院',
+  });
+  const restored = parseSpcDraftBundle(json, corpus);
+  assert.equal(restored.sourceText.length, longMaterial.length);
+  assert.ok(restored.sourceText.endsWith('__END_MARKER_108K__'));
+});
+
+test('Statute search supports natural law + article compound queries in Arabic and Chinese numerals', () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const corpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/laws-offline.json'), 'utf8')
+  );
+  const items = [];
+  for (const a of corpus.civilArticles) {
+    items.push({
+      key: `civil:${a.no}`,
+      lawTitle: '民法典',
+      fullLawTitle: '中华人民共和国民法典',
+      articleNo: a.no,
+      articleLabel: a.label,
+      breadcrumb: `${a.book} / ${a.chapter}`,
+      summary: a.summary,
+      text: a.text,
+    });
+  }
+  for (const doc of corpus.companionDocs) {
+    for (const it of doc.items) {
+      items.push({
+        key: `${doc.id}:${it.no}`,
+        lawTitle: doc.shortTitle,
+        fullLawTitle: doc.fullTitle,
+        articleNo: it.no,
+        articleLabel: it.label,
+        breadcrumb: doc.shortTitle,
+        text: it.text,
+      });
+    }
+  }
+
+  for (const q of ['585', '第585条', '民法典第585条', '《民法典》第 585 条', '民法典 585', '民法典 第五百八十五条']) {
+    const hits = searchStatuteEntries(items, q, 10);
+    assert.ok(hits.length > 0, `Query "${q}" returned 0 hits`);
+    assert.equal(hits[0].key, 'civil:585', `Query "${q}" should rank 民法典第585条 first, got ${hits[0].key}`);
+  }
+
+  const cplHits = searchStatuteEntries(items, '民诉法第171条', 10);
+  assert.ok(cplHits.some((h) => h.fullLawTitle.includes('民事诉讼法') && h.articleNo === 171));
+});
+
+test('Workspace backup merges by ID without clobbering newer items, supports rollback, rolls back atomically on quota failure, and verifies oversize single-page PDFs', async () => {
+  const store = new Map();
+  let failAfterWrites = Infinity;
+  let writeCount = 0;
+  const prevDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    writable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => {
+        writeCount++;
+        if (writeCount > failAfterWrites) {
+          throw new Error('QuotaExceededError');
+        }
+        store.set(k, String(v));
+      },
+      removeItem: (k) => {
+        store.delete(k);
+      },
+      clear: () => store.clear(),
+    },
+  });
+
+  try {
+    toolboxStorage.saveDeadlines([
+      {
+        id: 'dl-local-new',
+        title: '本机新立案件上诉期',
+        dueDate: '2026-12-20',
+        category: '上诉期',
+        createdAt: '2026-11-26T10:00:00.000Z',
+      },
+    ]);
+    const oldBackupJson = JSON.stringify({
+      app: 'cn-lawyer-ai-toolbox',
+      exportedAt: '2026-10-01T00:00:00.000Z',
+      deadlines: [
+        {
+          id: 'dl-backup-old',
+          title: '旧备份案件举证期',
+          dueDate: '2026-10-15',
+          category: '举证期',
+          createdAt: '2026-10-01T00:00:00.000Z',
+        },
+      ],
+      scratchpads: [],
+    });
+
+    const preview = toolboxStorage.previewWorkspaceImport(oldBackupJson);
+    assert.equal(preview.keptLocalDeadlines, 1);
+
+    toolboxStorage.importFullWorkspaceJson(oldBackupJson);
+    const mergedIds = toolboxStorage.getDeadlines().map((d) => d.id).sort();
+    assert.deepEqual(mergedIds, ['dl-backup-old', 'dl-local-new']);
+    assert.equal(toolboxStorage.hasImportRollback(), true);
+
+    toolboxStorage.restoreImportRollback();
+    assert.deepEqual(
+      toolboxStorage.getDeadlines().map((d) => d.id),
+      ['dl-local-new']
+    );
+
+    writeCount = 0;
+    failAfterWrites = 2;
+    assert.throws(
+      () =>
+        toolboxStorage.importFullWorkspaceJson(
+          JSON.stringify({
+            app: 'cn-lawyer-ai-toolbox',
+            history: [{ id: 'h1', toolId: 't', title: 'x', summary: 'y', createdAt: '2026-11-01' }],
+            deadlines: [],
+            scratchpads: [{ id: 's1', title: 'huge', content: 'x', updatedAt: '2026-11-01' }],
+          }),
+          { mode: 'overwrite' }
+        ),
+      /空间不足|回滚/
+    );
+    failAfterWrites = Infinity;
+    assert.deepEqual(
+      toolboxStorage.getDeadlines().map((d) => d.id),
+      ['dl-local-new']
+    );
+  } finally {
+    if (prevDescriptor) {
+      Object.defineProperty(globalThis, 'localStorage', prevDescriptor);
+    }
+  }
+
+  const width = 600;
+  const height = 600;
+  const rawScanlines = Buffer.alloc((width * 3 + 1) * height);
+  const rnd = crypto.randomBytes(width * 3 * height);
+  for (let y = 0; y < height; y++) {
+    rawScanlines[y * (width * 3 + 1)] = 0;
+    rnd.copy(rawScanlines, y * (width * 3 + 1) + 1, y * width * 3, (y + 1) * width * 3);
+  }
+  function pngChunk(type, data) {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length, 0);
+    const typeBuf = Buffer.from(type, 'ascii');
+    const crcVal = zlib.crc32(Buffer.concat([typeBuf, data]));
+    const crcBuf = Buffer.alloc(4);
+    crcBuf.writeUInt32BE(crcVal >>> 0, 0);
+    return Buffer.concat([len, typeBuf, data, crcBuf]);
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const idat = zlib.deflateSync(rawScanlines, { level: 0 });
+  const pngBytes = Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', idat),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ]);
+
+  const doc = await PDFDocument.create();
+  const img = await doc.embedPng(pngBytes);
+  const p1 = doc.addPage([595, 842]);
+  p1.drawImage(img, { x: 20, y: 20, width: 500, height: 500 });
+  const p2 = doc.addPage([595, 842]);
+  p2.drawText('Page 2 small attachment', { x: 50, y: 700, size: 14 });
+  const fullPdfBytes = await doc.save({ useObjectStreams: true });
+  assert.ok(fullPdfBytes.byteLength > 1_000_000);
+
+  const splitRes = await splitPdfIntoVerifiedVolumes({
+    pdfBytes: fullPdfBytes,
+    baseName: '测试超限卷宗',
+    maxMb: 1,
+    unit: 'decimal_mb',
+  });
+  assert.equal(splitRes.volumes.length, 2);
+  assert.equal(splitRes.allWithinLimit, false);
+  assert.equal(splitRes.oversizeVolumes.length, 1);
+  assert.equal(splitRes.oversizeVolumes[0].pageStart, 1);
+  assert.equal(splitRes.volumes[1].exceedsLimit, false);
 });
 
 

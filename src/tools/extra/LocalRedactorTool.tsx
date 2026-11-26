@@ -112,7 +112,7 @@ export const LocalRedactorTool: React.FC = () => {
     } catch {
       // ignore
     }
-    sendToAi(specialistId, '本地已脱敏案件材料', result.redactedText);
+    sendToAi(specialistId, '本地预脱敏案件材料（请人工复核）', result.redactedText);
   };
 
   return (
@@ -290,7 +290,7 @@ export const LocalRedactorTool: React.FC = () => {
               <div className="flex items-center justify-between gap-2">
                 <div>
                   <div className="text-[11px] uppercase tracking-[0.18em] text-[#D1B27A]">
-                    SAFE OUTPUT · 安全脱敏结果
+                    PRE-REDACTED DRAFT · 自动预脱敏稿（外发前请人工通读复核）
                   </div>
                   <div className="mt-0.5 text-xs text-slate-300">
                     共识别 {result.mappings.length} 个敏感实体，累计替换 {result.totalReplaced} 处
@@ -303,8 +303,12 @@ export const LocalRedactorTool: React.FC = () => {
                   className="inline-flex items-center gap-1.5 rounded bg-[#B89254] px-3 py-1.5 text-xs font-bold text-[#11151C] disabled:opacity-40"
                 >
                   {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-                  {copied ? '已复制' : '复制脱敏稿'}
+                  {copied ? '已复制' : '复制预脱敏稿'}
                 </button>
+              </div>
+
+              <div className="mt-2.5 rounded border border-amber-400/50 bg-amber-950/50 px-2.5 py-1.5 text-[11px] leading-5 text-amber-100">
+                合规提示：本地规则脱敏无法保证 100% 识别口语叙述中的生僻姓名、机构简称或非常规地址；发送给第三方模型前请务必人工核对，遗漏主体可在左下方补充涉密词。
               </div>
 
               <div className="mt-3 max-h-60 overflow-y-auto rounded bg-[#091628] p-3 text-xs sm:text-sm leading-6 whitespace-pre-wrap text-slate-100 border border-white/10">
@@ -314,7 +318,7 @@ export const LocalRedactorTool: React.FC = () => {
               {/* Direct Handoff to AI Specialists */}
               <div className="mt-4 pt-3 border-t border-white/15">
                 <div className="text-[11px] font-medium text-[#D1B27A] mb-2">
-                  一键将脱敏安全稿送入 AI 智囊舱（自动携带本地还原密码本）：
+                  复核无误后送入 AI 智囊舱（仍会弹出最终出站预览，并携带本地密码本）：
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   <button

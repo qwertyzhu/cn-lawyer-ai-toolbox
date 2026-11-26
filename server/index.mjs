@@ -1322,16 +1322,11 @@ const server = http.createServer(async (req, res) => {
         const deviceLabel = String(body.deviceLabel || '').slice(0, 64);
 
         const existing = readEncryptedUserVault(canonKey);
-        if (
-          !force &&
-          existing &&
-          existing.revision > baseRevision &&
-          existing.updatedAt > incomingUpdatedAt
-        ) {
+        if (!force && existing && existing.revision > baseRevision) {
           return sendJson(res, 409, {
             ok: false,
             conflict: true,
-            error: '云端存在更新版本的配置，请先拉取合并或选择强制覆盖',
+            error: '云端存在其他设备新提交的配置版本，请先拉取或选择强制覆盖',
             serverRevision: existing.revision,
             serverUpdatedAt: existing.updatedAt,
             clientEncrypted: existing.clientEncrypted,
@@ -2242,6 +2237,13 @@ const server = http.createServer(async (req, res) => {
       filePath = path.join(DIST_DIR, 'index.html');
     }
 
+    if (!fs.existsSync(filePath)) {
+      return sendJson(res, 503, {
+        ok: false,
+        error: '前端静态构建产物尚未就绪（缺少 dist/index.html），请先执行 npm run build',
+      });
+    }
+
     const ext = path.extname(filePath).toLowerCase();
     const contentType = MIME_MAP[ext] || 'application/octet-stream';
     const isImmutable = pathname.startsWith('/assets/');
@@ -2253,7 +2255,16 @@ const server = http.createServer(async (req, res) => {
         ? 'public, max-age=31536000, immutable'
         : 'no-cache, must-revalidate',
     });
-    fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', (streamErr) => {
+      console.error('[cn-lawyer-ai-toolbox] Static stream error:', filePath, streamErr);
+      if (!res.headersSent) {
+        sendJson(res, 500, { ok: false, error: '静态资源读取失败' });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    });
+    stream.pipe(res);
   } catch (err) {
     console.error('[cn-lawyer-ai-toolbox] Request error:', req.method, req.url, err);
     if (res.headersSent) {

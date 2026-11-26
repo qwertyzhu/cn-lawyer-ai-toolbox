@@ -17,7 +17,7 @@ export const AI_LEGAL_DISCLAIMER =
   '以下内容由 AI 生成，引用的法条和案例须经承办律师核对原文后方可使用。';
 
 export const CN_HOLIDAY_COVERED_MIN_YEAR = 2025;
-export const CN_HOLIDAY_COVERED_MAX_YEAR = 2026;
+export const CN_HOLIDAY_COVERED_MAX_YEAR = 2027;
 export const LPR_VERIFIED_THROUGH = '2026-11-20';
 export const LPR_START_DATE = '2019-08-20';
 export const LPR_STALE_THRESHOLD_DAYS = 35;
@@ -34,10 +34,10 @@ export const LEGAL_DATA_MANIFEST: Record<string, LegalDatasetMeta> = {
   cnHolidays: {
     id: 'cn-holidays',
     name: '中国法定节假日与国务院调休安排表',
-    asOf: '2026-12-31',
-    source: '国务院办公厅年度部分节假日安排通知',
-    nextReviewDate: '2026-12-01',
-    notes: `内置覆盖 ${CN_HOLIDAY_COVERED_MIN_YEAR}–${CN_HOLIDAY_COVERED_MAX_YEAR} 年度；跨出该年度范围将触发显著提示。`,
+    asOf: '2027-12-31',
+    source: '国务院办公厅年度部分节假日安排通知（含国办发明电〔2026〕10号 2027年安排）',
+    nextReviewDate: '2027-11-20',
+    notes: `内置覆盖 ${CN_HOLIDAY_COVERED_MIN_YEAR}–${CN_HOLIDAY_COVERED_MAX_YEAR} 年度；跨出该年度范围将触发显著提示并随复制/日历导出。`,
   },
   lawsOffline: {
     id: 'laws-offline',

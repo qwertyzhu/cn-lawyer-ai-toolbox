@@ -1,4 +1,13 @@
-const CACHE_NAME = '__CN_LAWYER_CACHE_VERSION__';
+const RAW_CACHE_VERSION = '__CN_LAWYER_CACHE_VERSION__';
+function getScopedCachePrefix() {
+  try {
+    const scopePath = new URL(self.registration.scope).pathname.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `cn-lawyer-ai-toolbox${scopePath}::`;
+  } catch {
+    return 'cn-lawyer-ai-toolbox::';
+  }
+}
+const CACHE_NAME = `${getScopedCachePrefix()}${RAW_CACHE_VERSION}`;
 const PRECACHE_ASSETS = [
   /*__CN_LAWYER_PRECACHE_LIST__*/
 ];
@@ -35,11 +44,16 @@ self.addEventListener('message', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
+  const myPrefix = getScopedCachePrefix();
   event.waitUntil(
     caches
       .keys()
       .then((keys) =>
-        Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+        Promise.all(
+          keys
+            .filter((k) => k.startsWith(myPrefix) && k !== CACHE_NAME)
+            .map((k) => caches.delete(k))
+        )
       )
       .then(() => self.clients.claim())
   );

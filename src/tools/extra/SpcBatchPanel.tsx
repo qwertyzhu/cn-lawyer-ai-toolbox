@@ -27,6 +27,7 @@ import { AI_LEGAL_DISCLAIMER } from '../../data/legalDataManifest';
 import { decryptWithPassphrase } from '../../lib/cryptoVault';
 import { downloadOfficialSpcDocx, downloadZipBundle } from '../../lib/docxBuilder';
 import { extractLocalDocumentText } from '../../lib/docxReader';
+import { redactLegalText } from '../../lib/redactor';
 import {
   SPC_BATCH_MAX_FILES,
   buildSpcBatchZipEntries,
@@ -499,59 +500,96 @@ export const SpcBatchPanel: React.FC<SpcBatchPanelProps> = ({
       )}
 
       {/* Pre-Send Compliance Confirmation Box */}
-      {confirmTargetIds && confirmTargetIds.length > 0 && !batchRunning && (
-        <div className="rounded-xl border border-[#B89254] bg-[#FBF7EE] p-4 space-y-2.5 text-xs text-[#11151C]">
-          <div className="flex items-start justify-between gap-2">
-            <div className="font-bold text-[#0E223D] flex items-center gap-1.5">
-              {autoRedact ? (
-                <ShieldCheck className="h-4 w-4 text-emerald-700" />
-              ) : (
-                <ShieldAlert className="h-4 w-4 text-rose-600" />
-              )}
-              <span>批量外发前合规确认（即将处理 {confirmTargetIds.length} 份起诉状）</span>
+      {confirmTargetIds && confirmTargetIds.length > 0 && !batchRunning && (() => {
+        const firstTarget = items.find((x) => confirmTargetIds.includes(x.id));
+        const sampleRedacted =
+          firstTarget && autoRedact
+            ? redactLegalText(firstTarget.sourceText, { existingMappings: [] })
+            : null;
+        const sharedInstPreview =
+          sharedInstruction.trim()
+            ? autoRedact
+              ? redactLegalText(sharedInstruction.trim(), {
+                  existingMappings: sampleRedacted?.mappings || [],
+                }).redactedText
+              : sharedInstruction.trim()
+            : '';
+        const transportMode = activeProvider?.useCorsRelayFallback
+          ? '本机浏览器直连优先（跨域受阻时经无状态透明中转）'
+          : '浏览器纯直连自选模型服务商（不经任何中转后端）';
+
+        return (
+          <div className="rounded-xl border border-[#B89254] bg-[#FBF7EE] p-4 space-y-3 text-xs text-[#11151C]">
+            <div className="flex items-start justify-between gap-2">
+              <div className="font-bold text-[#0E223D] flex items-center gap-1.5">
+                {autoRedact ? (
+                  <ShieldCheck className="h-4 w-4 text-emerald-700" />
+                ) : (
+                  <ShieldAlert className="h-4 w-4 text-rose-600" />
+                )}
+                <span>批量外发前实际载荷预检（即将处理 {confirmTargetIds.length} 份起诉状）</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setConfirmTargetIds(null)}
+                className="text-slate-400 hover:text-slate-700"
+              >
+                <X className="h-4 w-4" />
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setConfirmTargetIds(null)}
-              className="text-slate-400 hover:text-slate-700"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <ul className="space-y-1 text-[11px] leading-5 text-slate-700 list-disc pl-4">
+              <li>
+                <strong>接收方与传输方式</strong>：<strong>{activeProvider?.name || '当前服务商'}</strong>（
+                <span className="font-mono">{activeProvider?.baseUrl || ''}</span> · {transportMode}）。
+              </li>
+              <li>
+                <strong>脱敏范围</strong>：
+                {autoRedact
+                  ? '已对「每份诉状正文」及「本批统一补充要求」同步执行按案隔离预脱敏（规则预脱敏不代表 100% 识别所有口语姓名/简称，请人工核对下方实际出站样本）。'
+                  : '⚠ 您当前已关闭自动脱敏，诉状正文与补充要求将以原文直接发送至第三方模型服务商！'}
+              </li>
+              <li>
+                <strong>人工复核</strong>：批量生成的 Word 均标为待人工复核初稿，提交前请结合导出的《批量生成核对清单》逐案核对。
+              </li>
+            </ul>
+
+            <div className="rounded-lg border border-[#E5DEC9] bg-white p-2.5 space-y-1.5 text-[11px]">
+              <div className="font-bold text-[#0E223D]">
+                实际出站载荷样本预览（首案：{firstTarget?.caseLabel || '—'}）
+              </div>
+              {sharedInstPreview && (
+                <div className="rounded bg-[#FAF8F3] px-2 py-1 text-slate-700">
+                  <strong>外发补充要求：</strong>
+                  {sharedInstPreview}
+                </div>
+              )}
+              {firstTarget && (
+                <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap rounded bg-[#FAF9F6] p-2 font-sans text-[11px] leading-5 text-slate-700 border border-[#EFECE5]">
+                  {(sampleRedacted ? sampleRedacted.redactedText : firstTarget.sourceText).slice(0, 800)}
+                  {firstTarget.sourceText.length > 800 ? '\n…（后续按同一脱敏规则处理）' : ''}
+                </pre>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setConfirmTargetIds(null)}
+                className="rounded-lg border border-[#D8D1C3] bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+              >
+                取消（零网络请求）
+              </button>
+              <button
+                type="button"
+                onClick={() => executeBatch(confirmTargetIds)}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-4 py-1.5 text-xs font-bold text-[#F6F4EF]"
+              >
+                <Play className="h-3.5 w-3.5 text-[#D1B27A]" /> 确认无误并开始批量转写
+              </button>
+            </div>
           </div>
-          <ul className="space-y-1 text-[11px] leading-5 text-slate-700 list-disc pl-4">
-            <li>
-              <strong>发送去向</strong>：将由本机浏览器直连发送至您自选的模型服务商{' '}
-              <strong>{activeProvider?.name || '当前服务商'}</strong>（套用官方模板：
-              <strong>《{tpl.displayName}》</strong>）。
-            </li>
-            <li>
-              <strong>隐私边界</strong>：
-              {autoRedact
-                ? '已开启「按案独立前置脱敏」，每份案件使用独立替换表并在本机自动还原真名，案间绝不串号；规则脱敏对生僻姓名/简称可能存在遗漏，请先评估案情保密义务。'
-                : '⚠ 您当前已关闭自动脱敏，起诉状原文将不经替换直接发往第三方模型服务商，请确认已获合规授权！'}
-            </li>
-            <li>
-              <strong>人工复核义务</strong>：所有批量生成的 Word 均为草稿，提交法院前须结合导出的《批量生成核对清单》逐案核对原件与受案法院现行版本。
-            </li>
-          </ul>
-          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-            <button
-              type="button"
-              onClick={() => setConfirmTargetIds(null)}
-              className="rounded-lg border border-[#D8D1C3] bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              onClick={() => executeBatch(confirmTargetIds)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-4 py-1.5 text-xs font-bold text-[#F6F4EF]"
-            >
-              <Play className="h-3.5 w-3.5 text-[#D1B27A]" /> 确认并立即开始批量转写
-            </button>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Progress & Batch Controls */}
       {items.length > 0 && (

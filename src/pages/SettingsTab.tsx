@@ -59,7 +59,7 @@ import {
   type VerifiedLicenseInfo,
 } from '../lib/licenseEngine';
 import { resetLocalUserWorkspaceForAccountSwitch } from '../lib/cloudSync';
-import { toolboxStorage } from '../lib/storage';
+import { toolboxStorage, type WorkspaceBackupPreview } from '../lib/storage';
 import type { AiProviderConfig, LawyerProfile } from '../types/toolbox';
 
 interface TelemetrySummary {
@@ -167,6 +167,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
   // PIN Vault
   const [newPin, setNewPin] = useState('');
+  const [lockedNewKeyInput, setLockedNewKeyInput] = useState('');
+  const [lockedKeyPinInput, setLockedKeyPinInput] = useState('');
+  const [showSwitchAccountConfirm, setShowSwitchAccountConfirm] = useState(false);
 
   // Cross-device encrypted sync
   const [syncPassword, setSyncPassword] = useState('');
@@ -203,6 +206,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const [newAcctRole, setNewAcctRole] = useState<LawyerRoleLabel>('专职律师');
 
   const backupFileRef = useRef<HTMLInputElement>(null);
+  const [pendingBackupImport, setPendingBackupImport] = useState<{
+    raw: string;
+    fileName: string;
+    preview: WorkspaceBackupPreview;
+  } | null>(null);
+  const [hasImportRollback, setHasImportRollback] = useState<boolean>(() =>
+    toolboxStorage.hasImportRollback()
+  );
 
   const activeProvider =
     byok.providers.find((p) => p.id === byok.activeProviderId) || byok.providers[0];
@@ -325,9 +336,36 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       });
       setSessionUnlockedPin(pin);
       setNewPin('');
-      showToast('已启用 Web Crypto AES-GCM 硬件级加密存储 API Key');
+      showToast('已启用本地 PIN 加密锁（PBKDF2 + AES-256-GCM 密文存储）');
     } catch (err) {
       showToast(err instanceof Error ? err.message : '加密失败');
+    }
+  };
+
+  const replaceActiveKeyUnderPin = async () => {
+    const cleanKey = lockedNewKeyInput.trim();
+    if (!cleanKey) {
+      showToast('请先输入要更换的新 API Key');
+      return;
+    }
+    const pin = (sessionUnlockedPin || lockedKeyPinInput).trim();
+    if (pin.length < 4) {
+      showToast('请输入当前本地保护 PIN 码以加密保存新密钥');
+      return;
+    }
+    try {
+      const sampleEnc = byok.providers.find((p) => p.apiKeyEncrypted)?.apiKeyEncrypted;
+      if (sampleEnc) {
+        await decryptWithPassphrase(sampleEnc, pin);
+      }
+      const enc = await encryptWithPassphrase(cleanKey, pin);
+      patchActiveProvider({ apiKey: '', apiKeyEncrypted: enc });
+      setSessionUnlockedPin(pin);
+      setLockedNewKeyInput('');
+      setLockedKeyPinInput('');
+      showToast('新 API Key 已通过 AES-256-GCM 加密封存（零明文落盘）');
+    } catch {
+      showToast('PIN 码不正确，无法覆盖加密密钥');
     }
   };
 
@@ -409,13 +447,39 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     if (!file) return;
     try {
       const txt = await file.text();
-      toolboxStorage.importFullWorkspaceJson(txt);
-      refreshAllFromDisk();
-      showToast('本机测算历史、期限看板与速记数据恢复成功');
+      const preview = toolboxStorage.previewWorkspaceImport(txt);
+      setPendingBackupImport({ raw: txt, fileName: file.name, preview });
     } catch (err) {
       showToast(err instanceof Error ? err.message : '备份文件无法识别');
     } finally {
       e.target.value = '';
+    }
+  };
+
+  const confirmWorkspaceImport = (mode: 'merge' | 'overwrite') => {
+    if (!pendingBackupImport) return;
+    try {
+      toolboxStorage.importFullWorkspaceJson(pendingBackupImport.raw, { mode });
+      setHasImportRollback(toolboxStorage.hasImportRollback());
+      setPendingBackupImport(null);
+      refreshAllFromDisk();
+      showToast(
+        mode === 'merge'
+          ? '已合并恢复备份（本机新增期限、速记与文书草稿已保留）'
+          : '已全量覆盖恢复本机数据（原数据已存回滚快照）'
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '备份恢复失败');
+    }
+  };
+
+  const handleRestoreImportRollback = () => {
+    try {
+      toolboxStorage.restoreImportRollback();
+      refreshAllFromDisk();
+      showToast('已回滚至上次导入前的本机快照');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '回滚失败');
     }
   };
 
@@ -811,11 +875,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             {SITE_CONFIG.authMode === 'license' && (
               <button
                 type="button"
-                onClick={() => {
-                  resetLocalUserWorkspaceForAccountSwitch();
-                  clearSavedLicense();
-                  onLicenseChanged(null);
-                }}
+                onClick={() => setShowSwitchAccountConfirm((v) => !v)}
                 className="inline-flex items-center gap-1 rounded-md border border-white/20 bg-white/5 hover:bg-white/15 px-2.5 py-1.5 text-xs text-slate-300"
                 title="更换激活码或退出本机授权"
               >
@@ -824,6 +884,44 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             )}
           </div>
         </div>
+
+        {SITE_CONFIG.authMode === 'license' && showSwitchAccountConfirm && (
+          <div className="mt-4 rounded-lg border border-amber-300/80 bg-amber-950/70 p-3.5 text-xs text-amber-100 space-y-2.5">
+            <div className="font-bold text-amber-200">
+              ⚠ 切换授权码前请注意保存本机独有数据
+            </div>
+            <p className="leading-5 text-amber-100/90">
+              为防止共用设备串号泄密，切换授权码将清空本机浏览器中的<strong>会见速记、计算历史、轻案件口袋、要素式单案与批量草稿</strong>以及未同步的 API Key（这些数据默认不上云，清空后无法从云端找回）。
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleExportWorkspace}
+                className="inline-flex items-center gap-1 rounded bg-[#B89254] px-3 py-1.5 font-bold text-[#11151C]"
+              >
+                <Download className="h-3.5 w-3.5" /> 先导出本机备份 (.json)
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowSwitchAccountConfirm(false)}
+                className="rounded border border-white/25 bg-white/10 px-3 py-1.5 font-semibold text-white"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  resetLocalUserWorkspaceForAccountSwitch();
+                  clearSavedLicense();
+                  onLicenseChanged(null);
+                }}
+                className="rounded bg-red-600 hover:bg-red-700 px-3 py-1.5 font-bold text-white"
+              >
+                确认清空本机并切换授权码
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3 border-t border-white/12 pt-3.5 text-xs">
           <div>
@@ -1081,31 +1179,77 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 
             <div>
               <label className="block text-xs font-bold text-[#11151C] mb-1">
-                个人 API Key 密钥（仅保存在本机浏览器）
+                个人 API Key 密钥（
+                {SITE_CONFIG.authMode === 'license' && syncPrefs.enabled && syncPrefs.syncByok
+                  ? syncPrefs.useE2eePassphrase
+                    ? '已勾选跨端同步 · 端到端口令加密上传'
+                    : '已勾选跨端同步 · 经自建服务端静态加密'
+                  : '仅保存在本机浏览器 · 不上传任何服务器'}
+                ）
               </label>
-              {byok.pinEnabled && activeProvider.apiKeyEncrypted && !activeProvider.apiKey ? (
-                <div className="rounded border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
-                  🔒 当前密钥已通过 AES-GCM 加密封存。如需更换密钥，请先在下方关闭 PIN 锁或直接输入新密钥覆盖：
+              {byok.pinEnabled ? (
+                <div className="space-y-2 rounded-md border border-emerald-300 bg-emerald-50/70 p-3 text-xs text-emerald-950">
+                  <div className="font-semibold">
+                    🔒 已启用本地 PIN 加密锁：
+                    {activeProvider.apiKeyEncrypted
+                      ? '当前服务商密钥已 AES-256-GCM 密文封存（不存明文）。'
+                      : '当前服务商尚未填入密钥，请在下方加密写入：'}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <input
+                      type={showKey ? 'text' : 'password'}
+                      value={lockedNewKeyInput}
+                      onChange={(e) => setLockedNewKeyInput(e.target.value)}
+                      placeholder="粘贴要设置或更换的新 API Key（sk-...）"
+                      className="flex-1 min-w-[200px] rounded border border-emerald-300 bg-white px-3 py-1.5 font-mono text-xs text-[#11151C]"
+                    />
+                    {!sessionUnlockedPin && (
+                      <input
+                        type="password"
+                        inputMode="numeric"
+                        value={lockedKeyPinInput}
+                        onChange={(e) => setLockedKeyPinInput(e.target.value)}
+                        placeholder="输入当前保护 PIN 码"
+                        className="w-40 rounded border border-emerald-300 bg-white px-2.5 py-1.5 text-xs text-[#11151C]"
+                      />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setShowKey((v) => !v)}
+                      className="rounded border border-emerald-300 bg-white px-2.5 py-1.5 text-slate-600"
+                      title={showKey ? '隐藏输入' : '查看输入'}
+                    >
+                      {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={replaceActiveKeyUnderPin}
+                      className="rounded bg-[#0E223D] px-3.5 py-1.5 font-bold text-white"
+                    >
+                      加密保存新密钥
+                    </button>
+                  </div>
                 </div>
-              ) : null}
-              <div className="mt-1 relative flex items-center">
-                <input
-                  type={showKey ? 'text' : 'password'}
-                  value={activeProvider.apiKey}
-                  onChange={(e) =>
-                    patchActiveProvider({ apiKey: e.target.value, apiKeyEncrypted: undefined })
-                  }
-                  placeholder="粘贴 sk-... 开头的密钥"
-                  className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] pl-3 pr-10 py-2 font-mono text-xs focus:border-[#0E223D] focus:bg-white focus:outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKey((v) => !v)}
-                  className="absolute right-2.5 text-slate-400 hover:text-slate-700"
-                >
-                  {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
+              ) : (
+                <div className="mt-1 relative flex items-center">
+                  <input
+                    type={showKey ? 'text' : 'password'}
+                    value={activeProvider.apiKey}
+                    onChange={(e) =>
+                      patchActiveProvider({ apiKey: e.target.value, apiKeyEncrypted: undefined })
+                    }
+                    placeholder="粘贴 sk-... 开头的密钥"
+                    className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] pl-3 pr-10 py-2 font-mono text-xs focus:border-[#0E223D] focus:bg-white focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowKey((v) => !v)}
+                    className="absolute right-2.5 text-slate-400 hover:text-slate-700"
+                  >
+                    {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              )}
             </div>
 
             {(() => {
@@ -1436,8 +1580,8 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                 className="mt-0.5 rounded accent-[#0E223D]"
               />
               <span>
-                <strong className="block text-[#11151C]">同步大模型 API 配置</strong>
-                <span className="text-[11px] text-slate-500">含接口地址、API Key 与已选模型</span>
+                <strong className="block text-[#11151C]">同步大模型 API 配置（默认关）</strong>
+                <span className="text-[11px] text-slate-500">默认仅留本机；勾选后同步接口与密钥</span>
               </span>
             </label>
             <label className="flex items-start gap-2 rounded-md border border-[#E4DFD4] bg-white p-2.5 cursor-pointer">
@@ -1617,11 +1761,11 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-[#B89254]" />
             <h3 className="font-display text-sm font-bold text-[#11151C]">
-              本机 API Key 硬件级 PIN 加密锁（可选）
+              本机 API Key 本地 PIN 加密锁（可选）
             </h3>
           </div>
           <p className="text-xs leading-5 text-slate-600">
-            利用手机芯片级 Web Crypto (PBKDF2 + AES-GCM 256位) 将您的 API Key 加密后存储，防止借出手机时密钥被查看。
+            利用浏览器标准 Web Crypto (PBKDF2 + AES-256-GCM) 将您的 API Key 加密后存储，防止共用或临时借出设备时密钥明文泄露（建议设置 6 位以上口令）。
           </p>
           <div className="flex gap-2">
             <input
@@ -1707,8 +1851,11 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       {/* Section 3: Local Data Backup */}
       <section className="rounded-lg border border-[#DED8CC] bg-white p-4 sm:p-5 space-y-3">
         <h3 className="font-display text-sm font-bold text-[#11151C]">
-          本机办案数据备份与恢复（测算记录 / 保全预警 / 会见速记）
+          本机办案数据备份与恢复（测算记录 / 保全预警 / 会见速记 / 文书草稿）
         </h3>
+        <p className="text-[11px] leading-5 text-slate-500">
+          说明：导出的 <code className="rounded bg-[#FAF9F6] px-1 font-mono">.json</code> 为明文备份（含案件名、期限预警、会见速记与要素式文书草稿，不含 API Key），请妥善保存在个人加密盘，勿发往公共群聊。
+        </p>
         <div className="flex flex-wrap items-center gap-2.5">
           <button
             type="button"
@@ -1733,18 +1880,38 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             <Upload className="h-3.5 w-3.5" /> 从备份文件恢复
           </button>
 
+          {hasImportRollback && (
+            <button
+              type="button"
+              onClick={handleRestoreImportRollback}
+              className="inline-flex items-center gap-1.5 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+              title="撤回最近一次备份导入，恢复导入前的本机状态"
+            >
+              回滚上次恢复
+            </button>
+          )}
+
           <button
             type="button"
             onClick={async () => {
-              showToast('正在拉取最新版本并刷新离线缓存…');
+              showToast('正在拉取最新版本并刷新本应用离线缓存…');
               try {
+                const scopeUrl = new URL(import.meta.env.BASE_URL || '/', window.location.origin);
+                const scopeSlug = scopeUrl.pathname.replace(/[^a-zA-Z0-9_-]/g, '_');
+                const myPrefix = `cn-lawyer-ai-toolbox${scopeSlug}::`;
                 if ('serviceWorker' in navigator) {
-                  const regs = await navigator.serviceWorker.getRegistrations();
-                  await Promise.all(regs.map((r) => r.unregister()));
+                  const reg = await navigator.serviceWorker.getRegistration(scopeUrl.href);
+                  if (reg && reg.scope === scopeUrl.href) {
+                    await reg.unregister();
+                  }
                 }
                 if ('caches' in window) {
                   const keys = await caches.keys();
-                  await Promise.all(keys.map((k) => caches.delete(k)));
+                  await Promise.all(
+                    keys
+                      .filter((k) => k.startsWith(myPrefix) || k.startsWith('cn-lawyer-ai-toolbox-v1-'))
+                      .map((k) => caches.delete(k))
+                  );
                 }
               } catch {
                 // ignore
@@ -1752,11 +1919,60 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               window.location.reload();
             }}
             className="inline-flex items-center gap-1.5 rounded border border-[#B89254] bg-[#F3ECE0] px-3.5 py-2 text-xs font-bold text-[#7A5922]"
-            title="清理旧离线缓存并拉取最新功能（不会清除您的激活码、API Key 与测算记录）"
+            title="仅清理本工具箱作用域下的旧离线缓存并拉取最新功能（不影响同域名其他站点，也不会清除您的激活码、API Key 与测算记录）"
           >
             <RefreshCw className="h-3.5 w-3.5" /> 检查更新 / 刷新离线缓存
           </button>
         </div>
+
+        {pendingBackupImport && (
+          <div className="rounded-md border border-[#D1B27A] bg-[#FAF6EC] p-3.5 space-y-2.5 text-xs text-[#11151C]">
+            <div className="font-bold text-[#0E223D]">
+              备份恢复预览：{pendingBackupImport.fileName}
+              {pendingBackupImport.preview.exportedAt
+                ? `（导出时间：${pendingBackupImport.preview.exportedAt.slice(0, 19).replace('T', ' ')}）`
+                : ''}
+            </div>
+            <p className="text-[11px] leading-5 text-slate-700">
+              备份内含：期限预警 <strong>{pendingBackupImport.preview.incomingCounts.deadlines}</strong> 条 · 清单{' '}
+              <strong>{pendingBackupImport.preview.incomingCounts.checklists}</strong> 份 · 会见速记{' '}
+              <strong>{pendingBackupImport.preview.incomingCounts.scratchpads}</strong> 篇 · 测算历史{' '}
+              <strong>{pendingBackupImport.preview.incomingCounts.history}</strong> 条 · 案袋{' '}
+              <strong>{pendingBackupImport.preview.incomingCounts.casePockets}</strong> 个 · 要素式草稿{' '}
+              <strong>{pendingBackupImport.preview.incomingCounts.spcDrafts}</strong> 份。
+              {(pendingBackupImport.preview.keptLocalDeadlines > 0 ||
+                pendingBackupImport.preview.keptLocalScratchpads > 0) && (
+                <span className="ml-1 font-semibold text-emerald-800">
+                  采用「合并恢复」将自动保留本机新增的 {pendingBackupImport.preview.keptLocalDeadlines} 条期限与{' '}
+                  {pendingBackupImport.preview.keptLocalScratchpads} 篇速记，避免旧备份冲掉新办案记录。
+                </span>
+              )}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => confirmWorkspaceImport('merge')}
+                className="rounded bg-[#0E223D] px-3.5 py-1.5 text-xs font-bold text-white hover:bg-[#16345B]"
+              >
+                合并恢复（推荐 · 保留本机新增项）
+              </button>
+              <button
+                type="button"
+                onClick={() => confirmWorkspaceImport('overwrite')}
+                className="rounded border border-rose-300 bg-white px-3 py-1.5 text-xs font-semibold text-rose-800 hover:bg-rose-50"
+              >
+                全量覆盖本机（先自动存回滚快照）
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingBackupImport(null)}
+                className="rounded border border-[#D8D1C3] bg-white px-3 py-1.5 text-xs text-slate-600"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Section 4: Collapsible Mobile Admin Account Control & License Issuer (Visible ONLY in license mode for admin) */}

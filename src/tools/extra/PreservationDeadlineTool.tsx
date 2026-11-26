@@ -1,19 +1,32 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertCircle,
   BellRing,
   CalendarPlus,
+  Check,
   CheckCircle2,
+  Copy,
   Plus,
   Trash2,
 } from 'lucide-react';
 import { useToolbox } from '../../context/ToolboxContext';
+import { copyToClipboard } from '../../lib/clipboard';
 import { downloadIcsFile } from '../../lib/icsGenerator';
+import {
+  computeLegalDeadline,
+  diffDaysYmd,
+  formatCnYmd,
+  getTodayChinaYmd,
+  isValidIsoYmd,
+  type DeadlineRolloverMode,
+} from '../../lib/legalCalendar';
 import type { DeadlineReminderItem } from '../../types/toolbox';
 
 interface PresetRule {
   id: string;
   label: string;
   category: DeadlineReminderItem['category'];
+  rolloverMode: DeadlineRolloverMode;
   months?: number;
   days?: number;
   warnDaysBefore: number;
@@ -25,91 +38,67 @@ const PRESETS: PresetRule[] = [
     id: 'bank_freeze_1y',
     label: '银行存款账户冻结（最长 1 年 · 提前30日续冻）',
     category: 'preservation',
+    rolloverMode: 'preservation_freeze',
     months: 12,
     warnDaysBefore: 30,
-    basis: '《民诉法解释》第487条：人民法院冻结被执行人的银行存款的期限不得超过一年；申请延长期限的，应在期限届满前提出（实务建议提前30日提交续冻申请）。',
+    basis:
+      '《民诉法解释》第487条：人民法院冻结被执行人的银行存款的期限不得超过一年；保全查封/冻结到期自动解冻、不适用民事期间顺延，应在届满前提前提交续冻申请。',
   },
   {
     id: 'movable_seize_2y',
     label: '动产查封 / 扣押（最长 2 年 · 提前30日续封）',
     category: 'preservation',
+    rolloverMode: 'preservation_freeze',
     months: 24,
     warnDaysBefore: 30,
-    basis: '《民诉法解释》第487条：查封、扣押动产的期限不得超过二年。',
+    basis:
+      '《民诉法解释》第487条：查封、扣押动产的期限不得超过二年（到期不因节假日顺延，请提前续封）。',
   },
   {
     id: 'real_estate_equity_3y',
     label: '不动产查封 / 股权等财产权冻结（最长 3 年 · 提前30日续封）',
     category: 'preservation',
+    rolloverMode: 'preservation_freeze',
     months: 36,
     warnDaysBefore: 30,
-    basis: '《民诉法解释》第487条：查封不动产、冻结其他财产权的期限不得超过三年。',
+    basis:
+      '《民诉法解释》第487条：查封不动产、冻结其他财产权的期限不得超过三年（到期不因节假日顺延，请提前续封）。',
   },
   {
     id: 'apply_exec_2y',
     label: '申请强制执行期间（履行期届满起 2 年）',
     category: 'execution',
+    rolloverMode: 'civil_statutory',
     months: 24,
     warnDaysBefore: 30,
-    basis: '《民事诉讼法》第250条：申请执行的期间为二年，从法律文书规定履行期间的最后一日起计算。',
+    basis:
+      '《民事诉讼法》第250条、《民法典》第202-203条：申请执行的期间为二年，届满日对应日无该日则以该月最后一日为准，最后一日为法定休假日的顺延至首个工作日。',
   },
   {
     id: 'exec_objection_15d',
     label: '执行行为异议 / 财产评估报告异议期（15 日）',
     category: 'execution',
+    rolloverMode: 'civil_statutory',
     days: 15,
     warnDaysBefore: 3,
-    basis: '收到评估报告后或相关文书送达之日起 15 日内提出书面异议。',
+    basis:
+      '收到评估报告或相关执行文书送达之日起 15 日内提出书面异议（遇法定休假日顺延至首个工作日）。',
   },
   {
     id: 'labor_arb_suit_15d',
     label: '劳动仲裁裁决后向法院起诉期（15 日）',
     category: 'arbitration',
+    rolloverMode: 'civil_statutory',
     days: 15,
     warnDaysBefore: 3,
-    basis: '《劳动争议调解仲裁法》第50条：自收到仲裁裁决书之日起十五日内向人民法院提起诉讼。',
+    basis:
+      '《劳动争议调解仲裁法》第50条、《民诉法》第85条：非终局裁决自收到仲裁裁决书之日起十五日内向人民法院提起诉讼，最后一日为法定休假日的顺延至节后首个工作日。',
   },
 ];
 
-function getTodayChinaYmd(): string {
-  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10);
-}
-
-function isValidYmd(ymd: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(ymd);
-}
-
-function addPeriodYmd(startYmd: string, months?: number, days?: number, inclusiveDay = false): string {
-  const safe = isValidYmd(startYmd) ? startYmd : getTodayChinaYmd();
-  const [y, m, d] = safe.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  if (months) {
-    dt.setUTCMonth(dt.getUTCMonth() + months);
-    // Judicial practice for 1/2/3 year freeze: start day counts (e.g. 2026-03-10 -> 2027-03-09)
-    // Civil Code Art.202 statutory periods (e.g. 2y apply execution) expire on corresponding day.
-    if (inclusiveDay) {
-      dt.setUTCDate(dt.getUTCDate() - 1);
-    }
-  }
-  if (days) {
-    dt.setUTCDate(dt.getUTCDate() + days);
-  }
-  return dt.toISOString().slice(0, 10);
-}
-
-function subtractDaysYmd(dueYmd: string, daysBefore: number): string {
-  const safe = isValidYmd(dueYmd) ? dueYmd : getTodayChinaYmd();
-  const [y, m, d] = safe.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d - daysBefore));
-  return dt.toISOString().slice(0, 10);
-}
-
 function daysFromToday(ymd: string): number {
-  if (!isValidYmd(ymd)) return 0;
-  const todayStr = getTodayChinaYmd();
-  const [y1, m1, d1] = todayStr.split('-').map(Number);
-  const [y2, m2, d2] = ymd.split('-').map(Number);
-  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+  const diff = diffDaysYmd(getTodayChinaYmd(), ymd);
+  return Number.isFinite(diff) ? diff : 0;
 }
 
 export const PreservationDeadlineTool: React.FC = () => {
@@ -118,54 +107,111 @@ export const PreservationDeadlineTool: React.FC = () => {
   const [caseName, setCaseName] = useState('');
   const [presetId, setPresetId] = useState(PRESETS[0].id);
   const [startDate, setStartDate] = useState(() => getTodayChinaYmd());
+  const [manualDueDate, setManualDueDate] = useState('');
   const [notes, setNotes] = useState('');
+  const [copiedPreview, setCopiedPreview] = useState(false);
 
   const activePreset = PRESETS.find((p) => p.id === presetId) || PRESETS[0];
 
   const preview = useMemo(() => {
-    const dueDate = addPeriodYmd(
-      startDate,
-      activePreset.months,
-      activePreset.days,
-      activePreset.category === 'preservation'
-    );
-    const warnDate = subtractDaysYmd(dueDate, activePreset.warnDaysBefore);
-    return { dueDate, warnDate };
-  }, [startDate, activePreset]);
+    return computeLegalDeadline({
+      startYmd: startDate,
+      months: activePreset.months,
+      days: activePreset.days,
+      rolloverMode: activePreset.rolloverMode,
+      warnDaysBefore: activePreset.warnDaysBefore,
+      manualDueYmd: manualDueDate.trim() || undefined,
+    });
+  }, [startDate, activePreset, manualDueDate]);
+
+  const buildSummaryNote = () => {
+    if (!preview) return '';
+    const parts: string[] = [];
+    if (notes.trim()) parts.push(notes.trim());
+    if (preview.verificationStatus === 'manual_override') {
+      parts.push('按文书载明届满日录入');
+    } else if (preview.extended) {
+      parts.push(`理论届满 ${preview.rawEndYmd} 遇休假日顺延至 ${preview.finalEndYmd}`);
+    }
+    if (preview.holidayWarningText) {
+      parts.push(preview.holidayWarningText);
+    }
+    if (parts.length === 0) {
+      parts.push(activePreset.basis);
+    }
+    return parts.join(' ｜ ');
+  };
+
+  const handleCopyPreview = async () => {
+    if (!preview) return;
+    const statusTag =
+      preview.verificationStatus === 'pending_holiday_schedule'
+        ? '【待核验当年国务院放假通知】'
+        : preview.verificationStatus === 'manual_override'
+        ? '【按文书载明日期】'
+        : '';
+    const text = [
+      `【办案期限核算 · ${activePreset.label}】${statusTag}`,
+      caseName.trim() ? `案件名称：${caseName.trim()}` : '',
+      `起算日期：${formatCnYmd(preview.startYmd)}`,
+      preview.extended ? `自然历理论届满日：${formatCnYmd(preview.rawEndYmd)}` : '',
+      `${preview.verificationStatus === 'pending_holiday_schedule' ? '推算届满日（待核验）' : '届满日期'}：${formatCnYmd(preview.finalEndYmd)}`,
+      `提前预警日：${formatCnYmd(preview.warnYmd)}`,
+      preview.holidayWarningText || '',
+      `规则依据：${activePreset.basis}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    await copyToClipboard(text);
+    setCopiedPreview(true);
+    setTimeout(() => setCopiedPreview(false), 1800);
+    showToast('已复制完整期限核算摘要（含顺延口径与核验提示）');
+  };
 
   const handleAddDeadline = () => {
+    if (!preview) {
+      showToast('请先填写有效的起算日期');
+      return;
+    }
     const label = caseName.trim() || '未命名案件';
+    const statusSuffix =
+      preview.verificationStatus === 'pending_holiday_schedule' ? ' [待核验调休]' : '';
     const item: DeadlineReminderItem = {
       id: `dl-${Date.now()}`,
       caseName: label,
-      title: `${label} · ${activePreset.label.split('（')[0]}`,
+      title: `${label} · ${activePreset.label.split('（')[0]}${statusSuffix}`,
       category: activePreset.category,
-      startDate,
-      dueDate: preview.dueDate,
-      warnDate: preview.warnDate,
-      notes: notes.trim() || activePreset.basis,
+      startDate: preview.startYmd,
+      dueDate: preview.finalEndYmd,
+      warnDate: preview.warnYmd,
+      notes: buildSummaryNote(),
       completed: false,
       createdAt: new Date().toISOString(),
     };
     setDeadlines([item, ...deadlines]);
     setCaseName('');
     setNotes('');
+    setManualDueDate('');
     showToast('已加入本机办案期限预警看板');
   };
 
   const exportSingleIcs = (item: DeadlineReminderItem) => {
+    if (!isValidIsoYmd(item.dueDate) || !isValidIsoYmd(item.warnDate)) {
+      showToast('该期限记录日期格式无效，无法导出日历');
+      return;
+    }
     downloadIcsFile(
       [
         {
           title: `${item.title}（续封/预警红线）`,
           dueDate: item.warnDate,
-          description: `案件：${item.caseName}\n正式届满日：${item.dueDate}\n备注：${item.notes}`,
+          description: `案件：${item.caseName}\n届满日：${item.dueDate}\n备注与核验说明：${item.notes}`,
           alarmDaysBefore: [3, 1],
         },
         {
-          title: `${item.title}（正式届满日）`,
+          title: `${item.title}（届满日）`,
           dueDate: item.dueDate,
-          description: `案件：${item.caseName}\n起始日：${item.startDate}\n备注：${item.notes}`,
+          description: `案件：${item.caseName}\n起始日：${item.startDate}\n备注与核验说明：${item.notes}`,
           alarmDaysBefore: [7, 3, 1],
         },
       ],
@@ -175,7 +221,7 @@ export const PreservationDeadlineTool: React.FC = () => {
   };
 
   const exportAllActiveIcs = () => {
-    const active = deadlines.filter((d) => !d.completed);
+    const active = deadlines.filter((d) => !d.completed && isValidIsoYmd(d.dueDate));
     if (active.length === 0) {
       showToast('当前没有待办期限记录');
       return;
@@ -184,7 +230,7 @@ export const PreservationDeadlineTool: React.FC = () => {
       active.map((d) => ({
         title: d.title,
         dueDate: d.dueDate,
-        description: `提前预警日：${d.warnDate}\n${d.notes}`,
+        description: `提前预警日：${d.warnDate}\n备注与核验说明：${d.notes}`,
         alarmDaysBefore: [30, 7, 3, 1],
       })),
       '律师办案全部期限预警.ics'
@@ -202,7 +248,7 @@ export const PreservationDeadlineTool: React.FC = () => {
         财产保全续封与执行期限预警看板
       </h1>
       <p className="mt-1.5 text-xs sm:text-sm leading-6 text-slate-600">
-        严防银行冻结逾期脱保执业风险：精准推算账户 1 年、动产 2 年、不动产/股权 3 年届满日与提前 30 日续封红线，一键写入 iPhone / 安卓系统日历闹钟。
+        严格区分「法院查封冻结到期不顺延、提前30日续封」与「诉讼/仲裁起诉期按 2025–2027 法定节假日自动顺延」，支持录入文书载明日期并一键写入手机系统日历。
       </p>
 
       <div className="mt-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
@@ -220,7 +266,7 @@ export const PreservationDeadlineTool: React.FC = () => {
           </div>
 
           <div>
-            <label className="block text-xs font-bold text-[#11151C] mb-1.5">保全 / 执行期限类型</label>
+            <label className="block text-xs font-bold text-[#11151C] mb-1.5">保全 / 执行 / 起诉期限类型</label>
             <select
               value={presetId}
               onChange={(e) => setPresetId(e.target.value)}
@@ -234,31 +280,93 @@ export const PreservationDeadlineTool: React.FC = () => {
             </select>
           </div>
 
-          <div>
-            <label className="block text-xs font-bold text-[#11151C] mb-1.5">实际采取措施日 / 文书送达起算日</label>
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-num text-sm font-semibold focus:border-[#0E223D] focus:bg-white focus:outline-none"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-[#11151C] mb-1.5">
+                实际采取措施日 / 送达起算日
+              </label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-num text-sm font-semibold focus:border-[#0E223D] focus:bg-white focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                文书载明届满日（选填优先）
+              </label>
+              <input
+                type="date"
+                value={manualDueDate}
+                onChange={(e) => setManualDueDate(e.target.value)}
+                className="w-full rounded border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 font-num text-sm focus:border-[#0E223D] focus:bg-white focus:outline-none"
+              />
+            </div>
           </div>
 
-          <div className="rounded-md bg-[#0E223D] p-3.5 text-[#F6F4EF]">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <div className="text-[10px] text-[#D1B27A] uppercase">建议续封/办理预警日</div>
-                <div className="mt-0.5 font-num text-base font-bold text-amber-300">{preview.warnDate}</div>
-              </div>
-              <div>
-                <div className="text-[10px] text-slate-300 uppercase">法定最终届满日</div>
-                <div className="mt-0.5 font-num text-base font-bold text-white">{preview.dueDate}</div>
-              </div>
+          {!preview ? (
+            <div className="rounded-md border border-amber-300 bg-amber-50 p-3.5 text-xs text-amber-950">
+              请先选择有效的起算日期（清空日期时不会生成届满日或写入日历）。
             </div>
-            <p className="mt-2.5 border-t border-white/15 pt-2 text-[11px] leading-5 text-slate-300">
-              {activePreset.basis}
-            </p>
-          </div>
+          ) : (
+            <div className="rounded-md bg-[#0E223D] p-3.5 text-[#F6F4EF] space-y-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <div className="grid grid-cols-2 gap-3 flex-1">
+                  <div>
+                    <div className="text-[10px] text-[#D1B27A] uppercase">建议续封/办理预警日</div>
+                    <div className="mt-0.5 font-num text-base font-bold text-amber-300">
+                      {preview.warnYmd}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-300 uppercase">
+                      {preview.verificationStatus === 'pending_holiday_schedule'
+                        ? '推算届满日（待核验调休）'
+                        : preview.verificationStatus === 'manual_override'
+                        ? '文书载明届满日'
+                        : activePreset.rolloverMode === 'preservation_freeze'
+                        ? '保全到期日（不顺延）'
+                        : '顺延后届满日'}
+                    </div>
+                    <div className="mt-0.5 font-num text-base font-bold text-white">
+                      {preview.finalEndYmd}
+                    </div>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCopyPreview}
+                  className="inline-flex items-center gap-1 rounded border border-white/20 bg-white/10 hover:bg-white/20 px-2 py-1 text-[11px] text-white"
+                >
+                  {copiedPreview ? (
+                    <Check className="h-3 w-3 text-emerald-400" />
+                  ) : (
+                    <Copy className="h-3 w-3 text-[#D1B27A]" />
+                  )}
+                  {copiedPreview ? '已复制' : '复制'}
+                </button>
+              </div>
+
+              {preview.extended && (
+                <div className="rounded bg-white/10 px-2.5 py-1.5 text-[11px] text-emerald-200">
+                  自然历届满日 {preview.rawEndYmd} 遇 {preview.reasons.join('、')}，已依法顺延至首个工作日{' '}
+                  <strong>{preview.finalEndYmd}</strong>。
+                </div>
+              )}
+
+              {preview.holidayWarningText && (
+                <div className="rounded border border-amber-400/60 bg-amber-950/60 px-2.5 py-1.5 text-[11px] leading-5 text-amber-200 flex items-start gap-1.5">
+                  <AlertCircle className="h-3.5 w-3.5 flex-none mt-0.5 text-amber-300" />
+                  <span>{preview.holidayWarningText}</span>
+                </div>
+              )}
+
+              <p className="border-t border-white/15 pt-2 text-[11px] leading-5 text-slate-300">
+                {activePreset.basis}
+              </p>
+            </div>
+          )}
 
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">承办法官电话 / 执行案号备注（可选）</label>
@@ -273,8 +381,9 @@ export const PreservationDeadlineTool: React.FC = () => {
 
           <button
             type="button"
+            disabled={!preview}
             onClick={handleAddDeadline}
-            className="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-[#B89254] hover:bg-[#C7A265] py-2.5 text-xs sm:text-sm font-bold text-[#11151C]"
+            className="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-[#B89254] hover:bg-[#C7A265] py-2.5 text-xs sm:text-sm font-bold text-[#11151C] disabled:opacity-45"
           >
             <Plus className="h-4 w-4" /> 加入本机预警看板（同步在首页置顶提醒）
           </button>
@@ -299,7 +408,7 @@ export const PreservationDeadlineTool: React.FC = () => {
 
           {deadlines.length === 0 ? (
             <div className="py-12 text-center text-xs text-slate-500">
-              暂无在办期限记录。添加一笔查封/冻结或执行日期后，工作台首页将自动为您实时倒计时预警。
+              暂无在办期限记录。添加一笔查封/冻结或起诉期限后，工作台首页将自动为您实时倒计时预警。
             </div>
           ) : (
             <div className="mt-3 space-y-2.5 max-h-[480px] overflow-y-auto">
@@ -340,7 +449,7 @@ export const PreservationDeadlineTool: React.FC = () => {
                           )}
                         </div>
                         <div className="mt-1 font-num text-xs text-slate-600">
-                          起算 {item.startDate} → <strong className="text-amber-800">续封预警 {item.warnDate}</strong> → 届满 {item.dueDate}
+                          起算 {item.startDate} → <strong className="text-amber-800">提前预警 {item.warnDate}</strong> → 届满 {item.dueDate}
                         </div>
                         {item.notes && <p className="mt-1 text-xs text-slate-500">{item.notes}</p>}
                       </div>

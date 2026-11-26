@@ -56,7 +56,7 @@ const companionDocs = (raw.companionDocs || []).map((doc) => ({
 }));
 
 const DATA_AS_OF = String(raw.dataAsOf || raw.updatedAt || '2026-11-24').slice(0, 10);
-const BUILT_AT = new Date().toISOString().slice(0, 10);
+const BUILT_AT = DATA_AS_OF;
 
 const payload = {
   dataAsOf: DATA_AS_OF,

@@ -209,6 +209,23 @@ test('Cloud Sync Vault enforces per-account isolation and optimistic revision co
   const cData = await conflict.json();
   assert.equal(cData.conflict, true);
 
+  // Stale baseRevision=0 MUST STILL return 409 even when client clock has a NEWER updatedAt
+  const conflictNewerClock = await fetch(`${baseUrl}/api/sync/vault`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Toolbox-License': lawyerACode,
+    },
+    body: JSON.stringify({
+      baseRevision: 0,
+      updatedAt: 999999,
+      clientEncrypted: false,
+      deviceLabel: 'Clock-Skewed-Device',
+      payload: { secret: 'must-not-silently-clobber' },
+    }),
+  });
+  assert.equal(conflictNewerClock.status, 409);
+
   const readB = await fetch(`${baseUrl}/api/sync/vault`, {
     headers: { 'X-Toolbox-License': lawyerBCode },
   });
