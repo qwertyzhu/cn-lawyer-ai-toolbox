@@ -75,14 +75,34 @@ const PRESETS: PresetRule[] = [
       '《民事诉讼法》第250条、《民法典》第202-203条：申请执行的期间为二年，届满日对应日无该日则以该月最后一日为准，最后一日为法定休假日的顺延至首个工作日。',
   },
   {
-    id: 'exec_objection_15d',
-    label: '执行行为异议 / 财产评估报告异议期（15 日）',
+    id: 'appraisal_report_obj_5d',
+    label: '财产评估报告书面异议期（收到报告起 5 日）',
+    category: 'execution',
+    rolloverMode: 'civil_statutory',
+    days: 5,
+    warnDaysBefore: 2,
+    basis:
+      '《最高人民法院关于人民法院确定财产处置参考价若干问题的规定》（法释〔2018〕15号）第22–24条：当事人、利害关系人收到评估报告后五日内可提出书面异议（逾期不予受理；期间最后一日为法定休假日的顺延至节后首个工作日）。',
+  },
+  {
+    id: 'exec_reconsideration_10d',
+    label: '执行异议裁定申请复议期（收到裁定起 10 日）',
+    category: 'execution',
+    rolloverMode: 'civil_statutory',
+    days: 10,
+    warnDaysBefore: 3,
+    basis:
+      '《民事诉讼法》第236条：当事人、利害关系人对执行行为异议裁定不服的，可自裁定送达之日起十日内向上一级人民法院申请复议（注：针对违法执行行为本身的书面异议须在相关执行程序终结前提出，15日系法院审查期而非当事人提出期）。',
+  },
+  {
+    id: 'exec_outsider_suit_15d',
+    label: '案外人执行异议之诉起诉期（收到裁定起 15 日）',
     category: 'execution',
     rolloverMode: 'civil_statutory',
     days: 15,
     warnDaysBefore: 3,
     basis:
-      '收到评估报告或相关执行文书送达之日起 15 日内提出书面异议（遇法定休假日顺延至首个工作日）。',
+      '《民事诉讼法》第238条：案外人、当事人对执行标的异议裁定不服，认为原判决、裁定无关的，自裁定送达之日起十五日内向人民法院提起诉讼（遇法定休假日顺延至首个工作日）。',
   },
   {
     id: 'labor_arb_suit_15d',
@@ -102,7 +122,8 @@ function daysFromToday(ymd: string): number {
 }
 
 export const PreservationDeadlineTool: React.FC = () => {
-  const { deadlines, setDeadlines, showToast } = useToolbox();
+  const { deadlines, setDeadlines, casePockets, activeCaseId, showToast } = useToolbox();
+  const activeCase = casePockets.find((c) => c.id === activeCaseId) || null;
 
   const [caseName, setCaseName] = useState('');
   const [presetId, setPresetId] = useState(PRESETS[0].id);
@@ -143,7 +164,10 @@ export const PreservationDeadlineTool: React.FC = () => {
   };
 
   const handleCopyPreview = async () => {
-    if (!preview) return;
+    if (!preview || preview.hasDateConflict) {
+      showToast('当前届满日早于起算日，存在日期冲突，请先修正后再复制');
+      return;
+    }
     const statusTag =
       preview.verificationStatus === 'pending_holiday_schedule'
         ? '【待核验当年国务院放假通知】'
@@ -173,11 +197,16 @@ export const PreservationDeadlineTool: React.FC = () => {
       showToast('请先填写有效的起算日期');
       return;
     }
-    const label = caseName.trim() || '未命名案件';
+    if (preview.hasDateConflict) {
+      showToast('手输文书届满日早于起算日，请修正日期冲突后再加入看板');
+      return;
+    }
+    const label = caseName.trim() || activeCase?.title || '未命名案件';
     const statusSuffix =
       preview.verificationStatus === 'pending_holiday_schedule' ? ' [待核验调休]' : '';
     const item: DeadlineReminderItem = {
       id: `dl-${Date.now()}`,
+      caseId: activeCaseId || undefined,
       caseName: label,
       title: `${label} · ${activePreset.label.split('（')[0]}${statusSuffix}`,
       category: activePreset.category,
@@ -278,6 +307,9 @@ export const PreservationDeadlineTool: React.FC = () => {
                 </option>
               ))}
             </select>
+            <p className="mt-1.5 text-[11px] leading-5 text-slate-500">
+              实务区分：财产评估报告书面异议期仅 <strong>5 日</strong>（法释〔2018〕15号第22条，逾期不予受理）；《民诉法》第236条执行行为异议须在相关执行终结前提出（15 日为法院审查期），收到异议裁定申请复议为 <strong>10 日</strong>。
+            </p>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -307,7 +339,15 @@ export const PreservationDeadlineTool: React.FC = () => {
 
           {!preview ? (
             <div className="rounded-md border border-amber-300 bg-amber-50 p-3.5 text-xs text-amber-950">
-              请先选择有效的起算日期（清空日期时不会生成届满日或写入日历）。
+              请先选择有效的起算日期（清空或日期格式有误时不会生成届满日或写入日历）。
+            </div>
+          ) : preview.hasDateConflict ? (
+            <div className="rounded-md border border-red-300 bg-red-50 p-3.5 text-xs text-red-900 space-y-1.5">
+              <div className="font-bold flex items-center gap-1.5 text-red-800">
+                <AlertCircle className="h-4 w-4 flex-none" />
+                <span>日期倒挂冲突 · 已拦截加入看板</span>
+              </div>
+              <p className="leading-5">{preview.holidayWarningText}</p>
             </div>
           ) : (
             <div className="rounded-md bg-[#0E223D] p-3.5 text-[#F6F4EF] space-y-2.5">
@@ -381,7 +421,7 @@ export const PreservationDeadlineTool: React.FC = () => {
 
           <button
             type="button"
-            disabled={!preview}
+            disabled={!preview || Boolean(preview.hasDateConflict)}
             onClick={handleAddDeadline}
             className="w-full inline-flex items-center justify-center gap-1.5 rounded-md bg-[#B89254] hover:bg-[#C7A265] py-2.5 text-xs sm:text-sm font-bold text-[#11151C] disabled:opacity-45"
           >
@@ -416,6 +456,12 @@ export const PreservationDeadlineTool: React.FC = () => {
                 const remainDays = daysFromToday(item.dueDate);
                 const warnRemain = daysFromToday(item.warnDate);
                 const urgent = !item.completed && warnRemain <= 7;
+                const isLegacyMergedAppraisalPreset =
+                  item.title.includes('执行行为异议 / 财产评估报告异议期') ||
+                  Boolean(
+                    item.notes &&
+                      item.notes.includes('收到评估报告或相关执行文书送达之日起 15 日')
+                  );
 
                 return (
                   <div
@@ -451,6 +497,11 @@ export const PreservationDeadlineTool: React.FC = () => {
                         <div className="mt-1 font-num text-xs text-slate-600">
                           起算 {item.startDate} → <strong className="text-amber-800">提前预警 {item.warnDate}</strong> → 届满 {item.dueDate}
                         </div>
+                        {isLegacyMergedAppraisalPreset && (
+                          <div className="mt-1.5 rounded border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] leading-5 text-amber-950">
+                            <strong>历史预设复核提示：</strong>本条由旧版「15日合并预设」生成。若系<strong>财产评估报告书面异议</strong>，法定期间为收到报告起 <strong>5 日</strong>（法释〔2018〕15号第22条）；系统未自动篡改您已存日期，请人工核对原始收到日并重新登记。
+                          </div>
+                        )}
                         {item.notes && <p className="mt-1 text-xs text-slate-500">{item.notes}</p>}
                       </div>
 

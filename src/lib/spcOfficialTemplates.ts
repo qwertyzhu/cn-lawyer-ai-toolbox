@@ -108,6 +108,8 @@ export interface OfficialSpcDraftState {
   signerName: string;
   /** Sign-off date */
   signDate: string;
+  /** True when populated from the built-in fictional demo sample; forces demo watermark filename on export */
+  isDemoSample?: boolean;
 }
 
 export interface ResolvedSpcRow {

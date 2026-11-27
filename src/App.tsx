@@ -203,22 +203,26 @@ const ToolboxShell: React.FC<{
                   </>
                 )}
               </span>
-              {offlinePack.status === 'ready' || offlinePack.status === 'dev_local' ? (
+              {offlinePack.status === 'ready' ? (
                 <span className="rounded bg-emerald-950/70 border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300">
-                  离线包已齐备
+                  计算器+法规包 {offlinePack.readyCount}/{offlinePack.totalCount}
+                </span>
+              ) : offlinePack.status === 'dev_local' ? (
+                <span className="rounded bg-emerald-950/70 border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                  本地直连就绪
                 </span>
               ) : offlinePack.status === 'syncing' || offlinePack.status === 'checking' ? (
                 <span className="rounded bg-sky-950/70 border border-sky-400/30 px-1.5 py-0.5 text-[10px] text-sky-200">
-                  离线包缓存中 ({offlinePack.readyCount}/{offlinePack.totalCount})
+                  计算器可用·包缓存 {offlinePack.readyCount}/{offlinePack.totalCount}
                 </span>
               ) : (
                 <button
                   type="button"
                   onClick={() => retryOfflinePacks()}
                   className="rounded bg-amber-950/80 border border-amber-400/40 px-1.5 py-0.5 text-[10px] text-amber-200 hover:bg-amber-900"
-                  title="点击重新下载尚未缓存齐备的离线法规/模板包"
+                  title="核心计算器已离线可用；点击重新下载尚未缓存齐备的法规/模板包"
                 >
-                  离线包 {offlinePack.readyCount}/{offlinePack.totalCount} · 重试
+                  法规包 {offlinePack.readyCount}/{offlinePack.totalCount} · 重试
                 </button>
               )}
             </div>
@@ -615,9 +619,14 @@ export function App() {
             </button>
             <button
               type="button"
-              onClick={() => {
-                resetLocalUserWorkspaceForAccountSwitch();
+              onClick={async () => {
+                const res = await resetLocalUserWorkspaceForAccountSwitch();
                 clearSavedLicense();
+                if (res.blocked) {
+                  window.alert(
+                    '本机授权与本地键值已清空；检测到当前浏览器另有其他标签页打开本工具，请关闭其他标签页以彻底释放离线长文本库。'
+                  );
+                }
                 setSuspendedReason(null);
                 setLicense(null);
               }}
@@ -679,9 +688,14 @@ export function App() {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  resetLocalUserWorkspaceForAccountSwitch();
+                onClick={async () => {
+                  const res = await resetLocalUserWorkspaceForAccountSwitch();
                   saveVerifiedLicense(pendingSwitchLicense);
+                  if (res.blocked) {
+                    window.alert(
+                      '已切换新身份并清空本地键值；检测到另有其他标签页打开本工具，请关闭其他标签页以彻底释放旧长文本库。'
+                    );
+                  }
                   setLicense(pendingSwitchLicense);
                   setSuspendedReason(null);
                   setAutoActivatedName(

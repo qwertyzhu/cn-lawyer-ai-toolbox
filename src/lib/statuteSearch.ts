@@ -4,7 +4,9 @@
  * Supports natural lawyer queries such as:
  * - "585", "第585条", "第五百八十五条"
  * - "民法典第585条", "《民法典》第 585 条", "民法典 585", "民法典585", "民法典 第五百八十五条"
- * - "民诉法第171条", "著作权法 54", "民间借贷 25", "民法典 违约金"
+ * - "民法典 第1165条 第2款" (preserves clauseHint "第2款" and surfaces article-level granularity notice)
+ * - Strict non-substitution: NEVER substitutes a base statute (e.g.《公司法》) when the user explicitly
+ *   queries an uncollected judicial interpretation or statute (e.g.《公司法解释三》第13条 or《刑法》第264条).
  */
 
 export interface SearchableStatuteItem {
@@ -67,6 +69,7 @@ export function parseChineseArticleNumber(raw: string): number | null {
   }
   total += currentDigit;
 
+  // Handle pure positional Chinese digits like "五八五" -> 585
   if (!hasUnit && s.length >= 2) {
     let posVal = 0;
     for (const ch of s) {
@@ -79,16 +82,16 @@ export function parseChineseArticleNumber(raw: string): number | null {
   return total > 0 ? total : null;
 }
 
+// Strict synonyms: NEVER map "*解释*" or "*规定*" to a bare parent statute without "解释"/"规定"!
 const LAW_SYNONYMS: Array<[RegExp, string[]]> = [
   [/^民诉法解释$|^民诉解释$/, ['民事诉讼法', '解释']],
   [/^民诉法$/, ['民事诉讼法']],
   [/^民诉证据|^证据规定$/, ['民事诉讼证据']],
   [/^反法$|^反不正当竞争$/, ['反不正当竞争']],
-  [/^建工解释$/, ['建设工程']],
-  [/^道交解释$/, ['道路交通事故']],
-  [/^人损解释$/, ['人身损害']],
-  [/^民间借贷$/, ['民间借贷']],
-  [/^公司法解释/, ['公司法']],
+  [/^建工解释$/, ['建设工程', '解释']],
+  [/^道交解释$/, ['道路交通事故', '解释']],
+  [/^人损解释$/, ['人身损害', '解释']],
+  [/^民间借贷$|^民间借贷解释$/, ['民间借贷']],
   [/^劳动仲裁法$/, ['劳动争议调解仲裁']],
   [/^商标法$/, ['商标']],
   [/^著作权法$|^版权法$/, ['著作权']],
@@ -96,13 +99,35 @@ const LAW_SYNONYMS: Array<[RegExp, string[]]> = [
   [/^个保法$/, ['个人信息保护']],
 ];
 
-function matchLawHintAgainstItem(hint: string, item: SearchableStatuteItem): boolean {
+const INTERP_SERIES_NUM_RE = /(?:解释|规定)\s*([一二三四五六七八九十1-9])/;
+
+export function matchLawHintAgainstItem(hint: string, item: SearchableStatuteItem): boolean {
   const clean = hint.trim();
   if (!clean) return true;
   const hay = `${item.lawTitle} ${item.fullLawTitle}`;
+
+  const asksForInterp = /解释|规定|批复|纪要/.test(clean);
+  const itemIsInterp = /解释|规定|批复|纪要/.test(hay);
+  if (asksForInterp && !itemIsInterp) {
+    // Prevent silent parent-statute substitution (e.g. "公司法解释三" MUST NOT match bare《公司法》!)
+    return false;
+  }
+
+  const seriesMatch = clean.match(INTERP_SERIES_NUM_RE);
+  if (seriesMatch) {
+    const numToken = seriesMatch[1];
+    if (!hay.includes(`（${numToken}）`) && !hay.includes(`(${numToken})`) && !hay.includes(clean)) {
+      return false;
+    }
+  }
+
   if (hay.includes(clean)) return true;
   for (const [re, requiredParts] of LAW_SYNONYMS) {
     if (re.test(clean)) {
+      if (!asksForInterp && itemIsInterp && clean.endsWith('法')) {
+        // When user explicitly says "民诉法" or "公司法", prefer the statute itself unless full title matches
+        return item.lawTitle.includes(requiredParts[0]) && !/解释|规定/.test(item.lawTitle);
+      }
       return requiredParts.every((p) => hay.includes(p));
     }
   }
@@ -113,6 +138,7 @@ export interface ParsedStatuteQuery {
   raw: string;
   exactNo: number | null;
   lawHint: string;
+  clauseHint: string;
   keywords: string[];
 }
 
@@ -123,31 +149,48 @@ export function parseStatuteQuery(rawInput: string): ParsedStatuteQuery {
     .trim();
 
   if (!cleaned) {
-    return { raw: '', exactNo: null, lawHint: '', keywords: [] };
+    return { raw: '', exactNo: null, lawHint: '', clauseHint: '', keywords: [] };
   }
 
-  const pureMatch = cleaned.match(/^第?\s*([0-9]{1,4}|[零〇一二两三四五六七八九十百千]{1,10})\s*条?$/);
+  // Extract optional clause/item specifiers ("第2款", "第二款", "第1项") before article parsing
+  const clauseParts: string[] = [];
+  const withoutClause = cleaned
+    .replace(/第\s*([0-9]{1,2}|[零〇一二两三四五六七八九十]{1,4})\s*([款项])/g, (_m, n, u) => {
+      clauseParts.push(`第${n}${u}`);
+      return ' ';
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+  const clauseHint = clauseParts.join('');
+  const working = withoutClause || cleaned;
+
+  // 1. Pure article number: "585", "第585条", "第五百八十五条", "585条"
+  const pureMatch = working.match(/^第?\s*([0-9]{1,4}|[零〇一二两三四五六七八九十百千]{1,10})\s*条?$/);
   if (pureMatch) {
     const parsedNo = parseChineseArticleNumber(pureMatch[1]);
     if (parsedNo !== null) {
-      return { raw: cleaned, exactNo: parsedNo, lawHint: '', keywords: [] };
+      return { raw: cleaned, exactNo: parsedNo, lawHint: '', clauseHint, keywords: [] };
     }
   }
 
-  const compoundMatch = cleaned.match(
-    /^([\u4e00-\u9fa5A-Za-z]{2,24}?)\s*(?:第\s*([0-9]{1,4}|[零〇一二两三四五六七八九十百千]{1,10})\s*条?|([0-9]{1,4})\s*条?)$/
+  // 2. Law prefix + article number (with or without space / 第 / 条):
+  //    e.g. "民法典第585条", "民法典 585", "公司法解释三第13条", "民法典 第1165条 第2款"
+  const compoundMatch = working.match(
+    /^([\u4e00-\u9fa5A-Za-z0-9]{2,24}?)\s*(?:第\s*([0-9]{1,4}|[零〇一二两三四五六七八九十百千]{1,10})\s*条?|([0-9]{1,4})\s*条?)$/
   );
   if (compoundMatch) {
     const lawPart = compoundMatch[1].trim();
     const numStr = compoundMatch[2] || compoundMatch[3] || '';
     const parsedNo = parseChineseArticleNumber(numStr);
-    if (parsedNo !== null) {
-      return { raw: cleaned, exactNo: parsedNo, lawHint: lawPart, keywords: [] };
+    if (parsedNo !== null && /[\u4e00-\u9fa5]/.test(lawPart)) {
+      return { raw: cleaned, exactNo: parsedNo, lawHint: lawPart, clauseHint, keywords: [] };
     }
   }
 
-  const tokens = cleaned.split(/\s+/).filter(Boolean);
+  // 3. Multi-token query that may include an article token alongside law/topic keywords
+  const tokens = working.split(/\s+/).filter(Boolean);
   let exactNo: number | null = null;
+  let extractedLawHint = '';
   const remaining: string[] = [];
 
   for (const tok of tokens) {
@@ -158,7 +201,7 @@ export function parseStatuteQuery(rawInput: string): ParsedStatuteQuery {
       const n = parseChineseArticleNumber(subCompound[2]);
       if (n !== null) {
         exactNo = n;
-        remaining.push(subCompound[1]);
+        extractedLawHint = subCompound[1];
         continue;
       }
     }
@@ -177,29 +220,67 @@ export function parseStatuteQuery(rawInput: string): ParsedStatuteQuery {
     remaining.push(tok);
   }
 
+  if (
+    !extractedLawHint &&
+    exactNo !== null &&
+    remaining.length === 1 &&
+    /(?:法|典|条例|解释[一二三四五六七八九十1-9]?|规定|办法|纪要)$/.test(remaining[0])
+  ) {
+    extractedLawHint = remaining[0];
+    remaining.length = 0;
+  }
+
   return {
     raw: cleaned,
     exactNo,
-    lawHint: '',
+    lawHint: extractedLawHint,
+    clauseHint,
     keywords: remaining,
   };
 }
 
-export function searchStatuteEntries<T extends SearchableStatuteItem>(
+export interface DetailedStatuteSearchResult<T extends SearchableStatuteItem> {
+  parsed: ParsedStatuteQuery;
+  hits: T[];
+  uncollectedLawNotice: string;
+  clauseNotice: string;
+}
+
+export function searchStatuteEntriesDetailed<T extends SearchableStatuteItem>(
   scopedEntries: T[],
   rawQuery: string,
   limit = 50
-): T[] {
+): DetailedStatuteSearchResult<T> {
   const parsed = parseStatuteQuery(rawQuery);
-  if (!parsed.raw) return scopedEntries.slice(0, limit);
+  if (!parsed.raw) {
+    return {
+      parsed,
+      hits: scopedEntries.slice(0, limit),
+      uncollectedLawNotice: '',
+      clauseNotice: '',
+    };
+  }
+
+  const lawExistsInCorpus = parsed.lawHint
+    ? scopedEntries.some((x) => matchLawHintAgainstItem(parsed.lawHint, x))
+    : true;
+
+  if (parsed.lawHint && !lawExistsInCorpus) {
+    return {
+      parsed,
+      hits: [],
+      uncollectedLawNotice: `离线法规库暂未收录《${parsed.lawHint}》，系统已拒绝使用同名母法或其他条文静默替代；请切换上方「IMA案例法规库」或前往国家法律法规数据库（flk.npc.gov.cn）核对权威现行原文。`,
+      clauseNotice: '',
+    };
+  }
 
   if (parsed.exactNo !== null && parsed.keywords.length === 0) {
-    const byNo = scopedEntries.filter(
-      (x) =>
-        x.articleNo === parsed.exactNo &&
-        (!parsed.lawHint || matchLawHintAgainstItem(parsed.lawHint, x))
-    );
-    return byNo
+    const byNo = scopedEntries
+      .filter(
+        (x) =>
+          x.articleNo === parsed.exactNo &&
+          (!parsed.lawHint || matchLawHintAgainstItem(parsed.lawHint, x))
+      )
       .sort((a, b) => {
         if (parsed.lawHint) {
           const aExact = a.lawTitle === parsed.lawHint ? -1 : 0;
@@ -209,6 +290,18 @@ export function searchStatuteEntries<T extends SearchableStatuteItem>(
         return a.lawTitle === '民法典' ? -1 : b.lawTitle === '民法典' ? 1 : 0;
       })
       .slice(0, limit);
+
+    const clauseNotice =
+      parsed.clauseHint && byNo.length > 0
+        ? `离线法规库按“条”粒度索引，已定位至第 ${parsed.exactNo} 条全文，请人工核对正文中「${parsed.clauseHint}」对应段落。`
+        : '';
+
+    return {
+      parsed,
+      hits: byNo,
+      uncollectedLawNotice: '',
+      clauseNotice,
+    };
   }
 
   const scored: Array<{ item: T; score: number }> = [];
@@ -231,10 +324,30 @@ export function searchStatuteEntries<T extends SearchableStatuteItem>(
     if (scored.length >= 300) break;
   }
 
-  return scored
+  const hits = scored
     .sort((a, b) => b.score - a.score || a.item.articleNo - b.item.articleNo)
     .slice(0, limit)
     .map((s) => s.item);
+
+  const clauseNotice =
+    parsed.clauseHint && hits.length > 0
+      ? `离线法规库按“条”粒度索引，已定位对应法条全文，请人工核对正文中「${parsed.clauseHint}」对应段落。`
+      : '';
+
+  return {
+    parsed,
+    hits,
+    uncollectedLawNotice: '',
+    clauseNotice,
+  };
+}
+
+export function searchStatuteEntries<T extends SearchableStatuteItem>(
+  scopedEntries: T[],
+  rawQuery: string,
+  limit = 50
+): T[] {
+  return searchStatuteEntriesDetailed(scopedEntries, rawQuery, limit).hits;
 }
 
 export interface GlobalQueryRouteHint {
@@ -246,7 +359,7 @@ export interface GlobalQueryRouteHint {
 
 /**
  * Shared parser for HomeTab & CommandSearchModal (⌘K) so "585", "民法典第585条",
- * and "民法典第五百八十五条" route identically to the local offline statute corpus.
+ * "民法典 第1165条 第2款", and "公司法解释三第13条" route identically to the local offline statute corpus.
  */
 export function classifyGlobalStatuteQuery(rawInput: string): GlobalQueryRouteHint {
   const parsed = parseStatuteQuery(rawInput);
@@ -261,10 +374,13 @@ export function classifyGlobalStatuteQuery(rawInput: string): GlobalQueryRouteHi
 
   if (parsed.exactNo !== null) {
     const lawPrefix = parsed.lawHint || parsed.keywords[0] || '';
-    const canonical = lawPrefix ? `${lawPrefix}第${parsed.exactNo}条` : String(parsed.exactNo);
+    const clauseSuffix = parsed.clauseHint ? ` ${parsed.clauseHint}` : '';
+    const canonical = lawPrefix
+      ? `${lawPrefix}第${parsed.exactNo}条${clauseSuffix}`
+      : `第${parsed.exactNo}条${clauseSuffix}`;
     const label = lawPrefix
-      ? `《${lawPrefix}》第 ${parsed.exactNo} 条`
-      : `第 ${parsed.exactNo} 条（优先《民法典》及常用单行法）`;
+      ? `《${lawPrefix}》第 ${parsed.exactNo} 条${parsed.clauseHint || ''}`
+      : `第 ${parsed.exactNo} 条${parsed.clauseHint || ''}（优先《民法典》及常用单行法）`;
     return {
       parsed,
       isArticleLookup: true,

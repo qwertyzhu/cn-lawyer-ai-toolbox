@@ -161,13 +161,45 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  const isNav =
-    event.request.mode === 'navigate' ||
-    url.pathname === '/' ||
-    url.pathname.endsWith('.html');
+  const scopeRoot = new URL('./', self.registration.scope).pathname;
+  const scopeIndex = new URL('./index.html', self.registration.scope).pathname;
+  const isSubHtmlAsset = url.pathname.endsWith('.html') && url.pathname !== scopeIndex;
+  const isAppShellNav =
+    !isSubHtmlAsset &&
+    (event.request.mode === 'navigate' || url.pathname === scopeRoot || url.pathname === scopeIndex);
 
-  if (isNav) {
-    const scopeIndex = new URL('./index.html', self.registration.scope).pathname;
+  if (isSubHtmlAsset) {
+    // Embedded standalone HTML tools (e.g. tool-assets/lawyer-fee-workbench.html?embed=1):
+    // match queryless pathname in cache when offline and NEVER fall back to SPA index.html!
+    event.respondWith(
+      fetch(new Request(event.request.url, { cache: 'no-cache', credentials: 'same-origin' }))
+        .then((resp) => {
+          if (resp && resp.status === 200) {
+            const clone = resp.clone();
+            caches.open(CACHE_NAME).then((c) => c.put(url.pathname, clone));
+          }
+          return resp;
+        })
+        .catch(async () => {
+          const exact = await caches.match(event.request);
+          if (exact) return exact;
+          const byPathname =
+            (await caches.match(url.pathname)) ||
+            (await caches.match(url.pathname, { ignoreSearch: true }));
+          if (byPathname) return byPathname;
+          return new Response(
+            '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body style="font-family:system-ui,sans-serif;padding:24px;background:#FAF9F6;color:#11151C"><h3>该内嵌工具离线缓存尚未完成</h3><p>请联网刷新一次页面，缓存齐备后即可在断网环境下直接使用。</p></body></html>',
+            {
+              status: 503,
+              headers: { 'Content-Type': 'text/html; charset=utf-8' },
+            }
+          );
+        })
+    );
+    return;
+  }
+
+  if (isAppShellNav) {
     event.respondWith(
       fetch(new Request(event.request.url, { cache: 'no-cache', credentials: 'same-origin' }))
         .then((resp) => {
@@ -186,9 +218,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Cache-First with background refresh for hashed JS/CSS/font/JSON corpus
+  // Cache-First with queryless fallback & background refresh for hashed JS/CSS/font/JSON corpus
   event.respondWith(
-    caches.match(event.request).then((cached) => {
+    caches.match(event.request).then(async (exactCached) => {
+      const cached = exactCached || (await caches.match(url.pathname));
       const fetchPromise = fetch(event.request)
         .then((networkResp) => {
           if (networkResp && networkResp.status === 200) {

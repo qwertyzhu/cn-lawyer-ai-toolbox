@@ -268,7 +268,12 @@ export interface ComputedLegalDeadline {
   reasons: string[];
   rolloverMode: DeadlineRolloverMode;
   outsideHolidayCoverage: boolean;
-  verificationStatus: 'exact' | 'manual_override' | 'pending_holiday_schedule';
+  hasDateConflict?: boolean;
+  verificationStatus:
+    | 'exact'
+    | 'manual_override'
+    | 'pending_holiday_schedule'
+    | 'conflict_invalid';
   holidayWarningText: string;
   day30Ymd?: string;
 }
@@ -297,19 +302,39 @@ export function computeLegalDeadline(params: {
   const countStartYmd =
     rolloverMode === 'preservation_freeze' ? startYmd : addDaysYmd(startYmd, 1);
 
-  if (manualDueYmd && isValidIsoYmd(manualDueYmd)) {
-    const warnYmd = addDaysYmd(manualDueYmd, -warnDaysBefore);
+  if (manualDueYmd !== undefined && manualDueYmd.trim() !== '') {
+    const cleanManual = manualDueYmd.trim();
+    if (!isValidIsoYmd(cleanManual)) return null;
+    const warnYmd = addDaysYmd(cleanManual, -warnDaysBefore);
+    if (cleanManual < startYmd) {
+      return {
+        valid: true,
+        startYmd,
+        countStartYmd,
+        rawEndYmd: cleanManual,
+        finalEndYmd: cleanManual,
+        warnYmd,
+        extended: false,
+        reasons: [],
+        rolloverMode,
+        outsideHolidayCoverage: false,
+        hasDateConflict: true,
+        verificationStatus: 'conflict_invalid',
+        holidayWarningText: `日期倒挂冲突：手输文书届满日（${cleanManual}）早于采取措施/送达起算日（${startYmd}），请核对送达回证与裁定书载明日期后再加入看板！`,
+      };
+    }
     return {
       valid: true,
       startYmd,
       countStartYmd,
-      rawEndYmd: manualDueYmd,
-      finalEndYmd: manualDueYmd,
+      rawEndYmd: cleanManual,
+      finalEndYmd: cleanManual,
       warnYmd,
       extended: false,
       reasons: [],
       rolloverMode,
       outsideHolidayCoverage: false,
+      hasDateConflict: false,
       verificationStatus: 'manual_override',
       holidayWarningText: '按手动录入的文书载明届满日为准',
     };

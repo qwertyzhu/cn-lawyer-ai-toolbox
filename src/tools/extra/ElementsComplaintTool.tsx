@@ -88,14 +88,18 @@ import {
   type SpcBatchItem,
 } from '../../lib/spcBatchEngine';
 import {
+  flushSpcWorkspaceToLocalStorageSync,
   hasNonEmptySpcDraft,
-  hydrateSingleSpcDraft,
+  hydrateDraftMapForCorpus,
+  isDemoSampleDraft,
   loadInitialSpcDraftsFromLocalStorage,
   loadSpcWorkspaceIdb,
+  makeScopedSpcDraftKey,
   parseSpcDraftBundle,
   saveSpcWorkspacePersisted,
   serializeSpcDraftBundle,
   switchSpcTemplatePreservingDrafts,
+  type PersistedSpcIdbState,
 } from '../../lib/spcDraftStorage';
 import { SpcBatchPanel } from './SpcBatchPanel';
 
@@ -677,10 +681,18 @@ export const ElementsComplaintTool: React.FC = () => {
     setSessionUnlockedPin,
     recordCalculation,
     lawyerProfile,
+    casePockets,
+    activeCaseId,
+    setActiveCaseId,
     sendToAi,
     navigateTab,
     showToast,
   } = useToolbox();
+  const activeCase = useMemo(
+    () => casePockets.find((c) => c.id === activeCaseId) || null,
+    [casePockets, activeCaseId]
+  );
+  const prevCaseIdRef = useRef<string>(activeCaseId || '');
 
   const initialWsRef = useRef<Partial<SavedSpcWorkspaceState> | null>(loadSpcWorkspaceLocal());
   const initialWs = initialWsRef.current;
@@ -771,29 +783,28 @@ export const ElementsComplaintTool: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imgInputRef = useRef<HTMLInputElement>(null);
 
-  // Load official 113-template corpus + per-template drafts & full untruncated IndexedDB workspace
+  // Load official 113-template corpus + per-case/template drafts & full untruncated IndexedDB workspace
   useEffect(() => {
     let alive = true;
+    const bootCaseId = prevCaseIdRef.current;
     Promise.all([loadOfficialSpcCorpus(), loadSpcWorkspaceIdb()])
       .then(([data, idbState]) => {
         if (!alive) return;
         setCorpus(data);
-        const lsInit = loadInitialSpcDraftsFromLocalStorage(data);
+        const lsInit = loadInitialSpcDraftsFromLocalStorage(data, bootCaseId);
         if (idbState && idbState.draftsByTemplate) {
-          const mergedMap: Record<string, OfficialSpcDraftState> = { ...lsInit.draftsByTemplate };
-          for (const [tid, rawD] of Object.entries(idbState.draftsByTemplate)) {
-            const matchedTpl = data.templates.find((t) => t.id === tid);
-            if (matchedTpl && rawD) {
-              mergedMap[tid] = hydrateSingleSpcDraft(matchedTpl, rawD);
-            }
-          }
+          const mergedMap: Record<string, OfficialSpcDraftState> = {
+            ...lsInit.draftsByTemplate,
+            ...hydrateDraftMapForCorpus(idbState.draftsByTemplate, data),
+          };
           const activeId =
             idbState.activeTemplateId && data.templates.some((t) => t.id === idbState.activeTemplateId)
               ? idbState.activeTemplateId
               : lsInit.activeDraft.templateId;
           const activeTpl = data.templates.find((t) => t.id === activeId) || data.templates[0];
-          const resolvedActive = mergedMap[activeTpl.id] || createInitialSpcDraft(activeTpl);
-          mergedMap[activeTpl.id] = resolvedActive;
+          const scopedKey = makeScopedSpcDraftKey(bootCaseId, activeTpl.id);
+          const resolvedActive = mergedMap[scopedKey] || createInitialSpcDraft(activeTpl);
+          mergedMap[scopedKey] = resolvedActive;
           setDraftsByTemplate(mergedMap);
           setDraft(resolvedActive);
           if (typeof idbState.sourceText === 'string' && idbState.sourceText.length > 0) {
@@ -835,24 +846,73 @@ export const ElementsComplaintTool: React.FC = () => {
     };
   }, []);
 
-  // Sync current active draft into draftsByTemplate map on every edit
+  // Sync current active draft into case-scoped draftsByTemplate map on every edit
   useEffect(() => {
     if (!draft) return;
+    const scopedKey = makeScopedSpcDraftKey(activeCaseId, draft.templateId);
+    const normalizedDemo = isDemoSampleDraft(draft);
+    const nextDraft =
+      Boolean(draft.isDemoSample) === normalizedDemo
+        ? draft
+        : { ...draft, isDemoSample: normalizedDemo };
+    if (nextDraft !== draft) {
+      setDraft(nextDraft);
+    }
     setDraftsByTemplate((prev) => {
-      if (prev[draft.templateId] === draft) return prev;
-      return { ...prev, [draft.templateId]: draft };
+      if (prev[scopedKey] === nextDraft) return prev;
+      return { ...prev, [scopedKey]: nextDraft };
     });
-  }, [draft]);
+  }, [draft, activeCaseId]);
 
-  // Auto-persist full untruncated workspace & per-template drafts with live save status
+  const latestPersistedRef = useRef<PersistedSpcIdbState | null>(null);
+  if (workspaceHydrated && draft) {
+    const curKey = makeScopedSpcDraftKey(activeCaseId, draft.templateId);
+    latestPersistedRef.current = {
+      activeTemplateId: draft.templateId,
+      activeCaseId: activeCaseId || '',
+      draftsByTemplate: { ...draftsByTemplate, [curKey]: draft },
+      sourceText,
+      autoRedact,
+      extractModelSlot,
+      showAiCopilot,
+      aiRefineTurns: aiRefineTurns.slice(-20),
+      aiSessionMappings: aiSessionMappings.slice(0, 400),
+      companionCourt,
+      companionAuthScope,
+      companionPreserveAmt,
+      companionInvestigateOrg,
+      editingBatchItemId,
+      updatedAt: Date.now(),
+    };
+  }
+
+  // Flush pending debounced edits synchronously on pagehide / beforeunload / unmount
+  useEffect(() => {
+    const flushNow = () => {
+      if (latestPersistedRef.current) {
+        flushSpcWorkspaceToLocalStorageSync(latestPersistedRef.current, WORKSPACE_STORAGE_KEY);
+      }
+    };
+    window.addEventListener('pagehide', flushNow);
+    window.addEventListener('beforeunload', flushNow);
+    return () => {
+      flushNow();
+      window.removeEventListener('pagehide', flushNow);
+      window.removeEventListener('beforeunload', flushNow);
+    };
+  }, []);
+
+  // Auto-persist full untruncated workspace & per-case/template drafts with live save status
   useEffect(() => {
     if (!workspaceHydrated || !draft) return;
     setSaveStatus('saving');
     const timer = window.setTimeout(() => {
-      const mergedDrafts = { ...draftsByTemplate, [draft.templateId]: draft };
+      const curKey = makeScopedSpcDraftKey(activeCaseId, draft.templateId);
+      const mergedDrafts = { ...draftsByTemplate, [curKey]: draft };
       saveSpcWorkspacePersisted(
         {
           activeTemplateId: draft.templateId,
+          activeCaseId: activeCaseId || '',
           draftsByTemplate: mergedDrafts,
           sourceText, // Zero silent 80k truncation!
           autoRedact,
@@ -883,6 +943,7 @@ export const ElementsComplaintTool: React.FC = () => {
     workspaceHydrated,
     draft,
     draftsByTemplate,
+    activeCaseId,
     activeMode,
     sourceText,
     autoRedact,
@@ -1086,13 +1147,73 @@ export const ElementsComplaintTool: React.FC = () => {
       }
     }
 
+    sample.isDemoSample = true;
+    const scopedKey = makeScopedSpcDraftKey(activeCaseId, activeTpl.id);
     setDraft(sample);
-    setDraftsByTemplate((prev) => ({ ...prev, [activeTpl.id]: sample }));
+    setDraftsByTemplate((prev) => ({ ...prev, [scopedKey]: sample }));
     setShowTemplateBrowser(false);
     setActiveMode('form');
-    showToast(`已载入《${activeTpl.displayName}》虚构办案样例（可随时点“撤销上一轮”或“重置”恢复空白）`);
+    showToast(`已载入《${activeTpl.displayName}》虚构办案样例（导出时将自动标注“虚构样例_不可提交”，可随时点撤销或重置）`);
     const firstField = activeTpl.rows.find((r) => r.kind === 'field' || r.kind === 'full_input');
-    if (firstField) focusRowInputById(firstField.id, false);
+    const shouldScroll = typeof window !== 'undefined' && window.innerWidth < 768;
+    if (firstField) focusRowInputById(firstField.id, shouldScroll);
+  };
+
+  // Isolate drafts strictly when switching activeCaseId (Case A <-> Case B <-> Unassigned)
+  useEffect(() => {
+    const prevCase = prevCaseIdRef.current;
+    const nextCase = activeCaseId || '';
+    if (prevCase === nextCase) return;
+    prevCaseIdRef.current = nextCase;
+    if (!workspaceHydrated || !tpl) return;
+    const switched = switchSpcTemplatePreservingDrafts({
+      currentDraft: draft,
+      draftsByTemplate,
+      nextTpl: tpl,
+      currentCaseId: prevCase,
+      nextCaseId: nextCase,
+    });
+    setDraftsByTemplate(switched.nextDraftsByTemplate);
+    setDraft(switched.nextDraft);
+    setDraftUndoStack([]);
+    if (nextCase) {
+      const targetPocket = casePockets.find((c) => c.id === nextCase);
+      if (targetPocket?.court && !companionCourt.trim()) {
+        setCompanionCourt(targetPocket.court);
+      }
+      showToast(
+        switched.restoredExisting
+          ? `已切换至「${targetPocket?.title || '所选案件'}」专属文书草稿`
+          : `已为「${targetPocket?.title || '所选案件'}」开启独立空白文书草稿（与他案严格隔离）`
+      );
+    } else {
+      showToast('已切换至「未绑定案件口袋」独立草稿区');
+    }
+  }, [activeCaseId, workspaceHydrated, tpl, draft, draftsByTemplate, casePockets, companionCourt, showToast]);
+
+  const handleCopyUnassignedDraftToActiveCase = () => {
+    if (!tpl || !activeCaseId) return;
+    const unassignedDraft = draftsByTemplate[tpl.id];
+    if (!unassignedDraft || !hasNonEmptySpcDraft(tpl, unassignedDraft)) {
+      showToast('当前模板下暂无可导入的未归案草稿');
+      return;
+    }
+    if (draft && hasNonEmptySpcDraft(tpl, draft)) {
+      pushUndoSnapshot(draft);
+    }
+    const cloned: OfficialSpcDraftState = {
+      ...unassignedDraft,
+      rowValues: { ...unassignedDraft.rowValues },
+      gridValues: Object.fromEntries(
+        Object.entries(unassignedDraft.gridValues).map(([k, v]) => [k, [...v]])
+      ),
+      extraRows: unassignedDraft.extraRows.map((r) => ({ ...r })),
+      excludedRowIds: [...(unassignedDraft.excludedRowIds || [])],
+    };
+    const scopedKey = makeScopedSpcDraftKey(activeCaseId, tpl.id);
+    setDraft(cloned);
+    setDraftsByTemplate((prev) => ({ ...prev, [scopedKey]: cloned }));
+    showToast(`已将未归案草稿复制填入「${activeCase?.title || '本案'}」`);
   };
 
   useEffect(() => {
@@ -1109,23 +1230,27 @@ export const ElementsComplaintTool: React.FC = () => {
   }, [workspaceHydrated, corpus]);
 
   const handleSelectTemplate = (nextTpl: OfficialSpcTemplate) => {
+    const shouldScroll = typeof window !== 'undefined' && window.innerWidth < 768;
+    const curScopeKey = tpl ? makeScopedSpcDraftKey(activeCaseId, tpl.id) : '';
+    const nextScopeKey = makeScopedSpcDraftKey(activeCaseId, nextTpl.id);
     if (tpl && nextTpl.id === tpl.id) {
       setShowTemplateBrowser(false);
       const sameFirst = nextTpl.rows.find((r) => r.kind === 'field' || r.kind === 'full_input');
-      if (sameFirst) focusRowInputById(sameFirst.id, false);
+      if (sameFirst) focusRowInputById(sameFirst.id, shouldScroll);
       return;
     }
-    if (tpl) {
-      setUndoStacksByTemplate((prev) => ({ ...prev, [tpl.id]: draftUndoStack }));
+    if (tpl && curScopeKey) {
+      setUndoStacksByTemplate((prev) => ({ ...prev, [curScopeKey]: draftUndoStack }));
     }
     const switched = switchSpcTemplatePreservingDrafts({
       currentDraft: draft,
       draftsByTemplate,
       nextTpl,
+      currentCaseId: activeCaseId || '',
     });
     setDraftsByTemplate(switched.nextDraftsByTemplate);
     setDraft(switched.nextDraft);
-    setDraftUndoStack(undoStacksByTemplate[nextTpl.id] || []);
+    setDraftUndoStack(undoStacksByTemplate[nextScopeKey] || []);
     setOpenQuickFillRowId(null);
     setAiRefineTurns([]);
     setAiSessionMappings([]);
@@ -1136,19 +1261,21 @@ export const ElementsComplaintTool: React.FC = () => {
     const firstField = nextTpl.rows.find(
       (r) => (r.kind === 'field' || r.kind === 'full_input') && !excludedSet.has(r.id)
     );
-    if (firstField) focusRowInputById(firstField.id, false);
+    if (firstField) focusRowInputById(firstField.id, shouldScroll);
     showToast(
       switched.restoredExisting
-        ? `已切回《${nextTpl.displayName}》（已自动恢复您此前的本机填表草稿）`
+        ? `已切回《${nextTpl.displayName}》（已自动恢复${activeCase ? `「${activeCase.title}」` : '本机'}此前的填表草稿）`
         : `已切换最高法官方模板：${nextTpl.displayName}（原模板草稿已自动保留在本机）`
     );
   };
 
   const handleExportDraftBundle = () => {
     if (!draft) return;
-    const merged = { ...draftsByTemplate, [draft.templateId]: draft };
+    const curKey = makeScopedSpcDraftKey(activeCaseId, draft.templateId);
+    const merged = { ...draftsByTemplate, [curKey]: draft };
     const json = serializeSpcDraftBundle({
       activeTemplateId: draft.templateId,
+      activeCaseId: activeCaseId || '',
       draftsByTemplate: merged,
       sourceText,
       companionCourt,
@@ -1160,7 +1287,7 @@ export const ElementsComplaintTool: React.FC = () => {
     a.download = `要素式文书草稿备份_${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast('已下载本机草稿备份（含各模板已填内容与导入原文）');
+    showToast('已下载本机草稿备份（含各案件/模板已填内容与导入原文）');
   };
 
   const handleImportDraftBundle = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1169,7 +1296,7 @@ export const ElementsComplaintTool: React.FC = () => {
     if (!file || !corpus) return;
     try {
       const txt = await file.text();
-      const restored = parseSpcDraftBundle(txt, corpus);
+      const restored = parseSpcDraftBundle(txt, corpus, activeCaseId || '');
       setDraftsByTemplate((prev) => ({ ...prev, ...restored.draftsByTemplate }));
       setDraft(restored.activeDraft);
       if (restored.sourceText) setSourceText(restored.sourceText);
@@ -1699,15 +1826,77 @@ ${JSON.stringify(editableRowSpecs)}`;
     });
   };
 
+  const preExportCheck = useMemo(() => {
+    if (!tpl || !draft) {
+      return { isDemo: false, missingItems: [] as string[], hasUnassignedToImport: false };
+    }
+    const excludedSet = new Set(draft.excludedRowIds || []);
+    const activeRows = tpl.rows.filter((r) => !excludedSet.has(r.id));
+    const isDemo = isDemoSampleDraft(draft);
+    const missingItems: string[] = [];
+
+    const plaintiffRows = activeRows.filter(
+      (r) => r.roleTag === 'plaintiff_person' || r.roleTag === 'plaintiff_org'
+    );
+    if (
+      plaintiffRows.length > 0 &&
+      plaintiffRows.every((r) => isRowUntouched(r, draft.rowValues[r.id])) &&
+      !draft.extraRows.some((ex) => ex.label.includes('原告') || ex.label.includes('申请人'))
+    ) {
+      missingItems.push('原告/申请人主体未填');
+    }
+
+    const defendantRows = activeRows.filter(
+      (r) => r.roleTag === 'defendant_person' || r.roleTag === 'defendant_org'
+    );
+    if (
+      defendantRows.length > 0 &&
+      defendantRows.every((r) => isRowUntouched(r, draft.rowValues[r.id])) &&
+      !draft.extraRows.some((ex) => ex.label.includes('被告') || ex.label.includes('被申请人'))
+    ) {
+      missingItems.push('被告/被申请人主体未填');
+    }
+
+    const substantiveRows = activeRows.filter(
+      (r) => (r.kind === 'field' || r.kind === 'full_input') && !r.roleTag
+    );
+    if (
+      substantiveRows.length > 0 &&
+      substantiveRows.every((r) => isRowUntouched(r, draft.rowValues[r.id]))
+    ) {
+      missingItems.push('诉讼请求/答辩核心要素未改动');
+    }
+
+    if (!draft.signerName.trim()) {
+      missingItems.push('具状人留空（打印后手签盖章或补填）');
+    }
+
+    const hasUnassignedToImport = Boolean(
+      activeCaseId &&
+        !hasNonEmptySpcDraft(tpl, draft) &&
+        draftsByTemplate[tpl.id] &&
+        hasNonEmptySpcDraft(tpl, draftsByTemplate[tpl.id])
+    );
+
+    return { isDemo, missingItems, hasUnassignedToImport };
+  }, [tpl, draft, activeCaseId, draftsByTemplate]);
+
   const handleDownloadWord = (blankMode = false) => {
     if (!tpl || !draft) return;
+    const demoMode = !blankMode && isDemoSampleDraft(draft);
     const doc = buildResolvedSpcDocument(tpl, draft, { blankMode });
-    const suffix = blankMode ? '_最高法官方空白示范文本' : '_已填版';
+    const suffix = blankMode
+      ? '_最高法官方空白示范文本'
+      : demoMode
+      ? '_虚构样例_不可提交'
+      : '_已填版';
     const fileName = `${tpl.displayName}${suffix}.docx`;
     downloadOfficialSpcDocx(doc, fileName);
     showToast(
       blankMode
         ? `已下载最高法官方空白 Word 模板：${fileName}`
+        : demoMode
+        ? `已导出虚构演示样例：${fileName}（含演示字样，请勿直接用于正式立案）`
         : `已按最高法《法〔2025〕82号》官方格式生成 Word：${fileName}`
     );
   };
@@ -1740,9 +1929,16 @@ ${JSON.stringify(editableRowSpecs)}`;
   };
 
   const handleSaveHistory = () => {
-    if (!resolvedDoc || !tpl) return;
+    if (!resolvedDoc || !tpl || !draft) return;
+    if (isDemoSampleDraft(draft)) {
+      showToast('当前表格为内置【虚构演示样例】，为避免混入真实案件留痕，请填写真实案情后再归档');
+      return;
+    }
     const txt = buildOfficialSpcPlainText(resolvedDoc);
-    recordCalculation('elements-complaint', '要素式文书（最高法2025）', tpl.displayName, txt);
+    const summaryLabel = activeCase
+      ? `${tpl.displayName}（归属：${activeCase.title}）`
+      : tpl.displayName;
+    recordCalculation('elements-complaint', '要素式文书（最高法2025）', summaryLabel, txt);
   };
 
   const handleAiFilingAudit = () => {
@@ -2241,6 +2437,15 @@ ${JSON.stringify(editableRowSpecs)}`;
             </button>
             <button
               type="button"
+              onClick={handleSaveHistory}
+              className="inline-flex items-center gap-1 rounded-md border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2.5 py-1 text-[11px] font-semibold text-[#0E223D]"
+              title={activeCase ? `将当前文书归档存入案件口袋「${activeCase.title}」` : '将当前文书存入本机测算留痕'}
+            >
+              <BookmarkPlus className="h-3 w-3 text-[#9A773E]" />
+              <span>{activeCase ? '存为本案底稿' : '存入本机记录'}</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setShowTemplateBrowser((v) => !v)}
               className="inline-flex items-center gap-1 rounded-md bg-[#0E223D] hover:bg-[#17345C] px-2.5 py-1 text-[11px] font-bold text-white"
             >
@@ -2252,6 +2457,50 @@ ${JSON.stringify(editableRowSpecs)}`;
                 <ChevronDown className="h-3.5 w-3.5 text-[#D1B27A]" />
               )}
             </button>
+          </div>
+        </div>
+
+        {/* Per-Case Isolation Bar & Non-Blocking Pre-Export Filing Self-Check */}
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E5DFD2] bg-[#FDFCF9] px-3 py-2 text-[11.5px]">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <span className="font-semibold text-slate-600">当前归属案件：</span>
+            <select
+              value={activeCaseId || ''}
+              onChange={(e) => setActiveCaseId(e.target.value)}
+              className="rounded border border-[#D8D1C3] bg-white px-2 py-1 text-xs font-semibold text-[#0E223D] max-w-[240px]"
+            >
+              <option value="">未绑定案件口袋（独立草稿区）</option>
+              {casePockets.map((cp) => (
+                <option key={cp.id} value={cp.id}>
+                  📁 {cp.title}
+                </option>
+              ))}
+            </select>
+            {preExportCheck.hasUnassignedToImport && (
+              <button
+                type="button"
+                onClick={handleCopyUnassignedDraftToActiveCase}
+                className="rounded border border-[#C9A463] bg-[#FAF6EC] hover:bg-[#F3ECE0] px-2 py-0.5 text-[11px] font-semibold text-[#7A5922]"
+              >
+                从「未归案草稿」复制填入本案
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+            {preExportCheck.isDemo ? (
+              <span className="rounded bg-red-100 border border-red-300 px-2 py-0.5 font-bold text-red-800">
+                ⚠ 虚构演示样例（导出文件名自动标注“不可提交”）
+              </span>
+            ) : preExportCheck.missingItems.length > 0 ? (
+              <span className="rounded bg-amber-50 border border-amber-200 px-2 py-0.5 text-amber-900">
+                导出前自检：{preExportCheck.missingItems.join(' · ')}
+              </span>
+            ) : (
+              <span className="rounded bg-emerald-50 border border-emerald-200 px-2 py-0.5 font-semibold text-emerald-800">
+                ✓ 核心主体、诉请要素与落款均已填写
+              </span>
+            )}
           </div>
         </div>
 
@@ -4030,7 +4279,8 @@ ${JSON.stringify(editableRowSpecs)}`;
               onClick={handleSaveHistory}
               className="inline-flex items-center gap-1.5 rounded-lg border border-[#D8D1C3] bg-[#FAF9F6] px-3 py-2 text-xs font-semibold text-[#11151C]"
             >
-              <BookmarkPlus className="h-3.5 w-3.5 text-[#0E223D]" /> 存入记录
+              <BookmarkPlus className="h-3.5 w-3.5 text-[#0E223D]" />{' '}
+              {activeCase ? '存为本案底稿' : '存入本机记录'}
             </button>
             <button
               type="button"

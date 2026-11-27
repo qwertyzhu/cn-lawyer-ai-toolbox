@@ -920,9 +920,14 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  resetLocalUserWorkspaceForAccountSwitch();
+                onClick={async () => {
+                  const res = await resetLocalUserWorkspaceForAccountSwitch();
                   clearSavedLicense();
+                  if (res.blocked) {
+                    window.alert(
+                      '本机授权与本地键值已清空；检测到当前浏览器另有其他标签页打开本工具，请一并关闭其他标签页以彻底释放离线长文本库。'
+                    );
+                  }
                   onLicenseChanged(null);
                 }}
                 className="rounded bg-red-600 hover:bg-red-700 px-3 py-1.5 font-bold text-white"

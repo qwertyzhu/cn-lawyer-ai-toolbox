@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { trackEvent } from '../../components/ToolboxBridgeLink';
 import { copyToClipboard } from '../../lib/clipboard';
+import { calculatePersonalInjuryRecoverable } from '../../lib/legalCalculators';
 import { ToolQuickRefSection as ToolSeoKnowledgeSection } from '../../components/ToolQuickRefSection';
 
 type MainTab = 'work_injury' | 'personal_injury';
@@ -376,21 +377,20 @@ export const InjuryCompensationCalculator: React.FC = () => {
 
     const medicalCategoryTotal = medicalFee + hospMeal + nutritionFee;
     const disabilityCategoryTotal = disabilityOrDeathFee + funeralFee + lostIncome + nursingFee + mentalFee + dependentFee;
-    const grossTotal = medicalCategoryTotal + disabilityCategoryTotal;
-
-    const faultRatio = Math.max(0, Math.min(100, Number(piFaultPct) || 100)) / 100;
-
-    // Compulsory motor insurance (交强险有责限额: 医疗18,000 + 伤残死亡180,000)
-    let compulsoryPay = 0;
-    let commercialOrPartyPay = grossTotal * faultRatio;
-    if (piHasCompulsoryIns && faultRatio > 0) {
-      const compMed = Math.min(18000, medicalCategoryTotal);
-      const compDis = Math.min(180000, disabilityCategoryTotal);
-      compulsoryPay = compMed + compDis;
-      const remainder = Math.max(0, grossTotal - compulsoryPay);
-      commercialOrPartyPay = remainder * faultRatio;
-    }
-    const estimatedRecoverable = compulsoryPay + commercialOrPartyPay;
+    const rec = calculatePersonalInjuryRecoverable({
+      medicalCategoryTotal,
+      disabilityCategoryTotal,
+      faultPctInput: piFaultPct,
+      hasCompulsoryIns: piHasCompulsoryIns,
+    });
+    const {
+      grossTotal,
+      faultPct,
+      compulsoryMode,
+      compulsoryPay,
+      commercialOrPartyPay,
+      estimatedRecoverable,
+    } = rec;
 
     const items: { name: string; amount: number; formula: string }[] = [
       {
@@ -421,6 +421,8 @@ export const InjuryCompensationCalculator: React.FC = () => {
     return {
       years,
       grossTotal,
+      faultPct,
+      compulsoryMode,
       compulsoryPay,
       commercialOrPartyPay,
       estimatedRecoverable,
@@ -460,10 +462,16 @@ export const InjuryCompensationCalculator: React.FC = () => {
         ...[...wiCalc.fundItems, ...wiCalc.employerItems].map((i) => `• ${i.name}：${fmtYuan(i.amount)}（${i.formula}）`),
       ].join('\n');
     }
+    const insNote =
+      piCalc.compulsoryMode === 'liable_cap'
+        ? '（含交强险有责限额先行赔付）'
+        : piCalc.compulsoryMode === 'no_fault_cap'
+        ? '（对方0%无责 · 仅计机动车交强险无责限额，侵权人自担 ¥0.00）'
+        : '';
     return [
       `【${activeRegionLabel} · 人身损害 / 交通事故赔偿测算 · ${piGrade === 0 ? '死亡' : `${piGrade}级伤残`}】`,
       `总损失核定额：${fmtYuan(piCalc.grossTotal)}`,
-      `按对方责任 ${piFaultPct}%${piHasCompulsoryIns ? '（含交强险有责限额先行赔付）' : ''} 预计可获赔：${fmtYuan(piCalc.estimatedRecoverable)}`,
+      `按对方责任 ${piCalc.faultPct}%${insNote} 预计可获赔：${fmtYuan(piCalc.estimatedRecoverable)}`,
       '--- 分项明细 ---',
       ...piCalc.items.map((i) => `• ${i.name}：${fmtYuan(i.amount)}（${i.formula}）`),
     ].join('\n');
@@ -952,7 +960,7 @@ export const InjuryCompensationCalculator: React.FC = () => {
 
               <label className="flex cursor-pointer items-center gap-2 border-t border-[#EFECE5] pt-3 font-semibold text-[#11151C]">
                 <input type="checkbox" checked={piHasCompulsoryIns} onChange={(e) => setPiHasCompulsoryIns(e.target.checked)} className="h-4 w-4 accent-[#11151C]" />
-                <span>机动车事故（适用交强险有责限额 18 万伤残 + 1.8 万医疗先行赔付）</span>
+                <span>机动车事故（有责限额 18万+1.8万；0%无责适用无责限额 1.8万+1,800元）</span>
               </label>
             </div>
 
@@ -966,9 +974,11 @@ export const InjuryCompensationCalculator: React.FC = () => {
                     <p className="mt-2 font-num text-3xl font-bold sm:text-4xl">{fmtYuan(piCalc.estimatedRecoverable)}</p>
                     <p className="mt-2 text-xs text-slate-300">
                       核定总损失：{fmtYuan(piCalc.grossTotal)}
-                      {piHasCompulsoryIns
-                        ? `（交强险先行 ${fmtYuan(piCalc.compulsoryPay)} + 超出部分按 ${piFaultPct}% 责比 ${fmtYuan(piCalc.commercialOrPartyPay)}）`
-                        : `（按 ${piFaultPct}% 责任比例核算）`}
+                      {piCalc.compulsoryMode === 'no_fault_cap'
+                        ? `（机动车交强险无责限额赔付 ${fmtYuan(piCalc.compulsoryPay)} + 侵权人 0% 责任自担 ¥ 0.00）`
+                        : piCalc.compulsoryMode === 'liable_cap'
+                        ? `（交强险有责先行 ${fmtYuan(piCalc.compulsoryPay)} + 超出部分按 ${piCalc.faultPct}% 责比 ${fmtYuan(piCalc.commercialOrPartyPay)}）`
+                        : `（按 ${piCalc.faultPct}% 责任比例核算）`}
                     </p>
                   </div>
                   <button

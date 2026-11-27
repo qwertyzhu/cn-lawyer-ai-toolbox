@@ -46,7 +46,9 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
     byok,
     pinnedTools,
     deadlines,
+    setDeadlines,
     scratchpads,
+    setScratchpads,
     history,
     clearHistory,
     lawyerProfile,
@@ -78,16 +80,40 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
   const visibleHistory = activeCase
     ? history.filter((h) => h.caseId === activeCase.id)
     : history;
+  // Strictly match by explicit caseId so items belonging to Case B or unassigned items NEVER silently bleed into Case A's brief!
   const activeCaseDeadlines = activeCase
-    ? deadlines.filter(
-        (d) => d.caseId === activeCase.id || (activeCase.title && d.caseName.includes(activeCase.title))
-      )
+    ? deadlines.filter((d) => d.caseId === activeCase.id)
     : [];
   const activeCaseNotes = activeCase
-    ? scratchpads.filter(
-        (n) => n.caseId === activeCase.id || (activeCase.title && n.title.includes(activeCase.title))
-      )
+    ? scratchpads.filter((n) => n.caseId === activeCase.id)
     : [];
+  const unassignedSimilarDeadlines =
+    activeCase && activeCase.title.trim()
+      ? deadlines.filter((d) => !d.caseId && d.caseName.includes(activeCase.title.trim()))
+      : [];
+  const unassignedSimilarNotes =
+    activeCase && activeCase.title.trim()
+      ? scratchpads.filter((n) => !n.caseId && n.title.includes(activeCase.title.trim()))
+      : [];
+  const claimableUnassignedCount =
+    unassignedSimilarDeadlines.length + unassignedSimilarNotes.length;
+
+  const handleClaimUnassignedForActiveCase = () => {
+    if (!activeCase || claimableUnassignedCount === 0) return;
+    const dlIds = new Set(unassignedSimilarDeadlines.map((d) => d.id));
+    const noteIds = new Set(unassignedSimilarNotes.map((n) => n.id));
+    if (dlIds.size > 0) {
+      setDeadlines(
+        deadlines.map((d) => (dlIds.has(d.id) ? { ...d, caseId: activeCase.id } : d))
+      );
+    }
+    if (noteIds.size > 0) {
+      setScratchpads(
+        scratchpads.map((n) => (noteIds.has(n.id) ? { ...n, caseId: activeCase.id } : n))
+      );
+    }
+    showToast(`已将 ${claimableUnassignedCount} 条未归案记录正式认领至「${activeCase.title}」`);
+  };
 
   const handleCreateCase = (e: React.FormEvent) => {
     e.preventDefault();
@@ -228,13 +254,17 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
               )}
             </span>
 
-            {offlinePack.status === 'ready' || offlinePack.status === 'dev_local' ? (
+            {offlinePack.status === 'ready' ? (
               <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/70 border border-emerald-400/30 px-2.5 py-0.5 text-emerald-200">
-                <span>● 离线包已齐备（法条+模板）</span>
+                <span>● 计算器离线就绪 · 法规/模板包 {offlinePack.readyCount}/{offlinePack.totalCount}</span>
+              </span>
+            ) : offlinePack.status === 'dev_local' ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/70 border border-emerald-400/30 px-2.5 py-0.5 text-emerald-200">
+                <span>● 本地直连就绪（计算器+法条模板库）</span>
               </span>
             ) : offlinePack.status === 'syncing' || offlinePack.status === 'checking' ? (
               <span className="inline-flex items-center gap-1 rounded-full bg-sky-950/70 border border-sky-400/30 px-2.5 py-0.5 text-sky-200">
-                <span>离线包缓存中 ({offlinePack.readyCount}/{offlinePack.totalCount})</span>
+                <span>计算器可用 · 法规/模板包缓存中 ({offlinePack.readyCount}/{offlinePack.totalCount})</span>
               </span>
             ) : (
               <button
@@ -242,7 +272,7 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
                 onClick={() => retryOfflinePacks()}
                 className="inline-flex items-center gap-1 rounded-full bg-amber-950/80 border border-amber-400/40 px-2.5 py-0.5 text-amber-200 hover:bg-amber-900"
               >
-                <span>离线包未齐 ({offlinePack.readyCount}/{offlinePack.totalCount}) · 点此重试</span>
+                <span>计算器可用 · 法规/模板包 {offlinePack.readyCount}/{offlinePack.totalCount} 点此缓存</span>
               </button>
             )}
 
@@ -678,7 +708,17 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
                 </span>
               </div>
             </div>
-            <div className="flex items-center gap-1.5 flex-none">
+            <div className="flex flex-wrap items-center gap-1.5 flex-none">
+              {claimableUnassignedCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClaimUnassignedForActiveCase}
+                  className="rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 px-2.5 py-1.5 text-[11px] font-semibold text-amber-900"
+                  title="发现未绑定案件口袋但名称包含本案简称的期限或速记；严格隔离模式下未自动混入简报，点此可手动认领归入本案"
+                >
+                  认领 {claimableUnassignedCount} 条未归案同名记录
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleExportCaseBrief}

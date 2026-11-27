@@ -18,7 +18,7 @@ import { useToolbox } from '../context/ToolboxContext';
 import { PRACTICE_CHECKLISTS } from '../data/checklists';
 import { LEGAL_DATA_MANIFEST } from '../data/legalDataManifest';
 import { copyToClipboard } from '../lib/clipboard';
-import { searchStatuteEntries } from '../lib/statuteSearch';
+import { searchStatuteEntriesDetailed } from '../lib/statuteSearch';
 import type { ChecklistInstance } from '../types/toolbox';
 
 interface CivilArticleItem {
@@ -220,7 +220,7 @@ export const LawsAndChecklistsTab: React.FC = () => {
     return list;
   }, [corpus]);
 
-  const filteredStatutes = useMemo(() => {
+  const statuteSearchResult = useMemo(() => {
     const q = query.trim();
 
     const matchScope = (item: UnifiedLawHit): boolean => {
@@ -246,7 +246,9 @@ export const LawsAndChecklistsTab: React.FC = () => {
     const scoped = allEntries.filter(matchScope);
 
     if (!q) {
-      if (scope === 'starred') return scoped;
+      if (scope === 'starred') {
+        return { hits: scoped, uncollectedLawNotice: '', clauseNotice: '' };
+      }
       const hotKeys = new Set([
         'civil:585',
         'civil:577',
@@ -259,11 +261,21 @@ export const LawsAndChecklistsTab: React.FC = () => {
         'law_copyright_2020:54',
       ]);
       const hot = scoped.filter((x) => hotKeys.has(x.key));
-      return hot.length > 0 ? hot : scoped.slice(0, 30);
+      return {
+        hits: hot.length > 0 ? hot : scoped.slice(0, 30),
+        uncollectedLawNotice: '',
+        clauseNotice: '',
+      };
     }
 
-    return searchStatuteEntries(scoped, q, 50);
+    const detailed = searchStatuteEntriesDetailed(scoped, q, 50);
+    return {
+      hits: detailed.hits,
+      uncollectedLawNotice: detailed.uncollectedLawNotice,
+      clauseNotice: detailed.clauseNotice,
+    };
   }, [allEntries, query, scope, starredLaws]);
+  const filteredStatutes = statuteSearchResult.hits;
 
   // Checklist Helpers
   const currentTemplate =
@@ -344,11 +356,19 @@ export const LawsAndChecklistsTab: React.FC = () => {
     showToast('已复制《待补充材料催收清单》，可直接粘贴发给当事人');
   };
 
-  const copyCitation = async (hit: UnifiedLawHit) => {
-    const full = `《${hit.fullLawTitle}》${hit.articleLabel}：\n${hit.text}`;
+  const copyCitation = async (hit: UnifiedLawHit, withVerificationMeta = false) => {
+    const asOf = corpus?.dataAsOf || LEGAL_DATA_MANIFEST.lawsOffline.asOf;
+    const docNoPrefix = hit.breadcrumb ? `（${hit.breadcrumb}）` : '';
+    const full = withVerificationMeta
+      ? `《${hit.fullLawTitle}》${hit.articleLabel}${docNoPrefix}：\n${hit.text}\n—— 离线语料核验截至 ${asOf}，正式提交前请核对国家法律法规数据库 https://flk.npc.gov.cn 现行有效文本`
+      : `《${hit.fullLawTitle}》${hit.articleLabel}：\n${hit.text}`;
     await copyToClipboard(full);
-    setCopiedKey(hit.key);
-    showToast(`已复制《${hit.lawTitle}》${hit.articleLabel}原文`);
+    setCopiedKey(withVerificationMeta ? `${hit.key}:meta` : hit.key);
+    showToast(
+      withVerificationMeta
+        ? `已复制《${hit.lawTitle}》${hit.articleLabel}规范引注（含文号与官方核验源）`
+        : `已复制《${hit.lawTitle}》${hit.articleLabel}原文`
+    );
     setTimeout(() => setCopiedKey(null), 1800);
   };
 
@@ -486,6 +506,13 @@ export const LawsAndChecklistsTab: React.FC = () => {
           </div>
 
           {/* Results List */}
+          {statuteSearchResult.clauseNotice && (
+            <div className="rounded-lg border border-sky-200 bg-sky-50 px-3.5 py-2.5 text-xs text-sky-950">
+              <strong>款项定位提示：</strong>
+              {statuteSearchResult.clauseNotice}
+            </div>
+          )}
+
           {loading ? (
             <div className="py-12 text-center text-xs text-slate-500">正在加载离线法典语料包…</div>
           ) : loadError ? (
@@ -498,6 +525,30 @@ export const LawsAndChecklistsTab: React.FC = () => {
               >
                 重新加载离线法规语料包
               </button>
+            </div>
+          ) : statuteSearchResult.uncollectedLawNotice ? (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-5 text-xs text-amber-950 space-y-3">
+              <div className="font-bold text-sm text-amber-900">
+                未以母法静默替代 · 离线库未收录该单行法/司法解释
+              </div>
+              <p className="leading-6">{statuteSearchResult.uncollectedLawNotice}</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSubTab('ima_cloud')}
+                  className="rounded bg-[#0E223D] px-3 py-1.5 font-bold text-white"
+                >
+                  切换至「IMA案例法规库」检索
+                </button>
+                <a
+                  href="https://flk.npc.gov.cn/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rounded border border-amber-400 bg-white px-3 py-1.5 font-semibold text-amber-950 hover:bg-amber-100"
+                >
+                  打开国家法律法规数据库 →
+                </a>
+              </div>
             </div>
           ) : filteredStatutes.length === 0 ? (
             <div className="rounded-lg border border-[#DED8CC] bg-white py-10 text-center text-xs text-slate-500">
@@ -564,7 +615,7 @@ export const LawsAndChecklistsTab: React.FC = () => {
 
                         <button
                           type="button"
-                          onClick={() => copyCitation(hit)}
+                          onClick={() => copyCitation(hit, false)}
                           className="inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2.5 py-1 text-xs font-semibold text-[#11151C] hover:border-[#0E223D]"
                         >
                           {copiedKey === hit.key ? (
@@ -576,6 +627,15 @@ export const LawsAndChecklistsTab: React.FC = () => {
                               <Copy className="h-3 w-3" /> 复制引文
                             </>
                           )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => copyCitation(hit, true)}
+                          className="inline-flex items-center gap-1 rounded border border-[#D8D1C3] bg-white px-2 py-1 text-[11px] font-medium text-slate-600 hover:border-[#0E223D] hover:text-[#0E223D]"
+                          title="附带发布文号、离线核验日期与国家法律法规数据库核验链接一并复制"
+                        >
+                          {copiedKey === `${hit.key}:meta` ? '已含源复制' : '规范引注'}
                         </button>
 
                         <button

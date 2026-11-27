@@ -1,13 +1,15 @@
 /**
- * Local-only multi-template draft & long-material persistence for SPC 2025 Element-Style Pleadings.
+ * Local-only multi-template & per-case isolated draft persistence for SPC 2025 Element-Style Pleadings.
  *
  * Fixes:
- * 1. A -> B -> A template switching loss: stores an isolated draft per `templateId` so switching
- *    templates NEVER wipes filled fields on previous templates.
+ * 1. A -> B -> A template switching loss AND Case A -> Case B cross-case draft bleed:
+ *    stores isolated drafts keyed by `makeScopedSpcDraftKey(caseId, templateId)` so named
+ *    Case Pockets never share or overwrite each other's drafts.
  * 2. Silent 80,000-char sourceText truncation & swallowed QuotaExceededError: persists full
- *    untruncated workspace + per-template drafts in IndexedDB (with synchronous localStorage
- *    mirror when within quota) and surfaces explicit save status ('saving' | 'saved' | 'error').
- * 3. Portable local draft JSON export/import so lawyers can manually download/restore drafts anytime.
+ *    untruncated workspace + per-case/template drafts in IndexedDB (with synchronous localStorage
+ *    flush on pagehide/unmount) and surfaces explicit save status ('saving' | 'saved' | 'error').
+ * 3. Complete async IndexedDB + localStorage purge helper (`purgeAllSpcDraftStorage`) for shared-device
+ *    account switching so zero residual drafts survive across lawyers.
  */
 
 import {
@@ -22,7 +24,8 @@ import type { RedactionMapping } from '../types/toolbox';
 export const LEGACY_DRAFT_STORAGE_KEY = 'spc2025_elements_doc_draft_v2';
 export const MULTI_DRAFTS_STORAGE_KEY = 'spc2025_drafts_by_tpl_v3';
 
-const IDB_NAME = 'spc2025_single_workspace_db_v1';
+export const SPC_SINGLE_WORKSPACE_IDB_NAME = 'spc2025_single_workspace_db_v1';
+const IDB_NAME = SPC_SINGLE_WORKSPACE_IDB_NAME;
 const IDB_STORE = 'workspace';
 const IDB_KEY = 'current_v3';
 
@@ -31,6 +34,7 @@ export interface PersistedSpcDraftBundle {
   schemaVersion: 3;
   exportedAt: string;
   activeTemplateId: string;
+  activeCaseId?: string;
   draftsByTemplate: Record<string, OfficialSpcDraftState>;
   sourceText: string;
   companionCourt?: string;
@@ -38,6 +42,7 @@ export interface PersistedSpcDraftBundle {
 
 export interface PersistedSpcIdbState {
   activeTemplateId: string;
+  activeCaseId?: string;
   draftsByTemplate: Record<string, OfficialSpcDraftState>;
   sourceText: string;
   autoRedact: boolean;
@@ -53,13 +58,42 @@ export interface PersistedSpcIdbState {
   updatedAt: number;
 }
 
+/**
+ * Builds a case-isolated storage key:
+ * - Unassigned (`caseId` empty) -> `${templateId}` (100% backward-compatible with v1.8/v1.9 unassigned drafts)
+ * - Bound to a Case Pocket (`caseId` non-empty) -> `${caseId}::${templateId}` (strictly isolated per case!)
+ */
+export function makeScopedSpcDraftKey(
+  caseId: string | null | undefined,
+  templateId: string
+): string {
+  const cleanCase = String(caseId || '').trim();
+  return cleanCase ? `${cleanCase}::${templateId}` : templateId;
+}
+
+export function extractTemplateIdFromDraftKey(scopedKey: string): string {
+  const idx = scopedKey.lastIndexOf('::');
+  return idx >= 0 ? scopedKey.slice(idx + 2) : scopedKey;
+}
+
+export function isDemoSampleDraft(draft: OfficialSpcDraftState | null | undefined): boolean {
+  if (!draft) return false;
+  if ((draft.signerName || '').includes('虚构样例')) return true;
+  for (const val of Object.values(draft.rowValues || {})) {
+    if (typeof val === 'string' && val.includes('【虚构演示样例】')) {
+      return true;
+    }
+  }
+  return Boolean(draft.isDemoSample);
+}
+
 export function hydrateSingleSpcDraft(
   tpl: OfficialSpcTemplate,
   raw: Partial<OfficialSpcDraftState> | null | undefined
 ): OfficialSpcDraftState {
   const base = createInitialSpcDraft(tpl);
   if (!raw || typeof raw !== 'object') return base;
-  return {
+  const hydrated: OfficialSpcDraftState = {
     ...base,
     ...raw,
     templateId: tpl.id,
@@ -69,6 +103,8 @@ export function hydrateSingleSpcDraft(
     excludedRowIds: Array.isArray(raw.excludedRowIds) ? raw.excludedRowIds : [],
     attachmentRows: { ...base.attachmentRows, ...(raw.attachmentRows || {}) },
   };
+  hydrated.isDemoSample = isDemoSampleDraft(hydrated);
+  return hydrated;
 }
 
 export function hasNonEmptySpcDraft(
@@ -89,32 +125,47 @@ export function hasNonEmptySpcDraft(
   return false;
 }
 
+/**
+ * Pure state transition helper for switching templates OR switching Case Pockets
+ * without losing drafts or leaking Case A's draft into Case B!
+ */
 export function switchSpcTemplatePreservingDrafts(params: {
   currentDraft: OfficialSpcDraftState | null;
   draftsByTemplate: Record<string, OfficialSpcDraftState>;
   nextTpl: OfficialSpcTemplate;
+  currentCaseId?: string | null;
+  nextCaseId?: string | null;
 }): {
   nextDraft: OfficialSpcDraftState;
   nextDraftsByTemplate: Record<string, OfficialSpcDraftState>;
   restoredExisting: boolean;
 } {
-  const { currentDraft, draftsByTemplate, nextTpl } = params;
+  const { currentDraft, draftsByTemplate, nextTpl, currentCaseId = '', nextCaseId } = params;
+  const targetCaseId = nextCaseId !== undefined ? nextCaseId : currentCaseId;
   const updatedMap: Record<string, OfficialSpcDraftState> = { ...draftsByTemplate };
+
   if (currentDraft && currentDraft.templateId) {
-    updatedMap[currentDraft.templateId] = currentDraft;
+    const curKey = makeScopedSpcDraftKey(currentCaseId, currentDraft.templateId);
+    updatedMap[curKey] = {
+      ...currentDraft,
+      isDemoSample: isDemoSampleDraft(currentDraft),
+    };
   }
-  const existingForTarget = updatedMap[nextTpl.id];
+
+  const targetKey = makeScopedSpcDraftKey(targetCaseId, nextTpl.id);
+  const existingForTarget = updatedMap[targetKey];
   if (existingForTarget) {
     const hydrated = hydrateSingleSpcDraft(nextTpl, existingForTarget);
-    updatedMap[nextTpl.id] = hydrated;
+    updatedMap[targetKey] = hydrated;
     return {
       nextDraft: hydrated,
       nextDraftsByTemplate: updatedMap,
       restoredExisting: hasNonEmptySpcDraft(nextTpl, hydrated),
     };
   }
+
   const fresh = createInitialSpcDraft(nextTpl);
-  updatedMap[nextTpl.id] = fresh;
+  updatedMap[targetKey] = fresh;
   return {
     nextDraft: fresh,
     nextDraftsByTemplate: updatedMap,
@@ -122,14 +173,34 @@ export function switchSpcTemplatePreservingDrafts(params: {
   };
 }
 
-export function loadInitialSpcDraftsFromLocalStorage(corpus: SpcTemplateCorpus): {
+export function hydrateDraftMapForCorpus(
+  rawMap: Record<string, Partial<OfficialSpcDraftState>> | null | undefined,
+  corpus: SpcTemplateCorpus
+): Record<string, OfficialSpcDraftState> {
+  const out: Record<string, OfficialSpcDraftState> = {};
+  if (!rawMap || typeof rawMap !== 'object') return out;
+  for (const [scopedKey, rawDraft] of Object.entries(rawMap)) {
+    if (!rawDraft) continue;
+    const tplId = extractTemplateIdFromDraftKey(scopedKey);
+    const tpl = corpus.templates.find((t) => t.id === tplId);
+    if (tpl) {
+      out[scopedKey] = hydrateSingleSpcDraft(tpl, rawDraft);
+    }
+  }
+  return out;
+}
+
+export function loadInitialSpcDraftsFromLocalStorage(
+  corpus: SpcTemplateCorpus,
+  activeCaseId = ''
+): {
   activeDraft: OfficialSpcDraftState;
   draftsByTemplate: Record<string, OfficialSpcDraftState>;
 } {
   const defaultTpl =
     corpus.templates.find((t) => t.displayName === '买卖合同纠纷民事起诉状') ||
     corpus.templates[0];
-  const map: Record<string, OfficialSpcDraftState> = {};
+  let map: Record<string, OfficialSpcDraftState> = {};
   let activeId = defaultTpl.id;
 
   try {
@@ -139,14 +210,7 @@ export function loadInitialSpcDraftsFromLocalStorage(corpus: SpcTemplateCorpus):
         activeTemplateId?: string;
         drafts?: Record<string, Partial<OfficialSpcDraftState>>;
       };
-      if (parsed?.drafts && typeof parsed.drafts === 'object') {
-        for (const [tid, rawDraft] of Object.entries(parsed.drafts)) {
-          const tpl = corpus.templates.find((t) => t.id === tid);
-          if (tpl && rawDraft) {
-            map[tid] = hydrateSingleSpcDraft(tpl, rawDraft);
-          }
-        }
-      }
+      map = hydrateDraftMapForCorpus(parsed?.drafts, corpus);
       if (parsed?.activeTemplateId && corpus.templates.some((t) => t.id === parsed.activeTemplateId)) {
         activeId = parsed.activeTemplateId;
       }
@@ -155,6 +219,7 @@ export function loadInitialSpcDraftsFromLocalStorage(corpus: SpcTemplateCorpus):
     // ignore corrupt v3 map
   }
 
+  // Seamless migration from legacy v2 single-draft storage key into unassigned scope only
   try {
     const legacyRaw = localStorage.getItem(LEGACY_DRAFT_STORAGE_KEY);
     if (legacyRaw) {
@@ -174,8 +239,9 @@ export function loadInitialSpcDraftsFromLocalStorage(corpus: SpcTemplateCorpus):
   }
 
   const targetTpl = corpus.templates.find((t) => t.id === activeId) || defaultTpl;
-  const activeDraft = map[targetTpl.id] || createInitialSpcDraft(targetTpl);
-  map[targetTpl.id] = activeDraft;
+  const scopedKey = makeScopedSpcDraftKey(activeCaseId, targetTpl.id);
+  const activeDraft = map[scopedKey] || createInitialSpcDraft(targetTpl);
+  map[scopedKey] = activeDraft;
 
   return { activeDraft, draftsByTemplate: map };
 }
@@ -214,6 +280,59 @@ export async function loadSpcWorkspaceIdb(): Promise<PersistedSpcIdbState | null
   }
 }
 
+/**
+ * Synchronous localStorage flush used on pagehide / beforeunload / component unmount
+ * so rapid edits within the 260ms debounce window are never lost.
+ */
+export function flushSpcWorkspaceToLocalStorageSync(
+  state: PersistedSpcIdbState,
+  legacyWorkspaceLsKey: string
+): boolean {
+  let ok = false;
+  try {
+    localStorage.setItem(
+      MULTI_DRAFTS_STORAGE_KEY,
+      JSON.stringify({
+        activeTemplateId: state.activeTemplateId,
+        activeCaseId: state.activeCaseId || '',
+        drafts: state.draftsByTemplate,
+      })
+    );
+    const curKey = makeScopedSpcDraftKey(state.activeCaseId, state.activeTemplateId);
+    const cur = state.draftsByTemplate[curKey];
+    if (cur && !state.activeCaseId) {
+      localStorage.setItem(LEGACY_DRAFT_STORAGE_KEY, JSON.stringify(cur));
+    }
+    ok = true;
+  } catch {
+    ok = false;
+  }
+  try {
+    localStorage.setItem(
+      legacyWorkspaceLsKey,
+      JSON.stringify({
+        activeMode: 'form',
+        sourceText: state.sourceText.length > 60_000 ? '' : state.sourceText,
+        sourceTextInIdb: state.sourceText.length > 60_000,
+        autoRedact: state.autoRedact,
+        extractModelSlot: state.extractModelSlot,
+        showAiCopilot: state.showAiCopilot,
+        aiRefineTurns: state.aiRefineTurns,
+        aiSessionMappings: state.aiSessionMappings,
+        companionCourt: state.companionCourt,
+        companionAuthScope: state.companionAuthScope,
+        companionPreserveAmt: state.companionPreserveAmt,
+        companionInvestigateOrg: state.companionInvestigateOrg,
+        editingBatchItemId: state.editingBatchItemId,
+        updatedAt: state.updatedAt,
+      })
+    );
+  } catch {
+    // ignore quota on auxiliary workspace metadata
+  }
+  return ok;
+}
+
 export async function saveSpcWorkspacePersisted(
   state: PersistedSpcIdbState,
   legacyWorkspaceLsKey: string
@@ -241,11 +360,13 @@ export async function saveSpcWorkspacePersisted(
       MULTI_DRAFTS_STORAGE_KEY,
       JSON.stringify({
         activeTemplateId: state.activeTemplateId,
+        activeCaseId: state.activeCaseId || '',
         drafts: state.draftsByTemplate,
       })
     );
-    const cur = state.draftsByTemplate[state.activeTemplateId];
-    if (cur) {
+    const curKey = makeScopedSpcDraftKey(state.activeCaseId, state.activeTemplateId);
+    const cur = state.draftsByTemplate[curKey];
+    if (cur && !state.activeCaseId) {
       localStorage.setItem(LEGACY_DRAFT_STORAGE_KEY, JSON.stringify(cur));
     }
     lsDraftOk = true;
@@ -288,8 +409,57 @@ export async function saveSpcWorkspacePersisted(
   };
 }
 
+export function deleteIdbDatabaseVerified(
+  dbName: string,
+  timeoutMs = 1500
+): Promise<{ deleted: boolean; blocked: boolean }> {
+  return new Promise((resolve) => {
+    if (typeof indexedDB === 'undefined' || typeof indexedDB.deleteDatabase !== 'function') {
+      resolve({ deleted: true, blocked: false });
+      return;
+    }
+    let settled = false;
+    const finish = (res: { deleted: boolean; blocked: boolean }) => {
+      if (settled) return;
+      settled = true;
+      resolve(res);
+    };
+    const timer = setTimeout(() => finish({ deleted: false, blocked: true }), timeoutMs);
+    try {
+      const req = indexedDB.deleteDatabase(dbName);
+      req.onsuccess = () => {
+        clearTimeout(timer);
+        finish({ deleted: true, blocked: false });
+      };
+      req.onerror = () => {
+        clearTimeout(timer);
+        finish({ deleted: false, blocked: false });
+      };
+      req.onblocked = () => {
+        clearTimeout(timer);
+        finish({ deleted: false, blocked: true });
+      };
+    } catch {
+      clearTimeout(timer);
+      finish({ deleted: false, blocked: false });
+    }
+  });
+}
+
+export async function purgeAllSpcDraftStorage(): Promise<{ ok: boolean; blocked: boolean }> {
+  try {
+    localStorage.removeItem(LEGACY_DRAFT_STORAGE_KEY);
+    localStorage.removeItem(MULTI_DRAFTS_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+  const res = await deleteIdbDatabaseVerified(IDB_NAME);
+  return { ok: !res.blocked, blocked: res.blocked };
+}
+
 export function serializeSpcDraftBundle(params: {
   activeTemplateId: string;
+  activeCaseId?: string;
   draftsByTemplate: Record<string, OfficialSpcDraftState>;
   sourceText: string;
   companionCourt?: string;
@@ -299,6 +469,7 @@ export function serializeSpcDraftBundle(params: {
     schemaVersion: 3,
     exportedAt: new Date().toISOString(),
     activeTemplateId: params.activeTemplateId,
+    activeCaseId: params.activeCaseId || '',
     draftsByTemplate: params.draftsByTemplate,
     sourceText: params.sourceText,
     companionCourt: params.companionCourt,
@@ -308,7 +479,8 @@ export function serializeSpcDraftBundle(params: {
 
 export function parseSpcDraftBundle(
   rawJson: string,
-  corpus: SpcTemplateCorpus
+  corpus: SpcTemplateCorpus,
+  targetCaseId = ''
 ): {
   activeDraft: OfficialSpcDraftState;
   draftsByTemplate: Record<string, OfficialSpcDraftState>;
@@ -319,17 +491,16 @@ export function parseSpcDraftBundle(
   if (parsed?.app !== 'spc2025-draft-bundle' || !parsed.draftsByTemplate) {
     throw new Error('非要素式文书草稿备份文件（.json）');
   }
-  const map: Record<string, OfficialSpcDraftState> = {};
-  for (const [tid, d] of Object.entries(parsed.draftsByTemplate)) {
-    const tpl = corpus.templates.find((t) => t.id === tid);
-    if (tpl && d) {
-      map[tid] = hydrateSingleSpcDraft(tpl, d);
-    }
-  }
+  const map = hydrateDraftMapForCorpus(parsed.draftsByTemplate, corpus);
   const fallbackTpl =
     corpus.templates.find((t) => t.id === parsed.activeTemplateId) || corpus.templates[0];
-  const activeDraft = map[fallbackTpl.id] || createInitialSpcDraft(fallbackTpl);
-  map[fallbackTpl.id] = activeDraft;
+  const preferredKey = makeScopedSpcDraftKey(
+    targetCaseId || parsed.activeCaseId || '',
+    fallbackTpl.id
+  );
+  const activeDraft =
+    map[preferredKey] || map[fallbackTpl.id] || createInitialSpcDraft(fallbackTpl);
+  map[makeScopedSpcDraftKey(targetCaseId, fallbackTpl.id)] = activeDraft;
 
   return {
     activeDraft,

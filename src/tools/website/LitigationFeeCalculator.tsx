@@ -3,6 +3,12 @@ import { Link, useToolSearchParams as useSearchParams } from '../../components/T
 import { ArrowLeft, ArrowRight, Calculator, Check, Copy, Info, RotateCcw, Send } from 'lucide-react';
 import { trackEvent } from '../../components/ToolboxBridgeLink';
 import { copyToClipboard } from '../../lib/clipboard';
+import {
+  calcExecutionFee as calcExecution,
+  calcPreservationFee as calcPreservation,
+  calcPropertyFee as calcProperty,
+  calculateLitigationLifecycleFees,
+} from '../../lib/legalCalculators';
 import { ToolQuickRefSection as ToolSeoKnowledgeSection } from '../../components/ToolQuickRefSection';
 
 type CaseType =
@@ -28,81 +34,6 @@ const CASE_TYPES: { id: CaseType; label: string; shortLabel: string; hint: strin
   { id: 'nonProperty', label: '其他非财产案件', shortLabel: '其他非财产', hint: '每件交纳 50–100 元', supportsHalved: true },
 ];
 
-const PROPERTY_TIERS = [
-  { max: 10000, rate: 0, flat: 50, label: '不超过 1 万元' },
-  { max: 100000, rate: 0.025, label: '1 万 – 10 万元部分 (2.5%)' },
-  { max: 200000, rate: 0.02, label: '10 万 – 20 万元部分 (2.0%)' },
-  { max: 500000, rate: 0.015, label: '20 万 – 50 万元部分 (1.5%)' },
-  { max: 1000000, rate: 0.01, label: '50 万 – 100 万元部分 (1.0%)' },
-  { max: 2000000, rate: 0.009, label: '100 万 – 200 万元部分 (0.9%)' },
-  { max: 5000000, rate: 0.008, label: '200 万 – 500 万元部分 (0.8%)' },
-  { max: 10000000, rate: 0.007, label: '500 万 – 1,000 万元部分 (0.7%)' },
-  { max: 20000000, rate: 0.006, label: '1,000 万 – 2,000 万元部分 (0.6%)' },
-  { max: Infinity, rate: 0.005, label: '超过 2,000 万元部分 (0.5%)' },
-];
-
-function calcProperty(amount: number): { total: number; steps: string[] } {
-  if (amount <= 0) return { total: 50, steps: ['标的额不超过 1 万元：固定 50 元'] };
-  const steps: string[] = [];
-  let total = 50;
-  steps.push('0 – 1 万元部分：50.00 元');
-  let prev = 10000;
-  for (let i = 1; i < PROPERTY_TIERS.length; i++) {
-    const tier = PROPERTY_TIERS[i];
-    if (amount <= prev) break;
-    const part = Math.min(amount, tier.max) - prev;
-    const fee = part * tier.rate;
-    total += fee;
-    steps.push(`${tier.label}：${part.toLocaleString('zh-CN')} × ${(tier.rate * 100).toFixed(1)}% = ${fee.toFixed(2)} 元`);
-    prev = tier.max;
-  }
-  return { total, steps };
-}
-
-function calcExecution(amount: number): { total: number; steps: string[] } {
-  if (amount <= 0) return { total: 50, steps: ['无执行金额或不超过 1 万元：每件 50 – 500 元（按 50 元起计）'] };
-  const steps: string[] = [];
-  let total = 50;
-  steps.push('0 – 1 万元部分：50.00 元');
-  const tiers = [
-    { min: 10000, max: 500000, rate: 0.015, label: '1 万 – 50 万元部分 (1.5%)' },
-    { min: 500000, max: 5000000, rate: 0.01, label: '50 万 – 500 万元部分 (1.0%)' },
-    { min: 5000000, max: 10000000, rate: 0.005, label: '500 万 – 1,000 万元部分 (0.5%)' },
-    { min: 10000000, max: Infinity, rate: 0.001, label: '超过 1,000 万元部分 (0.1%)' },
-  ];
-  for (const t of tiers) {
-    if (amount <= t.min) break;
-    const part = Math.min(amount, t.max) - t.min;
-    const fee = part * t.rate;
-    total += fee;
-    steps.push(`${t.label}：${part.toLocaleString('zh-CN')} × ${(t.rate * 100).toFixed(1)}% = ${fee.toFixed(2)} 元`);
-  }
-  return { total, steps };
-}
-
-function calcPreservation(amount: number): { total: number; steps: string[] } {
-  if (amount <= 1000) return { total: 30, steps: ['财产数额不超过 1,000 元或不涉及财产数额：30 元'] };
-  const steps: string[] = ['0 – 1,000 元部分：30.00 元'];
-  let total = 30;
-  if (amount > 1000) {
-    const p1 = Math.min(amount, 100000) - 1000;
-    const f1 = p1 * 0.01;
-    total += f1;
-    steps.push(`1,000 元 – 10 万元部分 (1%)：${f1.toFixed(2)} 元`);
-  }
-  if (amount > 100000) {
-    const p2 = amount - 100000;
-    const f2 = p2 * 0.005;
-    total += f2;
-    steps.push(`超过 10 万元部分 (0.5%)：${f2.toFixed(2)} 元`);
-  }
-  if (total > 5000) {
-    steps.push(`累计 ${total.toFixed(2)} 元，依法定 5,000 元封顶`);
-    total = 5000;
-  }
-  return { total, steps };
-}
-
 const fmtYuan = (n: number) =>
   `¥ ${n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -117,10 +48,25 @@ export const LitigationFeeCalculator: React.FC = () => {
   const [hasAmount, setHasAmount] = useState(true);
   const [halved, setHalved] = useState(false);
   const [adminSpecial, setAdminSpecial] = useState(false);
+  const [showCustomSubBases, setShowCustomSubBases] = useState(false);
+  const [customPreservationStr, setCustomPreservationStr] = useState('');
+  const [customAppealStr, setCustomAppealStr] = useState('');
+  const [customExecutionStr, setCustomExecutionStr] = useState('');
   const [copied, setCopied] = useState(false);
 
   const rawNum = Math.max(0, Number(amountStr.replace(/,/g, '')) || 0);
   const amountYuan = unit === 'wan' ? rawNum * 10000 : rawNum;
+
+  const parseSubAmountYuan = (rawStr: string): number | null => {
+    const clean = rawStr.trim().replace(/,/g, '');
+    if (!clean) return null;
+    const n = Number(clean);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return unit === 'wan' ? n * 10000 : n;
+  };
+  const customPreservationYuan = parseSubAmountYuan(customPreservationStr);
+  const customAppealYuan = parseSubAmountYuan(customAppealStr);
+  const customExecutionYuan = parseSubAmountYuan(customExecutionStr);
 
   const currentTypeObj = CASE_TYPES.find((c) => c.id === caseType) || CASE_TYPES[0];
 
@@ -135,13 +81,12 @@ export const LitigationFeeCalculator: React.FC = () => {
           headline: fmtYuan(finalFee),
           sub: halved ? `全额 ${total.toFixed(2)} 元，简易程序/调解/撤诉减半` : '一审普通程序全额受理费',
           steps,
-          fullLifecycle: {
-            firstFull: total,
-            firstHalf: total / 2,
-            preservation: calcPreservation(amountYuan).total,
-            appeal: total,
-            execution: calcExecution(amountYuan).total,
-          },
+          fullLifecycle: calculateLitigationLifecycleFees({
+            claimAmountYuan: amountYuan,
+            preservationAmountYuan: customPreservationYuan,
+            appealAmountYuan: customAppealYuan,
+            executionAmountYuan: customExecutionYuan,
+          }),
         };
       }
       case 'intellectual': {
@@ -159,13 +104,12 @@ export const LitigationFeeCalculator: React.FC = () => {
           headline: fmtYuan(finalFee),
           sub: halved ? `有争议金额全额 ${total.toFixed(2)} 元，简易/调解/撤诉减半` : '知识产权涉案金额按财产案件标准全额计收',
           steps,
-          fullLifecycle: {
-            firstFull: total,
-            firstHalf: total / 2,
-            preservation: calcPreservation(amountYuan).total,
-            appeal: total,
-            execution: calcExecution(amountYuan).total,
-          },
+          fullLifecycle: calculateLitigationLifecycleFees({
+            claimAmountYuan: amountYuan,
+            preservationAmountYuan: customPreservationYuan,
+            appealAmountYuan: customAppealYuan,
+            executionAmountYuan: customExecutionYuan,
+          }),
         };
       }
       case 'labor':
@@ -246,7 +190,17 @@ export const LitigationFeeCalculator: React.FC = () => {
           fullLifecycle: null,
         };
     }
-  }, [caseType, amountYuan, hasAmount, halved, adminSpecial, currentTypeObj.supportsHalved]);
+  }, [
+    caseType,
+    amountYuan,
+    hasAmount,
+    halved,
+    adminSpecial,
+    currentTypeObj.supportsHalved,
+    customPreservationYuan,
+    customAppealYuan,
+    customExecutionYuan,
+  ]);
 
   const showAmountInput =
     caseType === 'property' ||
@@ -263,8 +217,9 @@ export const LitigationFeeCalculator: React.FC = () => {
       `当前估算结果：${result.headline}（${result.sub}）`,
     ];
     if (result.fullLifecycle) {
+      const fl = result.fullLifecycle;
       lines.push(
-        `全流程参考：一审全额 ${result.fullLifecycle.firstFull.toFixed(2)} 元｜简易/调解减半 ${result.fullLifecycle.firstHalf.toFixed(2)} 元｜财产保全费 ${result.fullLifecycle.preservation.toFixed(2)} 元｜二审上诉费 ${result.fullLifecycle.appeal.toFixed(2)} 元｜执行申请费 ${result.fullLifecycle.execution.toFixed(2)} 元`
+        `全流程参考：一审全额 ${fl.firstFull.toFixed(2)} 元｜简易/调解减半 ${fl.firstHalf.toFixed(2)} 元｜财产保全费 ${fl.preservation.toFixed(2)} 元（${fl.preservationIsCustom ? `保全标的 ${fl.preservationBase.toLocaleString('zh-CN')} 元` : '按一审同额预估'}）｜二审上诉费 ${fl.appeal.toFixed(2)} 元（${fl.appealIsCustom ? `不服上诉标的 ${fl.appealBase.toLocaleString('zh-CN')} 元` : '按一审同额预估'}）｜执行申请费 ${fl.execution.toFixed(2)} 元（${fl.executionIsCustom ? `执行标的 ${fl.executionBase.toLocaleString('zh-CN')} 元` : '按一审同额预估'}）`
       );
     }
     return lines.filter(Boolean).join('\n');
@@ -515,11 +470,68 @@ export const LitigationFeeCalculator: React.FC = () => {
 
               {/* Full-Lifecycle Litigation Cost Overview Card */}
               {result.fullLifecycle && (
-                <div className="mt-5 border border-[#E4DFD4] bg-[#FAF9F6] p-5">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#9A773E]">
-                    ONE-STOP BUDGET · 同标的额诉讼全流程官费一览
-                  </p>
-                  <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="mt-5 border border-[#E4DFD4] bg-[#FAF9F6] p-5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#9A773E]">
+                      ONE-STOP BUDGET · 诉讼全流程官费一览
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShowCustomSubBases((v) => !v)}
+                      className="rounded border border-[#D4CEC2] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#0E223D] hover:border-[#0E223D]"
+                    >
+                      {showCustomSubBases ? '收起分项标的' : '单独设上诉 / 保全 / 执行标的额'}
+                    </button>
+                  </div>
+
+                  {showCustomSubBases && (
+                    <div className="grid grid-cols-1 gap-2.5 rounded border border-[#E4DFD4] bg-white p-3 sm:grid-cols-3 text-xs">
+                      <label className="block">
+                        <span className="text-[11px] font-semibold text-slate-600">
+                          申请财产保全金额（{unit === 'wan' ? '万元' : '元'}）
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={customPreservationStr}
+                          onChange={(e) => setCustomPreservationStr(e.target.value)}
+                          placeholder="留空按一审同额预估"
+                          className="mt-1 w-full rounded-[2px] border border-[#D8D2C6] bg-[#FAF9F6] px-2.5 py-1.5 font-num font-bold"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-[11px] font-semibold text-slate-600">
+                          二审上诉不服金额（{unit === 'wan' ? '万元' : '元'}）
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={customAppealStr}
+                          onChange={(e) => setCustomAppealStr(e.target.value)}
+                          placeholder="部分上诉时填入不服金额"
+                          className="mt-1 w-full rounded-[2px] border border-[#D8D2C6] bg-[#FAF9F6] px-2.5 py-1.5 font-num font-bold"
+                        />
+                      </label>
+                      <label className="block">
+                        <span className="text-[11px] font-semibold text-slate-600">
+                          申请强制执行金额（{unit === 'wan' ? '万元' : '元'}）
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={customExecutionStr}
+                          onChange={(e) => setCustomExecutionStr(e.target.value)}
+                          placeholder="留空按一审同额预估"
+                          className="mt-1 w-full rounded-[2px] border border-[#D8D2C6] bg-[#FAF9F6] px-2.5 py-1.5 font-num font-bold"
+                        />
+                      </label>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                     <div className="border border-[#EAE5DB] bg-white p-3">
                       <p className="text-[11px] text-slate-400">一审普通 / 减半</p>
                       <p className="mt-1 font-num text-sm font-bold text-[#11151C]">
@@ -534,21 +546,33 @@ export const LitigationFeeCalculator: React.FC = () => {
                       <p className="mt-1 font-num text-sm font-bold text-[#11151C]">
                         {fmtYuan(result.fullLifecycle.preservation)}
                       </p>
-                      <p className="text-[10px] text-slate-400">5,000 元封顶</p>
+                      <p className="text-[10px] text-slate-400">
+                        {result.fullLifecycle.preservationIsCustom
+                          ? `按保全 ${(result.fullLifecycle.preservationBase / 10000).toFixed(2)} 万计`
+                          : '按一审同额预估 · 5,000封顶'}
+                      </p>
                     </div>
                     <div className="border border-[#EAE5DB] bg-white p-3">
                       <p className="text-[11px] text-slate-400">二审上诉费</p>
                       <p className="mt-1 font-num text-sm font-bold text-[#11151C]">
                         {fmtYuan(result.fullLifecycle.appeal)}
                       </p>
-                      <p className="text-[10px] text-slate-400">按上诉标的计</p>
+                      <p className="text-[10px] text-slate-400">
+                        {result.fullLifecycle.appealIsCustom
+                          ? `按不服 ${(result.fullLifecycle.appealBase / 10000).toFixed(2)} 万计`
+                          : '按一审同额预估（部分上诉请单填）'}
+                      </p>
                     </div>
                     <div className="border border-[#EAE5DB] bg-white p-3">
                       <p className="text-[11px] text-slate-400">申请执行费</p>
                       <p className="mt-1 font-num text-sm font-bold text-[#11151C]">
                         {fmtYuan(result.fullLifecycle.execution)}
                       </p>
-                      <p className="text-[10px] text-slate-400">被执行人负担</p>
+                      <p className="text-[10px] text-slate-400">
+                        {result.fullLifecycle.executionIsCustom
+                          ? `按执行 ${(result.fullLifecycle.executionBase / 10000).toFixed(2)} 万计`
+                          : '按一审同额预估 · 被执行人负担'}
+                      </p>
                     </div>
                   </div>
                 </div>

@@ -43,6 +43,7 @@ import {
 } from '../src/data/elementsComplaintTemplates.ts';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import {
   buildElementsComplaintDocxBytes,
@@ -82,6 +83,7 @@ import {
   buildLocalSyncSnapshot,
   encodeSyncSnapshotForUpload,
   decodeSyncSnapshotFromCloud,
+  resetLocalUserWorkspaceForAccountSwitch,
 } from '../src/lib/cloudSync.ts';
 import {
   verifyActivationCode,
@@ -99,13 +101,27 @@ import {
   calculateWorkdayInterval,
   computeLegalDeadline,
 } from '../src/lib/legalCalendar.ts';
-import { evaluatePrivateLendingCap } from '../src/lib/lprEngine.ts';
 import {
+  computeLprAndDelayInterest,
+  evaluatePrivateLendingCap,
+} from '../src/lib/lprEngine.ts';
+import {
+  calculateLaborSeveranceTenure,
+  calculateLitigationLifecycleFees,
+  calculatePersonalInjuryRecoverable,
+} from '../src/lib/legalCalculators.ts';
+import {
+  isDemoSampleDraft,
+  makeScopedSpcDraftKey,
   parseSpcDraftBundle,
   serializeSpcDraftBundle,
   switchSpcTemplatePreservingDrafts,
 } from '../src/lib/spcDraftStorage.ts';
-import { classifyGlobalStatuteQuery, searchStatuteEntries } from '../src/lib/statuteSearch.ts';
+import {
+  classifyGlobalStatuteQuery,
+  searchStatuteEntries,
+  searchStatuteEntriesDetailed,
+} from '../src/lib/statuteSearch.ts';
 import { describeAiReadiness } from '../src/lib/pwaUpdate.ts';
 import { toolboxStorage } from '../src/lib/storage.ts';
 import { splitPdfIntoVerifiedVolumes } from '../src/lib/pdfVolumeSplitter.ts';
@@ -1695,6 +1711,323 @@ test('v1.9: Global/Home statute router, 3-state AI readiness, and two-tier Servi
   assert.ok(swSrc.includes('RETRY_OFFLINE_PACKS'), 'SW must support explicit offline pack retry');
   const ctxSrc = fs.readFileSync(path.resolve(__dirname, '../src/context/ToolboxContext.tsx'), 'utf8');
   assert.ok(!ctxSrc.includes("behavior: 'smooth'"), 'Cross-tab navigation must not force smooth scroll');
+});
+
+test('v1.9.1 Adversarial Legal & Isolation Regression Suite (Appraisal 5d, Account/Case Isolation, 0% Fault, Cross-Month Tenure, Art.31 LPR, Sub-Fees, Strict Statutes & SW Sub-HTML)', async () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+  // 1. P0: Asset appraisal report written objection = 5 days (法释〔2018〕15号第22条) & date-inversion conflict guard
+  const appraisalDl = computeLegalDeadline({
+    startYmd: '2026-11-18',
+    days: 5,
+    rolloverMode: 'civil_statutory',
+    warnDaysBefore: 2,
+  });
+  assert.equal(appraisalDl?.finalEndYmd, '2026-11-23', '2026-11-18 + 5d must land on Monday 2026-11-23');
+  assert.equal(appraisalDl?.warnYmd, '2026-11-21');
+
+  const deadlineToolSrc = fs.readFileSync(
+    path.resolve(__dirname, '../src/tools/extra/PreservationDeadlineTool.tsx'),
+    'utf8'
+  );
+  assert.ok(!deadlineToolSrc.includes('exec_objection_15d'), 'Merged 15d appraisal preset must be removed');
+  assert.ok(deadlineToolSrc.includes('appraisal_report_obj_5d') && deadlineToolSrc.includes('法释〔2018〕15号'));
+
+  const invertedDl = computeLegalDeadline({
+    startYmd: '2026-11-18',
+    days: 5,
+    rolloverMode: 'civil_statutory',
+    manualDueYmd: '2026-11-15',
+  });
+  assert.equal(invertedDl?.hasDateConflict, true, 'Manual due date earlier than start date must flag conflict');
+  assert.equal(invertedDl?.verificationStatus, 'conflict_invalid');
+
+  // 2. P0: Account-switch purge wipes ALL v1.8/v1.9 keys + BOTH IndexedDBs & detects blocked IDB
+  const prevLs = globalThis.localStorage;
+  const prevSs = globalThis.sessionStorage;
+  const prevIdb = globalThis.indexedDB;
+  try {
+    const store = new Map([
+      ['spc2025_drafts_by_tpl_v3', '{"drafts":{"tpl1":{}}}'],
+      ['spc2025_elements_doc_draft_v2', '{"templateId":"tpl1"}'],
+      ['lawyer_local_custom_docx_templates_v1', '[{"id":"t1"}]'],
+      ['cn_lawyer_box_import_rollback_v1', '{"snap":1}'],
+      ['cn_lawyer_spc_workspace_v1', '{"sourceText":"secret"}'],
+      ['lf-mine', 'custom'],
+    ]);
+    globalThis.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    };
+    globalThis.sessionStorage = {
+      removeItem: () => {},
+    };
+    const deletedDbs = [];
+    globalThis.indexedDB = {
+      deleteDatabase: (name) => {
+        deletedDbs.push(name);
+        const req = {};
+        queueMicrotask(() => req.onsuccess && req.onsuccess());
+        return req;
+      },
+    };
+    const resClean = await resetLocalUserWorkspaceForAccountSwitch();
+    assert.equal(resClean.blocked, false);
+    assert.equal(store.size, 0, `Expected all localStorage keys wiped, remaining: ${[...store.keys()]}`);
+    assert.ok(deletedDbs.includes('spc2025_single_workspace_db_v1'));
+    assert.ok(deletedDbs.includes('cn_lawyer_spc_batch_db_v1'));
+
+    globalThis.indexedDB = {
+      deleteDatabase: () => {
+        const req = {};
+        queueMicrotask(() => req.onblocked && req.onblocked());
+        return req;
+      },
+    };
+    const resBlocked = await resetLocalUserWorkspaceForAccountSwitch();
+    assert.equal(resBlocked.blocked, true, 'Blocked IDB deletion must surface blocked=true');
+  } finally {
+    globalThis.localStorage = prevLs;
+    globalThis.sessionStorage = prevSs;
+    globalThis.indexedDB = prevIdb;
+  }
+
+  // 3. P0: Per-case SPC draft isolation (Case A vs Case B on same template) + Demo watermark detection + Brief strict caseId
+  const spcCorpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/spc-2025-templates.json'), 'utf8')
+  );
+  const tLoan = spcCorpus.templates.find((t) => t.displayName === '民间借贷纠纷民事起诉状');
+  assert.ok(tLoan);
+  const draftCaseA = createInitialSpcDraft(tLoan);
+  draftCaseA.signerName = '甲案件原告张某';
+  const switchedToB = switchSpcTemplatePreservingDrafts({
+    currentDraft: draftCaseA,
+    draftsByTemplate: {},
+    nextTpl: tLoan,
+    currentCaseId: 'case-A',
+    nextCaseId: 'case-B',
+  });
+  assert.equal(switchedToB.nextDraft.signerName, '', 'Case B must NEVER inherit Case A draft on same template');
+  assert.equal(
+    switchedToB.nextDraftsByTemplate[makeScopedSpcDraftKey('case-A', tLoan.id)]?.signerName,
+    '甲案件原告张某'
+  );
+  const switchedBackToA = switchSpcTemplatePreservingDrafts({
+    currentDraft: switchedToB.nextDraft,
+    draftsByTemplate: switchedToB.nextDraftsByTemplate,
+    nextTpl: tLoan,
+    currentCaseId: 'case-B',
+    nextCaseId: 'case-A',
+  });
+  assert.equal(switchedBackToA.restoredExisting, true);
+  assert.equal(switchedBackToA.nextDraft.signerName, '甲案件原告张某');
+
+  const demoDraft = createInitialSpcDraft(tLoan);
+  demoDraft.signerName = '杭州云栖示例商贸有限公司（虚构样例）';
+  assert.equal(isDemoSampleDraft(demoDraft), true);
+  demoDraft.signerName = '真实原告公司';
+  demoDraft.isDemoSample = false;
+  assert.equal(isDemoSampleDraft(demoDraft), false);
+
+  const homeSrc = fs.readFileSync(path.resolve(__dirname, '../src/pages/HomeTab.tsx'), 'utf8');
+  assert.ok(
+    homeSrc.includes('deadlines.filter((d) => d.caseId === activeCase.id)'),
+    'Case brief deadlines must strictly match d.caseId === activeCase.id'
+  );
+
+  // 4. P1: Personal injury 0% fault & motor compulsory no-fault cap
+  const zeroFaultGeneral = calculatePersonalInjuryRecoverable({
+    medicalCategoryTotal: 30000,
+    disabilityCategoryTotal: 200000,
+    faultPctInput: '0',
+    hasCompulsoryIns: false,
+  });
+  assert.equal(zeroFaultGeneral.faultPct, 0);
+  assert.equal(zeroFaultGeneral.estimatedRecoverable, 0, '0% fault without compulsory insurance must equal 0');
+
+  const zeroFaultMotor = calculatePersonalInjuryRecoverable({
+    medicalCategoryTotal: 30000,
+    disabilityCategoryTotal: 200000,
+    faultPctInput: '0',
+    hasCompulsoryIns: true,
+  });
+  assert.equal(zeroFaultMotor.compulsoryMode, 'no_fault_cap');
+  assert.equal(zeroFaultMotor.compulsoryPay, 19800, 'Motor no-fault compulsory cap = 1,800 med + 18,000 dis');
+  assert.equal(zeroFaultMotor.commercialOrPartyPay, 0);
+  assert.equal(zeroFaultMotor.estimatedRecoverable, 19800);
+
+  // 5. P1: Labor severance tenure end-of-month cross-month (2025-01-31 -> 2025-02-01 = 0.5N)
+  const crossMonthTenure = calculateLaborSeveranceTenure('2025-01-31', '2025-02-01');
+  assert.equal(crossMonthTenure.valid, true);
+  assert.equal(crossMonthTenure.nMonths, 0.5, '2025-01-31 to 2025-02-01 must be 0.5N, never 0N');
+  assert.equal(calculateLaborSeveranceTenure('2025-01-15', '2025-07-15').nMonths, 1.0);
+  assert.equal(calculateLaborSeveranceTenure('2025-06-01', '2025-05-01').hasDateConflict, true);
+
+  // 6. P1: LPR pre-2019 guard, Art.31 transitional lending cap (2020-01-01 + 2023-09-01 filing), and independent delay base
+  const pre2019Blocked = computeLprAndDelayInterest({
+    mode: 'lpr_floating',
+    principalYuan: 100000,
+    startDate: '2018-05-01',
+    endDate: '2020-01-01',
+    term: '1y',
+    multiplier: 1,
+    bps: 0,
+    customRate: 6,
+    preReformAnnualRate: null,
+    dayBasis: 365,
+    isPrivateLending: false,
+    contractDate: '2018-05-01',
+    includeDelay: false,
+    delayStartDate: '2020-01-01',
+  });
+  assert.equal(pre2019Blocked.requiresPreReformRate, true);
+  assert.equal(pre2019Blocked.segments.length, 0, 'Must never silently apply 4.25% to pre-2019-08-20');
+
+  const transNoFiling = evaluatePrivateLendingCap({
+    enabled: true,
+    contractDateIso: '2020-01-01',
+    testedAnnualRate: 16,
+  });
+  assert.equal(transNoFiling.status, 'needs_manual_review', 'Pre-2020-08-20 contract without filing date must not say within_cap');
+
+  const transWith2023Filing = evaluatePrivateLendingCap({
+    enabled: true,
+    contractDateIso: '2020-01-01',
+    filingDateIso: '2023-09-01',
+    testedAnnualRate: 16,
+  });
+  assert.equal(transWith2023Filing.status, 'exceeds_cap');
+  assert.equal(transWith2023Filing.capRate, 13.8, '2023-09-01 1y LPR 3.45% * 4 = 13.80%');
+
+  const delaySplit = computeLprAndDelayInterest({
+    mode: 'custom_rate',
+    principalYuan: 100000,
+    startDate: '2025-01-01',
+    endDate: '2025-08-21',
+    term: '1y',
+    multiplier: 1,
+    bps: 0,
+    customRate: 6,
+    dayBasis: 365,
+    isPrivateLending: false,
+    contractDate: '2025-01-01',
+    includeDelay: true,
+    delayStartDate: '2025-08-01',
+    delayBaseYuan: 60000,
+  });
+  assert.equal(delaySplit.delayDays, 20);
+  assert.ok(Math.abs(delaySplit.delayInterest - 210) < 1e-6, '60,000 * 0.000175 * 20d = 210.00');
+
+  // 7. P2: Litigation fee independent sub-amounts (100w claim, 10w appeal -> 2,300, 30w preservation -> 2,020)
+  const subFees = calculateLitigationLifecycleFees({
+    claimAmountYuan: 1_000_000,
+    appealAmountYuan: 100_000,
+    preservationAmountYuan: 300_000,
+  });
+  assert.equal(subFees.firstFull, 13800);
+  assert.equal(subFees.appeal, 2300);
+  assert.equal(subFees.preservation, 2020);
+
+  // 8. P1: Statute strict non-substitution ("公司法解释三第13条") & clause notice ("民法典 第1165条 第2款")
+  const lawsCorpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/laws-offline.json'), 'utf8')
+  );
+  const fullStatutes = [
+    ...lawsCorpus.civilArticles.map((a) => ({
+      key: `civil:${a.no}`,
+      lawTitle: '民法典',
+      fullLawTitle: '中华人民共和国民法典',
+      articleNo: a.no,
+      articleLabel: a.label,
+      breadcrumb: `${a.book} · ${a.chapter}`,
+      summary: a.summary,
+      text: a.text,
+    })),
+    ...lawsCorpus.companionDocs.flatMap((doc) =>
+      doc.items.map((it) => ({
+        key: `${doc.id}:${it.no}`,
+        lawTitle: doc.shortTitle,
+        fullLawTitle: doc.fullTitle || doc.shortTitle,
+        articleNo: it.no,
+        articleLabel: it.label,
+        breadcrumb: doc.docNo,
+        text: it.text,
+      }))
+    ),
+  ];
+  const uncollectedInterp = searchStatuteEntriesDetailed(fullStatutes, '公司法解释三第13条', 10);
+  assert.equal(uncollectedInterp.hits.length, 0, 'Must NEVER return《公司法》第13条 for 公司法解释三第13条');
+  assert.ok(uncollectedInterp.uncollectedLawNotice.includes('公司法解释三'));
+
+  const clauseQuery = searchStatuteEntriesDetailed(fullStatutes, '民法典 第1165条 第2款', 5);
+  assert.equal(clauseQuery.hits[0]?.key, 'civil:1165');
+  assert.ok(clauseQuery.clauseNotice.includes('第2款'));
+
+  // 9. P1: Service Worker queryless sub-HTML offline matching (never returns SPA index.html inside iframe!)
+  const swCode = fs.readFileSync(path.resolve(__dirname, '../public/sw.js'), 'utf8');
+  const listeners = {};
+  const cachedMap = new Map([
+    ['/cn-lawyer-ai-toolbox/index.html', new Response('<html>SPA_ROOT</html>', { status: 200 })],
+    [
+      '/cn-lawyer-ai-toolbox/tool-assets/lawyer-fee-workbench.html',
+      new Response('<html>FEE_WORKBENCH</html>', { status: 200 }),
+    ],
+  ]);
+  const sandbox = {
+    URL,
+    Request,
+    Response,
+    Promise,
+    self: {
+      location: { origin: 'https://qwertyzhu.github.io' },
+      registration: { scope: 'https://qwertyzhu.github.io/cn-lawyer-ai-toolbox/' },
+      clients: { matchAll: async () => [], claim: async () => {} },
+      skipWaiting: () => {},
+      addEventListener: (type, fn) => {
+        listeners[type] = fn;
+      },
+    },
+    caches: {
+      open: async () => ({ put: async () => {}, match: async () => null, add: async () => {} }),
+      keys: async () => [],
+      delete: async () => true,
+      match: async (reqOrUrl) => {
+        const key = typeof reqOrUrl === 'string' ? reqOrUrl : new URL(reqOrUrl.url).pathname + new URL(reqOrUrl.url).search;
+        const resp = cachedMap.get(key);
+        return resp ? resp.clone() : undefined;
+      },
+    },
+    fetch: async () => {
+      throw new Error('offline');
+    },
+  };
+  vm.runInNewContext(swCode, sandbox);
+
+  let subHtmlPromise = null;
+  listeners.fetch({
+    request: new Request(
+      'https://qwertyzhu.github.io/cn-lawyer-ai-toolbox/tool-assets/lawyer-fee-workbench.html?embed=1'
+    ),
+    respondWith: (p) => {
+      subHtmlPromise = p;
+    },
+  });
+  const subHtmlResp = await subHtmlPromise;
+  assert.equal(await subHtmlResp.text(), '<html>FEE_WORKBENCH</html>');
+
+  let missingSubHtmlPromise = null;
+  listeners.fetch({
+    request: new Request(
+      'https://qwertyzhu.github.io/cn-lawyer-ai-toolbox/tool-assets/uncached-subtool.html?embed=1'
+    ),
+    respondWith: (p) => {
+      missingSubHtmlPromise = p;
+    },
+  });
+  const missingResp = await missingSubHtmlPromise;
+  assert.equal(missingResp.status, 503, 'Uncached sub-HTML must return 503 card, never SPA_ROOT index.html');
+  assert.ok(!(await missingResp.text()).includes('SPA_ROOT'));
 });
 
 

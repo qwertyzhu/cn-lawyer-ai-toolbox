@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { trackEvent } from '../../components/ToolboxBridgeLink';
 import { copyToClipboard } from '../../lib/clipboard';
+import { calculateLaborSeveranceTenure } from '../../lib/legalCalculators';
 import { ToolQuickRefSection as ToolSeoKnowledgeSection } from '../../components/ToolQuickRefSection';
 
 type CompensationScenario = 'n' | 'n_plus_1' | '2n' | 'double_wage';
@@ -94,22 +95,22 @@ export const LaborCompensationCalculator: React.FC = () => {
   }, [regionName, tripleCap]);
 
   const tenure = useMemo(() => {
-    let totalMonths = 0;
     if (tenureMode === 'dates') {
-      const s = new Date(`${startDate}T00:00:00`);
-      const e = new Date(`${endDate}T00:00:00`);
-      if (!isNaN(s.getTime()) && !isNaN(e.getTime()) && e >= s) {
-        const yearsDiff = e.getFullYear() - s.getFullYear();
-        const monthsDiff = e.getMonth() - s.getMonth();
-        const daysDiff = e.getDate() - s.getDate();
-        totalMonths = Math.max(0, yearsDiff * 12 + monthsDiff + (daysDiff >= 0 ? 0 : -1) + (daysDiff > 0 ? 0.5 : 0));
-      }
-    } else {
-      const y = Math.max(0, Number(manualYears) || 0);
-      const m = Math.max(0, Number(manualMonths) || 0);
-      totalMonths = y * 12 + m;
+      const res = calculateLaborSeveranceTenure(startDate, endDate);
+      return {
+        valid: res.valid,
+        hasDateConflict: res.hasDateConflict,
+        warningText: res.warningText,
+        fullYears: res.fullYears,
+        remMonths: res.remMonths,
+        remDays: res.remDays,
+        nMonths: res.nMonths,
+      };
     }
 
+    const y = Math.max(0, Number(manualYears) || 0);
+    const m = Math.max(0, Number(manualMonths) || 0);
+    const totalMonths = y * 12 + m;
     const fullYears = Math.floor(totalMonths / 12);
     const remMonths = Math.max(0, totalMonths - fullYears * 12);
 
@@ -124,7 +125,15 @@ export const LaborCompensationCalculator: React.FC = () => {
       nMonths = fullYears + 1;
     }
 
-    return { totalMonths, fullYears, remMonths: Number(remMonths.toFixed(1)), nMonths };
+    return {
+      valid: true,
+      hasDateConflict: false,
+      warningText: '',
+      fullYears,
+      remMonths: Number(remMonths.toFixed(1)),
+      remDays: 0,
+      nMonths,
+    };
   }, [tenureMode, startDate, endDate, manualYears, manualMonths]);
 
   const calc = useMemo(() => {
@@ -159,7 +168,9 @@ export const LaborCompensationCalculator: React.FC = () => {
     const steps: string[] = [];
 
     steps.push(
-      `工龄折算（N）：累计工作 ${tenure.fullYears} 年 ${tenure.remMonths} 个月 → 依法折算为 ${tenure.nMonths} 个月${
+      `工龄折算（N）：累计工作 ${tenure.fullYears} 年 ${tenure.remMonths} 个月${
+        tenure.remDays > 0 ? ` ${tenure.remDays} 天` : ''
+      } → 依法折算为 ${tenure.nMonths} 个月${
         isCapped && tenure.nMonths > 12 ? `（触发高薪封顶，支付年限以 12 年封顶 → 实计 12 个月）` : ''
       }`
     );
@@ -387,9 +398,15 @@ export const LaborCompensationCalculator: React.FC = () => {
                     </label>
                   </div>
                 )}
-                <p className="text-[11px] text-[#9A773E]">
-                  当前依法折算系数：<strong className="font-num">N = {tenure.nMonths}</strong> 个月（不满6个月按0.5个月，满6个月不满1年按1个月）
-                </p>
+                {tenure.warningText ? (
+                  <p className="rounded border border-red-300 bg-red-50 px-3 py-1.5 text-[11px] font-semibold text-red-800">
+                    {tenure.warningText}
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-[#9A773E]">
+                    当前依法折算系数：<strong className="font-num">N = {tenure.nMonths}</strong> 个月（不满6个月按0.5个月，满6个月不满1年按1个月）
+                  </p>
+                )}
               </div>
             )}
 

@@ -9,6 +9,13 @@ import type {
   ScratchpadNote,
 } from '../types/toolbox';
 import { exportEncryptedSyncCode, importEncryptedSyncCode } from './cryptoVault.ts';
+import { LOCAL_CUSTOM_TEMPLATES_STORAGE_KEY } from './companionDocsBuilder.ts';
+import {
+  deleteIdbDatabaseVerified,
+  LEGACY_DRAFT_STORAGE_KEY,
+  MULTI_DRAFTS_STORAGE_KEY,
+  SPC_SINGLE_WORKSPACE_IDB_NAME,
+} from './spcDraftStorage.ts';
 import { toolboxStorage } from './storage.ts';
 
 const SYNC_PREFS_KEY = 'cn_lawyer_box_cloud_sync_prefs_v1';
@@ -277,7 +284,7 @@ export function applyCloudSyncSnapshot(
   return { providerCount, appliedByok, appliedWorkspace };
 }
 
-export function resetLocalUserWorkspaceForAccountSwitch(): void {
+export async function resetLocalUserWorkspaceForAccountSwitch(): Promise<{ blocked: boolean }> {
   const keysToClear = [
     'cn_lawyer_box_byok_v1',
     'cn_lawyer_box_calc_history_v1',
@@ -291,11 +298,17 @@ export function resetLocalUserWorkspaceForAccountSwitch(): void {
     'cn_lawyer_box_case_pockets_v1',
     'cn_lawyer_box_active_case_id_v1',
     'cn_lawyer_box_elements_complaint_draft_v1',
-    'spc2025_elements_doc_draft_v2',
+    'cn_lawyer_box_import_rollback_v1',
+    'cn_lawyer_box_local_tool_hits_v1',
+    LEGACY_DRAFT_STORAGE_KEY,
+    MULTI_DRAFTS_STORAGE_KEY,
+    LOCAL_CUSTOM_TEMPLATES_STORAGE_KEY,
     'cn_lawyer_spc_workspace_v1',
     'cn_lawyer_aihub_local_draft_v1',
     FEE_SHEET_KEY,
+    FEE_MINE_KEY,
     'lf-sheet-author-manual',
+    SYNC_PREFS_KEY,
     SYNC_META_KEY,
   ];
   for (const k of keysToClear) {
@@ -306,12 +319,17 @@ export function resetLocalUserWorkspaceForAccountSwitch(): void {
     }
   }
   try {
-    if (typeof indexedDB !== 'undefined') {
-      indexedDB.deleteDatabase('cn_lawyer_spc_batch_db_v1');
+    if (typeof sessionStorage !== 'undefined') {
+      sessionStorage.removeItem('spc2025_auto_load_demo_sample');
     }
   } catch {
     // ignore
   }
+  const [singleRes, batchRes] = await Promise.all([
+    deleteIdbDatabaseVerified(SPC_SINGLE_WORKSPACE_IDB_NAME),
+    deleteIdbDatabaseVerified('cn_lawyer_spc_batch_db_v1'),
+  ]);
+  return { blocked: singleRes.blocked || batchRes.blocked };
 }
 
 export async function encodeSyncSnapshotForUpload(
