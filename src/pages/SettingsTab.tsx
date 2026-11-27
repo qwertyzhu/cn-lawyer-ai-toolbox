@@ -220,11 +220,19 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
   const matchedPreset = AI_PROVIDER_PRESETS.find((p) => p.id === activeProvider?.presetId);
 
   const patchActiveProvider = (patch: Partial<AiProviderConfig>) => {
+    const resetsVerification =
+      ('apiKey' in patch || 'apiKeyEncrypted' in patch || 'baseUrl' in patch || 'protocol' in patch) &&
+      !('lastTestedAt' in patch);
+    const mergedPatch: Partial<AiProviderConfig> = resetsVerification
+      ? { ...patch, lastTestedAt: undefined }
+      : patch;
     const nextProviders = byok.providers.map((p) =>
-      p.id === activeProvider.id ? { ...p, ...patch } : p
+      p.id === activeProvider.id ? { ...p, ...mergedPatch } : p
     );
     updateByok({ ...byok, providers: nextProviders });
-    setTestResult(null);
+    if (!('lastTestedAt' in patch)) {
+      setTestResult(null);
+    }
   };
 
   const addProviderFromPreset = (presetId: string) => {
@@ -302,8 +310,10 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         keyToTest = await decryptWithPassphrase(activeProvider.apiKeyEncrypted, sessionUnlockedPin);
       }
       const msg = await testProviderConnectivity({ ...activeProvider, apiKey: keyToTest });
+      patchActiveProvider({ lastTestedAt: new Date().toISOString() });
       setTestResult({ ok: true, msg });
     } catch (err) {
+      patchActiveProvider({ lastTestedAt: undefined });
       setTestResult({
         ok: false,
         msg: err instanceof Error ? err.message : '连接测试失败',

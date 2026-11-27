@@ -770,7 +770,7 @@ export const ToolboxProvider: React.FC<{
     if (tab !== 'tools') {
       setActiveToolId(null);
     }
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo(0, 0);
   }, []);
 
   const openTool = useCallback(
@@ -782,7 +782,7 @@ export const ToolboxProvider: React.FC<{
       recordToolHit(toolId);
       setActiveTab('tools');
       setActiveToolId(toolId);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo(0, 0);
     },
     [recordToolHit]
   );
@@ -799,7 +799,7 @@ export const ToolboxProvider: React.FC<{
       setLawsSubView(subView);
       if (checklistId) setLawsChecklistId(checklistId);
       setActiveTab('laws');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo(0, 0);
     },
     [recordToolHit]
   );
@@ -816,7 +816,7 @@ export const ToolboxProvider: React.FC<{
         timestamp: Date.now(),
       });
       setActiveTab('ai');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo(0, 0);
       showToast(`已将「${sourceTitle}」结果载入 AI 智囊舱`);
     },
     [recordToolHit, showToast]

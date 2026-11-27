@@ -3,6 +3,7 @@ import { BookOpen, CheckSquare, Search, Sparkles, Wrench, X } from 'lucide-react
 import { useToolbox } from '../context/ToolboxContext';
 import { PRACTICE_CHECKLISTS } from '../data/checklists';
 import { AI_SPECIALISTS_REGISTRY, OFFLINE_TOOLS_REGISTRY } from '../data/toolRegistry';
+import { classifyGlobalStatuteQuery } from '../lib/statuteSearch';
 
 interface CommandSearchModalProps {
   open: boolean;
@@ -24,9 +25,9 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({ open, on
   }, [open, onClose]);
 
   const results = useMemo(() => {
-    const kw = q.trim().toLowerCase();
-    const numMatch = kw.match(/^第?\s*(\d{1,4})\s*条?$/);
-    const articleNum = numMatch ? Number(numMatch[1]) : null;
+    const rawTrimmed = q.trim();
+    const kw = rawTrimmed.toLowerCase();
+    const routeHint = classifyGlobalStatuteQuery(rawTrimmed);
 
     const matchedTools = OFFLINE_TOOLS_REGISTRY.filter(
       (t) =>
@@ -44,7 +45,7 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({ open, on
       (c) => !kw || c.title.toLowerCase().includes(kw) || c.tag.toLowerCase().includes(kw)
     );
 
-    return { articleNum, matchedTools, matchedAi, matchedChecklists };
+    return { routeHint, matchedTools, matchedAi, matchedChecklists };
   }, [q]);
 
   if (!open) return null;
@@ -68,8 +69,8 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({ open, on
             onKeyDown={(e) => {
               if (e.key !== 'Enter') return;
               e.preventDefault();
-              if (results.articleNum && results.articleNum <= 1260) {
-                openLawsSearch(String(results.articleNum), 'statutes');
+              if (results.routeHint.isArticleLookup) {
+                openLawsSearch(results.routeHint.statuteQuery, 'statutes');
                 onClose();
               } else if (results.matchedTools.length > 0 && q.trim()) {
                 openTool(results.matchedTools[0].id);
@@ -79,7 +80,7 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({ open, on
                 onClose();
               }
             }}
-            placeholder="秒搜：输“诉讼费”“LPR”“脱敏”“585”直达工具或民法典条文…"
+            placeholder="秒搜：输“585”“民法典第585条”“诉讼费”“PDF”直达离线条文或办案工具…"
             className="flex-1 bg-transparent text-sm text-[#11151C] focus:outline-none"
           />
           <button
@@ -92,11 +93,11 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({ open, on
         </div>
 
         <div className="max-h-[70vh] overflow-y-auto p-3 space-y-3">
-          {results.articleNum && results.articleNum <= 1260 && (
+          {results.routeHint.isArticleLookup && (
             <button
               type="button"
               onClick={() => {
-                openLawsSearch(String(results.articleNum), 'statutes');
+                openLawsSearch(results.routeHint.statuteQuery, 'statutes');
                 onClose();
               }}
               className="w-full flex items-center justify-between rounded-lg bg-[#0E223D] p-3 text-left text-white"
@@ -104,14 +105,14 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({ open, on
               <div className="flex items-center gap-2">
                 <BookOpen className="h-4 w-4 text-[#D1B27A]" />
                 <span className="text-xs sm:text-sm font-bold">
-                  直达离线法规库：查看第 {results.articleNum} 条原文及配套司解
+                  直达本地离线法规库：{results.routeHint.displayTargetLabel}
                 </span>
               </div>
               <span className="text-xs text-[#D1B27A]">回车查看 →</span>
             </button>
           )}
 
-          {q.trim() && !results.articleNum && (
+          {q.trim() && !results.routeHint.isArticleLookup && (
             <div className="space-y-1.5">
               <button
                 type="button"

@@ -105,7 +105,8 @@ import {
   serializeSpcDraftBundle,
   switchSpcTemplatePreservingDrafts,
 } from '../src/lib/spcDraftStorage.ts';
-import { searchStatuteEntries } from '../src/lib/statuteSearch.ts';
+import { classifyGlobalStatuteQuery, searchStatuteEntries } from '../src/lib/statuteSearch.ts';
+import { describeAiReadiness } from '../src/lib/pwaUpdate.ts';
 import { toolboxStorage } from '../src/lib/storage.ts';
 import { splitPdfIntoVerifiedVolumes } from '../src/lib/pdfVolumeSplitter.ts';
 
@@ -1620,6 +1621,80 @@ test('Workspace backup merges by ID without clobbering newer items, supports rol
   assert.equal(splitRes.oversizeVolumes.length, 1);
   assert.equal(splitRes.oversizeVolumes[0].pageStart, 1);
   assert.equal(splitRes.volumes[1].exceedsLimit, false);
+});
+
+test('v1.9: Global/Home statute router, 3-state AI readiness, and two-tier Service Worker progressive caching work consistently', () => {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const corpus = JSON.parse(
+    fs.readFileSync(path.resolve(__dirname, '../public/data/laws-offline.json'), 'utf8')
+  );
+  const items = corpus.civilArticles.map((a) => ({
+    key: `civil:${a.no}`,
+    lawTitle: '民法典',
+    fullLawTitle: '中华人民共和国民法典',
+    articleNo: a.no,
+    articleLabel: a.label,
+    breadcrumb: `${a.book} / ${a.chapter}`,
+    summary: a.summary,
+    text: a.text,
+  }));
+
+  // 1. HomeTab & CommandSearchModal shared query router lands on identical Civil Code Art. 585
+  for (const raw of ['585', '民法典第585条', '民法典第五百八十五条', '《民法典》第 585 条']) {
+    const route = classifyGlobalStatuteQuery(raw);
+    assert.equal(route.isArticleLookup, true, `Expected "${raw}" to be recognized as article lookup`);
+    const hits = searchStatuteEntries(items, route.statuteQuery, 5);
+    assert.equal(hits[0]?.key, 'civil:585', `Expected "${raw}" -> "${route.statuteQuery}" to rank civil:585 #1`);
+  }
+
+  // 2. Honest 3-state AI readiness never conflates stored key with verified connection
+  assert.equal(
+    describeAiReadiness({
+      id: '1',
+      presetId: 'deepseek',
+      name: 'DeepSeek（官方直连）',
+      protocol: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: '',
+      fastModel: 'deepseek-chat',
+      reasoningModel: 'deepseek-reasoner',
+    }).state,
+    'unconfigured'
+  );
+  assert.equal(
+    describeAiReadiness({
+      id: '1',
+      presetId: 'deepseek',
+      name: 'DeepSeek（官方直连）',
+      protocol: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'sk-untested-demo',
+      fastModel: 'deepseek-chat',
+      reasoningModel: 'deepseek-reasoner',
+    }).state,
+    'untested'
+  );
+  assert.equal(
+    describeAiReadiness({
+      id: '1',
+      presetId: 'deepseek',
+      name: 'DeepSeek（官方直连）',
+      protocol: 'openai',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'sk-verified-demo',
+      fastModel: 'deepseek-chat',
+      reasoningModel: 'deepseek-reasoner',
+      lastTestedAt: '2026-11-27T08:00:00.000Z',
+    }).state,
+    'verified'
+  );
+
+  // 3. Service Worker defers heavy packs out of blocking install & ToolboxContext avoids smooth-scroll jank
+  const swSrc = fs.readFileSync(path.resolve(__dirname, '../public/sw.js'), 'utf8');
+  assert.ok(swSrc.includes('warmDeferredOfflinePacks'), 'SW must warm heavy data/font packs asynchronously');
+  assert.ok(swSrc.includes('RETRY_OFFLINE_PACKS'), 'SW must support explicit offline pack retry');
+  const ctxSrc = fs.readFileSync(path.resolve(__dirname, '../src/context/ToolboxContext.tsx'), 'utf8');
+  assert.ok(!ctxSrc.includes("behavior: 'smooth'"), 'Cross-tab navigation must not force smooth scroll');
 });
 
 

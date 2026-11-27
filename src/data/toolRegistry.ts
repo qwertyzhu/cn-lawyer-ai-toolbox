@@ -114,7 +114,7 @@ export const OFFLINE_TOOLS_REGISTRY: OfflineToolMeta[] = [
     title: '法律期间与诉讼时效速算器',
     shortTitle: '期间与时效',
     kicker: '节假日顺延 · 黄金37天',
-    desc: '内置 2025–2026 法定节假日与调休安排，按《民法典》第203条自动顺延届满日，一键写入手机系统日历。',
+    desc: '内置 2025–2027 法定节假日与调休安排，按《民法典》第202–203条自动顺延届满日，一键写入手机系统日历。',
     iconName: 'CalendarDays',
     keywords: ['期间', '上诉期', '15天', '37天', '诉讼时效', '举证期', '节假日'],
   },

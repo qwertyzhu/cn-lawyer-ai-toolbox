@@ -12,34 +12,124 @@ const PRECACHE_ASSETS = [
   /*__CN_LAWYER_PRECACHE_LIST__*/
 ];
 
+const HEAVY_PACK_PATTERNS = [
+  'data/laws-offline.json',
+  'data/spc-2025-templates.json',
+  'fonts/ofl-noto-sans-sc-medium.woff2',
+];
+
+function isHeavyPackAsset(assetUrl) {
+  return HEAVY_PACK_PATTERNS.some((p) => String(assetUrl).endsWith(p));
+}
+
+async function broadcastPackState(payload) {
+  try {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of clients) {
+      c.postMessage({ type: 'OFFLINE_PACK_STATE', ...payload });
+    }
+  } catch {
+    // ignore
+  }
+}
+
+let warmingPacks = false;
+
+async function warmDeferredOfflinePacks() {
+  if (warmingPacks) return;
+  const scopeUrl = new URL('./', self.registration.scope);
+  const packList =
+    PRECACHE_ASSETS.length > 0
+      ? PRECACHE_ASSETS.filter(isHeavyPackAsset)
+      : HEAVY_PACK_PATTERNS.map((p) => new URL(`./${p}`, scopeUrl).pathname);
+
+  if (packList.length === 0) return;
+  warmingPacks = true;
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    let readyCount = 0;
+    for (const p of packList) {
+      const hit = await cache.match(p);
+      if (hit) readyCount += 1;
+    }
+    if (readyCount >= packList.length) {
+      await broadcastPackState({
+        status: 'ready',
+        readyCount,
+        totalCount: packList.length,
+      });
+      return;
+    }
+
+    await broadcastPackState({
+      status: 'syncing',
+      readyCount,
+      totalCount: packList.length,
+    });
+
+    for (const p of packList) {
+      const hit = await cache.match(p);
+      if (hit) continue;
+      try {
+        await cache.add(p);
+        readyCount += 1;
+        await broadcastPackState({
+          status: readyCount >= packList.length ? 'ready' : 'syncing',
+          readyCount,
+          totalCount: packList.length,
+        });
+      } catch {
+        // Interrupted / offline: leave accurate partial state for retry
+      }
+    }
+
+    await broadcastPackState({
+      status: readyCount >= packList.length ? 'ready' : 'partial',
+      readyCount,
+      totalCount: packList.length,
+    });
+  } finally {
+    warmingPacks = false;
+  }
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches
-      .open(CACHE_NAME)
-      .then(async (cache) => {
-        const scopeUrl = new URL('./', self.registration.scope);
-        const list =
-          PRECACHE_ASSETS.length > 0
-            ? PRECACHE_ASSETS
-            : [
-                scopeUrl.pathname,
-                new URL('./index.html', scopeUrl).pathname,
-                new URL('./manifest.webmanifest', scopeUrl).pathname,
-              ];
-        for (const asset of list) {
-          try {
-            await cache.add(asset);
-          } catch {
-            // Ignore optional asset cache miss during dev
-          }
-        }
-      })
+    caches.open(CACHE_NAME).then(async (cache) => {
+      const scopeUrl = new URL('./', self.registration.scope);
+      const fullList =
+        PRECACHE_ASSETS.length > 0
+          ? PRECACHE_ASSETS
+          : [
+              scopeUrl.pathname,
+              new URL('./index.html', scopeUrl).pathname,
+              new URL('./manifest.webmanifest', scopeUrl).pathname,
+            ];
+      // Tier 1: Only precache lightweight app-shell & offline calculator chunks during install
+      // so SW activates quickly without competing with first-screen bandwidth on 4.6 MB data packs.
+      const coreAssets = fullList.filter((a) => !isHeavyPackAsset(a));
+      const batchSize = 4;
+      for (let i = 0; i < coreAssets.length; i += batchSize) {
+        const slice = coreAssets.slice(i, i + batchSize);
+        await Promise.all(
+          slice.map(async (asset) => {
+            try {
+              await cache.add(asset);
+            } catch {
+              // Ignore optional asset miss
+            }
+          })
+        );
+      }
+    })
   );
 });
 
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
+  } else if (event.data && event.data.type === 'RETRY_OFFLINE_PACKS') {
+    event.waitUntil(warmDeferredOfflinePacks());
   }
 });
 
@@ -56,6 +146,7 @@ self.addEventListener('activate', (event) => {
         )
       )
       .then(() => self.clients.claim())
+      .then(() => warmDeferredOfflinePacks())
   );
 });
 
@@ -76,48 +167,38 @@ self.addEventListener('fetch', (event) => {
     url.pathname.endsWith('.html');
 
   if (isNav) {
+    const scopeIndex = new URL('./index.html', self.registration.scope).pathname;
     event.respondWith(
       fetch(new Request(event.request.url, { cache: 'no-cache', credentials: 'same-origin' }))
-        .then((res) => {
-          if (res && res.status === 200) {
-            const copy = res.clone();
-            caches.open(CACHE_NAME).then((c) => c.put(event.request, copy));
+        .then((resp) => {
+          if (resp && resp.status === 200) {
+            const clone = resp.clone();
+            caches.open(CACHE_NAME).then((c) => c.put(event.request, clone));
           }
-          return res;
+          return resp;
         })
-        .catch(() =>
-          caches
-            .match(event.request)
-            .then((c) => c || caches.match(url.pathname))
-            .then((c) => {
-              if (c) return c;
-              if (url.pathname.includes('/tool-assets/')) {
-                return new Response('离线缓存尚未就绪，请联网刷新一次页面', {
-                  status: 503,
-                  headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-                });
-              }
-              const scopeRoot = new URL('./', self.registration.scope).pathname;
-              const scopeIndex = new URL('./index.html', self.registration.scope).pathname;
-              return caches.match(scopeIndex).then((r) => r || caches.match(scopeRoot));
-            })
-        )
+        .catch(async () => {
+          const cached = await caches.match(event.request);
+          if (cached) return cached;
+          return (await caches.match(scopeIndex)) || Response.error();
+        })
     );
     return;
   }
 
-  // Cache-first with background refresh for hashed bundles, fonts, logos, and offline laws corpus
+  // Cache-First with background refresh for hashed JS/CSS/font/JSON corpus
   event.respondWith(
     caches.match(event.request).then((cached) => {
       const fetchPromise = fetch(event.request)
-        .then((res) => {
-          if (res && res.status === 200) {
-            const copy = res.clone();
+        .then((networkResp) => {
+          if (networkResp && networkResp.status === 200) {
+            const copy = networkResp.clone();
             caches.open(CACHE_NAME).then((c) => c.put(event.request, copy));
           }
-          return res;
+          return networkResp;
         })
         .catch(() => cached);
+
       return cached || fetchPromise;
     })
   );

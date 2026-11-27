@@ -107,6 +107,7 @@ export const SpcBatchPanel: React.FC<SpcBatchPanelProps> = ({
   const [batchError, setBatchError] = useState('');
   const [expandedMissingIds, setExpandedMissingIds] = useState<Record<string, boolean>>({});
   const [confirmTargetIds, setConfirmTargetIds] = useState<string[] | null>(null);
+  const [previewCaseIdx, setPreviewCaseIdx] = useState(0);
 
   const stats = useMemo(() => {
     let done = 0;
@@ -499,12 +500,14 @@ export const SpcBatchPanel: React.FC<SpcBatchPanelProps> = ({
         </div>
       )}
 
-      {/* Pre-Send Compliance Confirmation Box */}
+      {/* Pre-Send Compliance Confirmation Box (Supports Per-Case Payload Inspection) */}
       {confirmTargetIds && confirmTargetIds.length > 0 && !batchRunning && (() => {
-        const firstTarget = items.find((x) => confirmTargetIds.includes(x.id));
+        const confirmTargets = items.filter((x) => confirmTargetIds.includes(x.id));
+        const safeIdx = Math.min(previewCaseIdx, Math.max(0, confirmTargets.length - 1));
+        const currentTarget = confirmTargets[safeIdx];
         const sampleRedacted =
-          firstTarget && autoRedact
-            ? redactLegalText(firstTarget.sourceText, { existingMappings: [] })
+          currentTarget && autoRedact
+            ? redactLegalText(currentTarget.sourceText, { existingMappings: [] })
             : null;
         const sharedInstPreview =
           sharedInstruction.trim()
@@ -527,11 +530,14 @@ export const SpcBatchPanel: React.FC<SpcBatchPanelProps> = ({
                 ) : (
                   <ShieldAlert className="h-4 w-4 text-rose-600" />
                 )}
-                <span>批量外发前实际载荷预检（即将处理 {confirmTargetIds.length} 份起诉状）</span>
+                <span>批量外发前逐案实际载荷预检（共 {confirmTargets.length} 份起诉状）</span>
               </div>
               <button
                 type="button"
-                onClick={() => setConfirmTargetIds(null)}
+                onClick={() => {
+                  setConfirmTargetIds(null);
+                  setPreviewCaseIdx(0);
+                }}
                 className="text-slate-400 hover:text-slate-700"
               >
                 <X className="h-4 w-4" />
@@ -545,7 +551,7 @@ export const SpcBatchPanel: React.FC<SpcBatchPanelProps> = ({
               <li>
                 <strong>脱敏范围</strong>：
                 {autoRedact
-                  ? '已对「每份诉状正文」及「本批统一补充要求」同步执行按案隔离预脱敏（规则预脱敏不代表 100% 识别所有口语姓名/简称，请人工核对下方实际出站样本）。'
+                  ? '已对「每份诉状正文」及「本批统一补充要求」同步执行按案隔离预脱敏（可在下方切换任意案件核对完整出站文本）。'
                   : '⚠ 您当前已关闭自动脱敏，诉状正文与补充要求将以原文直接发送至第三方模型服务商！'}
               </li>
               <li>
@@ -553,9 +559,44 @@ export const SpcBatchPanel: React.FC<SpcBatchPanelProps> = ({
               </li>
             </ul>
 
-            <div className="rounded-lg border border-[#E5DEC9] bg-white p-2.5 space-y-1.5 text-[11px]">
-              <div className="font-bold text-[#0E223D]">
-                实际出站载荷样本预览（首案：{firstTarget?.caseLabel || '—'}）
+            <div className="rounded-lg border border-[#E5DEC9] bg-white p-2.5 space-y-2 text-[11px]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-bold text-[#0E223D]">
+                  逐案出站正文核对（第 {safeIdx + 1} / {confirmTargets.length} 案：{currentTarget?.caseLabel || '—'}）
+                </div>
+                {confirmTargets.length > 1 && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={safeIdx === 0}
+                      onClick={() => setPreviewCaseIdx((i) => Math.max(0, i - 1))}
+                      className="rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2 py-0.5 text-[11px] disabled:opacity-40"
+                    >
+                      上一案
+                    </button>
+                    <select
+                      value={safeIdx}
+                      onChange={(e) => setPreviewCaseIdx(Number(e.target.value))}
+                      className="max-w-[200px] rounded border border-[#D8D1C3] bg-white px-2 py-0.5 text-[11px] font-medium text-[#0E223D]"
+                    >
+                      {confirmTargets.map((it, idx) => (
+                        <option key={it.id} value={idx}>
+                          #{idx + 1} {it.caseLabel}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      disabled={safeIdx >= confirmTargets.length - 1}
+                      onClick={() =>
+                        setPreviewCaseIdx((i) => Math.min(confirmTargets.length - 1, i + 1))
+                      }
+                      className="rounded border border-[#D8D1C3] bg-[#FAF9F6] px-2 py-0.5 text-[11px] disabled:opacity-40"
+                    >
+                      下一案
+                    </button>
+                  </div>
+                )}
               </div>
               {sharedInstPreview && (
                 <div className="rounded bg-[#FAF8F3] px-2 py-1 text-slate-700">
@@ -563,10 +604,9 @@ export const SpcBatchPanel: React.FC<SpcBatchPanelProps> = ({
                   {sharedInstPreview}
                 </div>
               )}
-              {firstTarget && (
-                <pre className="max-h-32 overflow-y-auto whitespace-pre-wrap rounded bg-[#FAF9F6] p-2 font-sans text-[11px] leading-5 text-slate-700 border border-[#EFECE5]">
-                  {(sampleRedacted ? sampleRedacted.redactedText : firstTarget.sourceText).slice(0, 800)}
-                  {firstTarget.sourceText.length > 800 ? '\n…（后续按同一脱敏规则处理）' : ''}
+              {currentTarget && (
+                <pre className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded bg-[#FAF9F6] p-2 font-sans text-[11px] leading-5 text-slate-700 border border-[#EFECE5]">
+                  {sampleRedacted ? sampleRedacted.redactedText : currentTarget.sourceText}
                 </pre>
               )}
             </div>

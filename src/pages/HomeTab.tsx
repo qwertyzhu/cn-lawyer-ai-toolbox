@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ArrowUpRight,
   BellRing,
@@ -7,7 +7,9 @@ import {
   Building2,
   Copy,
   Download,
+  FileSpreadsheet,
   KeyRound,
+  Layers,
   Plus,
   Search,
   Smartphone,
@@ -24,6 +26,14 @@ import { AI_SPECIALISTS_REGISTRY, OFFLINE_TOOLS_REGISTRY } from '../data/toolReg
 import { copyToClipboard } from '../lib/clipboard';
 import { downloadMarkdownReportDocx } from '../lib/docxBuilder';
 import type { VerifiedLicenseInfo } from '../lib/licenseEngine';
+import {
+  describeAiReadiness,
+  getOfflinePackState,
+  onOfflinePackStateChange,
+  retryOfflinePacks,
+  type OfflinePackState,
+} from '../lib/pwaUpdate';
+import { classifyGlobalStatuteQuery } from '../lib/statuteSearch';
 
 interface HomeTabProps {
   license: VerifiedLicenseInfo;
@@ -54,7 +64,9 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
 
   const activeProvider =
     byok.providers.find((p) => p.id === byok.activeProviderId) || byok.providers[0];
-  const hasKey = Boolean(activeProvider?.apiKey || activeProvider?.apiKeyEncrypted);
+  const aiStatus = describeAiReadiness(activeProvider);
+  const [offlinePack, setOfflinePack] = useState<OfflinePackState>(() => getOfflinePackState());
+  useEffect(() => onOfflinePackStateChange(setOfflinePack), []);
   const [quickQuery, setQuickQuery] = useState('');
   const [showNewCaseForm, setShowNewCaseForm] = useState(false);
   const [newCaseTitle, setNewCaseTitle] = useState('');
@@ -173,36 +185,84 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
     e.preventDefault();
     const q = quickQuery.trim();
     if (!q) {
-      openLawsSearch('', 'ima_cloud');
+      openLawsSearch('', 'statutes');
       return;
     }
-    const artMatch = q.match(/^第?\s*(\d{1,4})\s*条?$/);
-    if (artMatch && Number(artMatch[1]) <= 1260) {
-      openLawsSearch(artMatch[1], 'statutes');
-      setQuickQuery('');
-      return;
-    }
-    openLawsSearch(q, isOnline ? 'ima_cloud' : 'statutes');
+    const route = classifyGlobalStatuteQuery(q);
+    openLawsSearch(route.statuteQuery, 'statutes');
     setQuickQuery('');
+  };
+
+  const handleCloudCaseLookup = () => {
+    const q = quickQuery.trim();
+    openLawsSearch(q, 'ima_cloud');
+    setQuickQuery('');
+  };
+
+  const handleOpenComplaintWithSample = () => {
+    try {
+      sessionStorage.setItem('spc2025_auto_load_demo_sample', '1');
+    } catch {
+      // ignore
+    }
+    openTool('elements-complaint');
   };
 
   return (
     <div className="py-4 sm:py-7 px-4 sm:px-6 mx-auto max-w-6xl space-y-5">
-      {/* Hero Workbench Card */}
+      {/* Hero Workbench Card: Zero-Key First-Minute Actions + Honest 3-State Pills */}
       <section className="rounded-xl bg-[#0E223D] p-4 sm:p-6 text-[#F6F4EF] border border-[#1A3761] shadow-md">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-1 text-[11px] font-medium">
-            {isOnline ? (
-              <>
-                <Wifi className="h-3 w-3 text-emerald-400" />
-                <span>在线就绪 · {hasKey ? activeProvider.name.split('（')[0] : '待配个人API密钥'}</span>
-              </>
+          <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-medium">
+            <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-2.5 py-0.5">
+              {isOnline ? (
+                <>
+                  <Wifi className="h-3 w-3 text-emerald-400" />
+                  <span>网络在线</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="h-3 w-3 text-amber-300" />
+                  <span>当前离线</span>
+                </>
+              )}
+            </span>
+
+            {offlinePack.status === 'ready' || offlinePack.status === 'dev_local' ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/70 border border-emerald-400/30 px-2.5 py-0.5 text-emerald-200">
+                <span>● 离线包已齐备（法条+模板）</span>
+              </span>
+            ) : offlinePack.status === 'syncing' || offlinePack.status === 'checking' ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-sky-950/70 border border-sky-400/30 px-2.5 py-0.5 text-sky-200">
+                <span>离线包缓存中 ({offlinePack.readyCount}/{offlinePack.totalCount})</span>
+              </span>
             ) : (
-              <>
-                <WifiOff className="h-3 w-3 text-amber-300" />
-                <span>离线模式 · 本地工具与4,111条法规全量可用</span>
-              </>
+              <button
+                type="button"
+                onClick={() => retryOfflinePacks()}
+                className="inline-flex items-center gap-1 rounded-full bg-amber-950/80 border border-amber-400/40 px-2.5 py-0.5 text-amber-200 hover:bg-amber-900"
+              >
+                <span>离线包未齐 ({offlinePack.readyCount}/{offlinePack.totalCount}) · 点此重试</span>
+              </button>
             )}
+
+            <button
+              type="button"
+              onClick={() => navigateTab('settings')}
+              className="inline-flex items-center gap-1 rounded-full bg-white/10 hover:bg-white/15 px-2.5 py-0.5 text-slate-200"
+              title={aiStatus.detailLabel}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  aiStatus.state === 'verified'
+                    ? 'bg-emerald-400'
+                    : aiStatus.state === 'untested'
+                    ? 'bg-amber-400'
+                    : 'bg-slate-400'
+                }`}
+              />
+              <span>{aiStatus.shortLabel}</span>
+            </button>
           </div>
 
           <button
@@ -210,118 +270,119 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
             onClick={onOpenInstallGuide}
             className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#D1B27A] hover:underline"
           >
-            <Smartphone className="h-3.5 w-3.5" /> 新手速通 · 装到桌面
+            <Smartphone className="h-3.5 w-3.5" /> 装到桌面/手机
           </button>
         </div>
 
         <h1 className="mt-3 font-display text-xl sm:text-2xl font-bold tracking-wide text-white">
           {SITE_CONFIG.heroTitle}
         </h1>
-        {SITE_CONFIG.authMode === 'license' ? (
-          <div className="mt-2 inline-flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md bg-[#091628]/90 border border-[#D1B27A]/35 px-3 py-1.5 text-xs">
-            <span className="font-semibold text-[#D1B27A]">
-              🏛️ 专属授权予：{license.holderName}（{license.role}）
-            </span>
-            <span className="text-slate-400 font-mono text-[11px]">
-              编号 {license.serialNo} ｜ {license.expiresAt ? `有效至 ${license.expiresAt}` : '长期有效'}
-            </span>
-          </div>
-        ) : (
-          <div className="mt-2 inline-flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md bg-[#091628]/90 border border-[#D1B27A]/35 px-3 py-1.5 text-xs">
-            <span className="font-semibold text-[#D1B27A]">
-              ⚖️ 开源免费 · 离线优先 · 全部数据仅存本机
-            </span>
-            <span className="text-slate-400 text-[11px]">
-              Apache-2.0 开源工作台 ｜ 免登录开箱即用
-            </span>
-          </div>
-        )}
+        <p className="mt-1 text-xs text-slate-300">
+          无需注册、无需配置 API Key 即可直接在浏览器本地完成最高法要素式起诉状导出、4,111 条法典检索与证据 PDF 分卷。
+        </p>
 
-        {/* One-Tap Hero Legal Lookup / IMA Q&A Bar */}
-        <form onSubmit={handleQuickLookup} className="mt-3.5 flex gap-2">
-          <div className="relative flex-1 min-w-0">
+        {/* Primary 3 Zero-Key First-Minute Entry Cards */}
+        <div className="mt-3.5 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          <div className="rounded-lg border border-[#D1B27A]/50 bg-[#091628]/90 p-3 flex flex-col justify-between gap-2">
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-white">
+                  <FileSpreadsheet className="h-4 w-4 text-[#D1B27A] flex-none" />
+                  写起诉状 / 答辩状
+                </span>
+                <span className="rounded bg-[#B89254]/20 px-1.5 py-0.5 text-[10px] font-semibold text-[#D1B27A]">
+                  113份原表
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] leading-4 text-slate-300">
+                最高法《法〔2025〕82号》官方表格，免密钥直接勾选导出标准 Word
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+              <button
+                type="button"
+                onClick={() => openTool('elements-complaint')}
+                className="rounded bg-[#B89254] hover:bg-[#C9A467] px-2.5 py-1 text-[11px] font-bold text-[#11151C]"
+              >
+                打开模板开填 →
+              </button>
+              <button
+                type="button"
+                onClick={handleOpenComplaintWithSample}
+                className="rounded border border-white/20 bg-white/5 hover:bg-white/10 px-2 py-1 text-[11px] text-slate-200"
+              >
+                载入虚构样例体验
+              </button>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => openLawsSearch('', 'statutes')}
+            className="rounded-lg border border-white/15 bg-white/8 hover:bg-white/12 p-3 text-left flex flex-col justify-between gap-2 transition-colors"
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-white">
+                  <BookOpen className="h-4 w-4 text-[#D1B27A] flex-none" />
+                  查离线法条与司解
+                </span>
+                <span className="text-[10px] font-semibold text-[#D1B27A]">4,111条</span>
+              </div>
+              <p className="mt-1 text-[11px] leading-4 text-slate-300">
+                支持「585」「民法典第585条」0毫秒直达原文及同屏司法解释
+              </p>
+            </div>
+            <span className="text-[11px] font-semibold text-[#D1B27A]">进入离线法条检索 →</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => openTool('evidence-pdf-toolkit')}
+            className="rounded-lg border border-white/15 bg-white/8 hover:bg-white/12 p-3 text-left flex flex-col justify-between gap-2 transition-colors"
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-white">
+                  <Layers className="h-4 w-4 text-[#D1B27A] flex-none" />
+                  处理证据 PDF 分卷
+                </span>
+                <span className="text-[10px] font-semibold text-[#D1B27A]">零上传</span>
+              </div>
+              <p className="mt-1 text-[11px] leading-4 text-slate-300">
+                截图合并转 A4、连续证据页码水印、10MB 网上立案字节实测切分
+              </p>
+            </div>
+            <span className="text-[11px] font-semibold text-[#D1B27A]">打开证据 PDF 工具箱 →</span>
+          </button>
+        </div>
+
+        {/* Unified Local-First Statute Search Bar + Separate Cloud Case Lookup Button */}
+        <form onSubmit={handleQuickLookup} className="mt-3.5 flex flex-wrap sm:flex-nowrap gap-2">
+          <div className="relative flex-1 min-w-[200px]">
             <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#D1B27A]" />
             <input
               type="search"
               value={quickQuery}
               onChange={(e) => setQuickQuery(e.target.value)}
-              placeholder="输条号秒查民法典（如 585），或输案由/问题查法典与案例库…"
+              placeholder="搜本地法条（如 585、民法典第585条、违约金调减）…"
               className="w-full rounded-lg border border-white/20 bg-[#091628]/85 pl-9 pr-3 py-2 text-xs text-white placeholder:text-slate-400 focus:border-[#D1B27A] focus:outline-none"
             />
           </div>
           <button
             type="submit"
-            className="flex-none rounded-lg bg-[#B89254] hover:bg-[#C9A467] px-3.5 py-2 text-xs font-bold text-[#11151C] whitespace-nowrap"
+            className="rounded-lg bg-[#B89254] hover:bg-[#C9A467] px-3.5 py-2 text-xs font-bold text-[#11151C] whitespace-nowrap"
           >
-            {isOnline ? 'AI查库 / 查条文' : '离线查条文'}
+            查本地法条
+          </button>
+          <button
+            type="button"
+            onClick={handleCloudCaseLookup}
+            className="rounded-lg border border-white/20 bg-white/10 hover:bg-white/15 px-3 py-2 text-xs font-semibold text-white whitespace-nowrap"
+          >
+            查云端案例库 (4.48万+)
           </button>
         </form>
-
-        {/* Quick Bridges */}
-        <div className="mt-3.5 grid grid-cols-2 sm:grid-cols-4 gap-2 pt-3 border-t border-white/12">
-          {SITE_CONFIG.oaUrl ? (
-            <a
-              href={SITE_CONFIG.oaUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-between rounded-lg bg-white/10 hover:bg-white/15 px-3 py-2 text-xs font-semibold text-white transition-colors"
-            >
-              <span className="inline-flex items-center gap-1.5 truncate">
-                <Building2 className="h-3.5 w-3.5 text-[#D1B27A] flex-none" />
-                {SITE_CONFIG.oaLabel}
-              </span>
-              <ArrowUpRight className="h-3.5 w-3.5 text-slate-400 flex-none" />
-            </a>
-          ) : (
-            <button
-              type="button"
-              onClick={() => openTool('elements-complaint')}
-              className="flex items-center justify-between rounded-lg bg-white/10 hover:bg-white/15 px-3 py-2 text-xs font-semibold text-white transition-colors"
-            >
-              <span className="inline-flex items-center gap-1.5 truncate">
-                <Building2 className="h-3.5 w-3.5 text-[#D1B27A] flex-none" />
-                要素式起诉状
-              </span>
-              <span className="text-[10px] text-[#D1B27A]">113份</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => openLawsSearch('', 'statutes')}
-            className="flex items-center justify-between rounded-lg bg-white/10 hover:bg-white/15 px-3 py-2 text-xs font-semibold text-white transition-colors"
-          >
-            <span className="inline-flex items-center gap-1.5 truncate">
-              <BookOpen className="h-3.5 w-3.5 text-[#D1B27A] flex-none" />
-              离线法典秒查
-            </span>
-            <span className="text-[10px] text-[#D1B27A]">4111条</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => openLawsSearch('', 'ima_cloud')}
-            className="flex items-center justify-between gap-1 rounded-lg bg-white/10 hover:bg-white/15 px-2.5 sm:px-3 py-2 text-xs font-semibold text-white transition-colors"
-          >
-            <span className="inline-flex items-center gap-1.5 min-w-0">
-              <Sparkles className="h-3.5 w-3.5 text-[#D1B27A] flex-none" />
-              <span className="truncate">IMA案例问答</span>
-            </span>
-            <span className="flex-none whitespace-nowrap text-[10px] text-emerald-300">4.48万+</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => navigateTab('settings')}
-            className="flex items-center justify-between rounded-lg bg-[#B89254] hover:bg-[#C8A366] px-3 py-2 text-xs font-bold text-[#11151C] transition-colors"
-          >
-            <span className="inline-flex items-center gap-1.5 truncate">
-              <KeyRound className="h-3.5 w-3.5 flex-none" />
-              {hasKey ? 'AI 密钥已就绪' : '配个人 API Key'}
-            </span>
-            <span>→</span>
-          </button>
-        </div>
       </section>
 
       {/* Active Preservation / Execution Deadline Alerts */}
@@ -412,32 +473,46 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
                 </div>
               </div>
               <div className="mt-2.5">
-                <div className="font-display text-sm font-bold text-[#11151C]">
+                <div className="font-display text-sm font-bold text-[#11151C] leading-snug line-clamp-2">
                   {tool.shortTitle}
                 </div>
-                <div className="mt-0.5 text-[11px] text-slate-500 truncate">{tool.kicker}</div>
+                <div className="mt-0.5 text-[11px] leading-4 text-slate-500 line-clamp-2">{tool.kicker}</div>
               </div>
             </button>
           ))}
         </div>
       </section>
 
-      {/* AI Specialists Quick Entry */}
+      {/* AI Specialists Quick Entry (Optional BYOK, positioned after offline core tools) */}
       <section>
-        <div className="flex items-center justify-between mb-2.5">
-          <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+          <div className="flex flex-wrap items-center gap-2">
             <Sparkles className="h-4 w-4 text-[#B89254]" />
             <h2 className="font-display text-base sm:text-lg font-bold text-[#11151C]">
-              BYOK 在线法律 AI 专席（自带密钥 · 自动脱敏）
+              AI 法律辅助专席
             </h2>
+            <span className="rounded-full border border-[#DED8CC] bg-white px-2 py-0.5 text-[11px] font-medium text-slate-600">
+              可选 · 需自配个人 API Key · 发送前自动预脱敏
+            </span>
           </div>
-          <button
-            type="button"
-            onClick={() => navigateTab('ai')}
-            className="text-xs font-semibold text-[#0E223D]"
-          >
-            进入 AI 智囊舱 →
-          </button>
+          <div className="flex items-center gap-3">
+            {aiStatus.state === 'unconfigured' && (
+              <button
+                type="button"
+                onClick={() => navigateTab('settings')}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-[#7A5922] hover:underline"
+              >
+                <KeyRound className="h-3.5 w-3.5" /> 配置 API Key
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => navigateTab('ai')}
+              className="text-xs font-semibold text-[#0E223D]"
+            >
+              进入 AI 智囊舱 →
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
@@ -448,13 +523,15 @@ export const HomeTab: React.FC<HomeTabProps> = ({ license, onOpenInstallGuide })
               onClick={() => sendToAi(sp.id, sp.shortTitle, '')}
               className="rounded-xl border border-[#DED8CC] bg-white p-3.5 text-left hover:border-[#B89254] transition-colors"
             >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-display text-sm font-bold text-[#0E223D] min-w-0 truncate">{sp.title}</span>
+              <div className="flex items-start justify-between gap-2">
+                <span className="font-display text-sm font-bold text-[#0E223D] leading-snug line-clamp-2">
+                  {sp.shortTitle}
+                </span>
                 <span className="flex-none whitespace-nowrap rounded bg-[#F3ECE0] px-2 py-0.5 text-[10px] font-semibold text-[#7A5922]">
                   {sp.badge}
                 </span>
               </div>
-              <p className="mt-1.5 text-xs leading-5 text-slate-600 line-clamp-2">{sp.desc}</p>
+              <p className="mt-1 text-xs leading-5 text-slate-600 line-clamp-2">{sp.desc}</p>
             </button>
           ))}
         </div>

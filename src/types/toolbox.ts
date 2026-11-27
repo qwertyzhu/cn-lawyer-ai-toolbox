@@ -48,6 +48,7 @@ export interface AiProviderConfig {
   reasoningModel: string;
   visionModel?: string;
   useCorsRelayFallback?: boolean;
+  lastTestedAt?: string;
 }
 
 export interface ByokSettings {

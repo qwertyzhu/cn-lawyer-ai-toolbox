@@ -236,3 +236,47 @@ export function searchStatuteEntries<T extends SearchableStatuteItem>(
     .slice(0, limit)
     .map((s) => s.item);
 }
+
+export interface GlobalQueryRouteHint {
+  parsed: ParsedStatuteQuery;
+  isArticleLookup: boolean;
+  statuteQuery: string;
+  displayTargetLabel: string;
+}
+
+/**
+ * Shared parser for HomeTab & CommandSearchModal (⌘K) so "585", "民法典第585条",
+ * and "民法典第五百八十五条" route identically to the local offline statute corpus.
+ */
+export function classifyGlobalStatuteQuery(rawInput: string): GlobalQueryRouteHint {
+  const parsed = parseStatuteQuery(rawInput);
+  if (!parsed.raw) {
+    return {
+      parsed,
+      isArticleLookup: false,
+      statuteQuery: '',
+      displayTargetLabel: '',
+    };
+  }
+
+  if (parsed.exactNo !== null) {
+    const lawPrefix = parsed.lawHint || parsed.keywords[0] || '';
+    const canonical = lawPrefix ? `${lawPrefix}第${parsed.exactNo}条` : String(parsed.exactNo);
+    const label = lawPrefix
+      ? `《${lawPrefix}》第 ${parsed.exactNo} 条`
+      : `第 ${parsed.exactNo} 条（优先《民法典》及常用单行法）`;
+    return {
+      parsed,
+      isArticleLookup: true,
+      statuteQuery: canonical,
+      displayTargetLabel: label,
+    };
+  }
+
+  return {
+    parsed,
+    isArticleLookup: false,
+    statuteQuery: parsed.raw,
+    displayTargetLabel: parsed.raw,
+  };
+}

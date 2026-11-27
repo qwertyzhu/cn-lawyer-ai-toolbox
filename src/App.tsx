@@ -13,7 +13,15 @@ import {
   Wrench,
   X,
 } from 'lucide-react';
-import { applyPwaUpdate, onPwaUpdateAvailable } from './lib/pwaUpdate';
+import {
+  applyPwaUpdate,
+  describeAiReadiness,
+  getOfflinePackState,
+  onOfflinePackStateChange,
+  onPwaUpdateAvailable,
+  retryOfflinePacks,
+  type OfflinePackState,
+} from './lib/pwaUpdate';
 import { BrandLogo } from './components/BrandLogo';
 import { CommandSearchModal } from './components/CommandSearchModal';
 import { InstallPwaSheet } from './components/InstallPwaSheet';
@@ -42,9 +50,17 @@ const SettingsTab = lazy(() =>
 const ToolsTab = lazy(() => import('./pages/ToolsTab').then((m) => ({ default: m.ToolsTab })));
 
 const TabLoadingFallback: React.FC = () => (
-  <div className="flex min-h-[45vh] items-center justify-center gap-2.5 text-xs font-medium text-slate-500">
-    <Loader2 className="h-4 w-4 animate-spin text-[#B89254]" />
-    <span>正在加载模块…</span>
+  <div className="mx-auto max-w-6xl px-4 sm:px-6 py-6 space-y-4 animate-pulse" aria-busy="true">
+    <div className="h-24 rounded-xl bg-white border border-[#E5DFD3]" />
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="h-28 rounded-xl bg-white border border-[#E5DFD3]" />
+      <div className="h-28 rounded-xl bg-white border border-[#E5DFD3]" />
+      <div className="h-28 rounded-xl bg-white border border-[#E5DFD3]" />
+    </div>
+    <div className="flex items-center justify-center gap-2 pt-2 text-xs text-slate-500">
+      <Loader2 className="h-3.5 w-3.5 animate-spin text-[#B89254]" />
+      <span>正在载入工作模块…</span>
+    </div>
   </div>
 );
 
@@ -66,19 +82,28 @@ const ToolboxShell: React.FC<{
   onLicenseChanged: (next: VerifiedLicenseInfo | null) => void;
   justAutoActivatedName?: string | null;
 }> = ({ license, onLicenseChanged, justAutoActivatedName }) => {
-  const { activeTab, navigateTab, openTool, isOnline, toastMessage, showToast } = useToolbox();
+  const { activeTab, navigateTab, openTool, isOnline, byok, toastMessage, showToast } = useToolbox();
   const [searchOpen, setSearchOpen] = useState(false);
   const [installOpen, setInstallOpen] = useState(false);
   const [weChatTipDismissed, setWeChatTipDismissed] = useState(false);
   const [pwaUpdateReady, setPwaUpdateReady] = useState(false);
   const [pwaBannerDismissed, setPwaBannerDismissed] = useState(false);
+  const [offlinePack, setOfflinePack] = useState<OfflinePackState>(() => getOfflinePackState());
   const isWeChat =
     typeof navigator !== 'undefined' && /MicroMessenger/i.test(navigator.userAgent);
+
+  const activeProvider =
+    byok.providers.find((p) => p.id === byok.activeProviderId) || byok.providers[0];
+  const aiStatus = describeAiReadiness(activeProvider);
 
   useEffect(() => {
     return onPwaUpdateAvailable((ready) => {
       if (ready) setPwaUpdateReady(true);
     });
+  }, []);
+
+  useEffect(() => {
+    return onOfflinePackStateChange((st) => setOfflinePack(st));
   }, []);
 
   useEffect(() => {
@@ -163,18 +188,60 @@ const ToolboxShell: React.FC<{
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 font-medium text-slate-300 pt-0.5">
-            {isOnline ? (
-              <>
-                <Wifi className="h-3.5 w-3.5 text-emerald-400" />
-                <span>网络在线（AI + 离线双就绪）</span>
-              </>
-            ) : (
-              <>
-                <WifiOff className="h-3.5 w-3.5 text-amber-300" />
-                <span>断网模式（本地全功能就绪）</span>
-              </>
-            )}
+          <div className="space-y-1.5 pt-0.5 text-[11px] text-slate-300">
+            <div className="flex items-center justify-between gap-1.5">
+              <span className="inline-flex items-center gap-1.5 font-medium">
+                {isOnline ? (
+                  <>
+                    <Wifi className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>网络在线</span>
+                  </>
+                ) : (
+                  <>
+                    <WifiOff className="h-3.5 w-3.5 text-amber-300" />
+                    <span>当前断网</span>
+                  </>
+                )}
+              </span>
+              {offlinePack.status === 'ready' || offlinePack.status === 'dev_local' ? (
+                <span className="rounded bg-emerald-950/70 border border-emerald-500/30 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                  离线包已齐备
+                </span>
+              ) : offlinePack.status === 'syncing' || offlinePack.status === 'checking' ? (
+                <span className="rounded bg-sky-950/70 border border-sky-400/30 px-1.5 py-0.5 text-[10px] text-sky-200">
+                  离线包缓存中 ({offlinePack.readyCount}/{offlinePack.totalCount})
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => retryOfflinePacks()}
+                  className="rounded bg-amber-950/80 border border-amber-400/40 px-1.5 py-0.5 text-[10px] text-amber-200 hover:bg-amber-900"
+                  title="点击重新下载尚未缓存齐备的离线法规/模板包"
+                >
+                  离线包 {offlinePack.readyCount}/{offlinePack.totalCount} · 重试
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => navigateTab('settings')}
+              className="w-full flex items-center justify-between rounded bg-white/5 hover:bg-white/10 px-2 py-1 text-[10.5px] text-left"
+              title={aiStatus.detailLabel}
+            >
+              <span className="inline-flex items-center gap-1.5 truncate">
+                <span
+                  className={`h-1.5 w-1.5 rounded-full flex-none ${
+                    aiStatus.state === 'verified'
+                      ? 'bg-emerald-400'
+                      : aiStatus.state === 'untested'
+                      ? 'bg-amber-400'
+                      : 'bg-slate-400'
+                  }`}
+                />
+                <span className="truncate">{aiStatus.shortLabel}</span>
+              </span>
+              <span className="text-[#D1B27A] flex-none">配置</span>
+            </button>
           </div>
         </div>
       </aside>

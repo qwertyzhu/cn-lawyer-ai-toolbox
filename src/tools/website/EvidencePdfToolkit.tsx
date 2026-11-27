@@ -634,39 +634,34 @@ export const EvidencePdfToolkit: React.FC = () => {
           </span>
         </div>
 
-        {/* Header */}
-        <div className="mt-2">
-          <div className="flex items-center gap-2.5 text-[11px] font-semibold uppercase tracking-[0.22em] text-[#9A773E]">
-            <ShieldCheck className="h-3.5 w-3.5 text-[#B89254]" />
-            <span>PRIVACY-FIRST LEGAL PDF TOOLKIT · 律师与当事人保密工具</span>
-          </div>
-          <h1 className="mt-3 font-display text-2xl font-bold text-[#11151C] sm:text-4xl">
-            律所保密证据 PDF 工具箱
-          </h1>
-          <p className="mt-2.5 max-w-3xl text-sm leading-7 text-slate-600">
-            专为中国诉讼举证与人民法院在线服务设计：微信截图/拍照一键压缩合并为 A4 立案 PDF、自动编连续证据页码、加“仅限诉讼举证使用”斜向水印与卷宗按页拆分。全程在您自己的电脑/手机浏览器本地运算，<strong className="font-semibold text-[#11151C]">绝不上传任何案卷文件</strong>。
-          </p>
-        </div>
-
-        {/* Obsidian Zero-Upload Guarantee Strip */}
-        <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-l-2 border-[#B89254] bg-[#11151C] px-5 py-3.5 text-xs text-slate-200">
-          <div className="flex items-center gap-2.5">
-            <Lock className="h-4 w-4 flex-none text-[#D1B27A]" />
-            <span>
-              <strong className="text-white">绝对保密架构：</strong>
-              告别把合同和证据上传给陌生在线 PDF 网站——您可以直接断开网络测试，本工具依然正常运行；关闭页面后内存立即清空。
+        {/* Unified Navy + Warm-White Tool Header */}
+        <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 shadow-xs space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-[#9A773E]">
+              <ShieldCheck className="h-3.5 w-3.5 text-[#B89254]" />
+              <span>纯本机浏览器处理 · 案卷零上传</span>
+            </div>
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-800">
+              <Lock className="h-3 w-3 text-emerald-700" /> 断网可用 · SIL OFL 1.1 开源字库
             </span>
           </div>
-          <span className="font-mono text-[11px] text-[#D1B27A]">SIL OFL 1.1 免费商用开源字库</span>
-        </div>
+          <div>
+            <h1 className="font-display text-xl sm:text-2xl font-bold text-[#11151C]">
+              证据 PDF 合并、页码水印与分卷工具箱
+            </h1>
+            <p className="mt-1 text-xs leading-5 text-slate-600">
+              适配诉讼举证与人民法院在线服务：微信截图/拍照一键压缩合并为 A4 立案 PDF、自动编连续证据页码、加斜向举证水印，以及按 10MB / 50MB 逐卷实测字节切分。
+            </p>
+          </div>
+        </section>
 
-        {/* Mode Tabs */}
-        <div className="mt-6 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {/* Mode Tabs (Aligned Rounded Navy Cards) */}
+        <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
           {(
             [
               ['merge_build', '证据合并 & 截图压图转 PDF', '支持 50MB+ 大卷宗合并，超限可按 10MB / 50MB 自动分卷', Layers],
               ['stamp_number', '一键加连续证据页码 & 水印', '自动编“第 X 页 / 共 Y 页”与斜向举证防滥用水印', Stamp],
-              ['split_extract', '大卷宗按页提取 / 按 10MB·50MB 自动分卷', '既支持按页码精准提取，也支持超大卷宗一键按体积分卷', Scissors],
+              ['split_extract', '大卷宗按页提取 / 按 10MB·50MB 分卷', '既支持按页码精准提取，也支持超大卷宗逐卷核验分卷', Scissors],
             ] as const
           ).map(([id, title, desc, Icon]) => (
             <button
@@ -677,25 +672,25 @@ export const EvidencePdfToolkit: React.FC = () => {
                 setErrorMsg('');
                 setStatusMsg('');
               }}
-              className={`rounded-[2px] border p-4 text-left transition-colors ${
+              className={`rounded-xl border p-3.5 text-left transition-colors ${
                 tab === id
-                  ? 'border-[#11151C] bg-[#11151C] text-[#F6F4EF]'
-                  : 'border-[#DED8CC] bg-white text-[#11151C] hover:border-[#11151C]'
+                  ? 'border-[#0E223D] bg-[#0E223D] text-[#F6F4EF] shadow-xs'
+                  : 'border-[#DED8CC] bg-white text-[#11151C] hover:border-[#0E223D]'
               }`}
             >
               <div className="flex items-center gap-2">
                 <Icon className={`h-4 w-4 ${tab === id ? 'text-[#D1B27A]' : 'text-[#9A773E]'}`} />
                 <span className="text-xs font-bold">{title}</span>
               </div>
-              <p className={`mt-1.5 text-[11px] leading-4 ${tab === id ? 'text-slate-300' : 'text-slate-500'}`}>{desc}</p>
+              <p className={`mt-1 text-[11px] leading-4 ${tab === id ? 'text-slate-300' : 'text-slate-500'}`}>{desc}</p>
             </button>
           ))}
         </div>
 
         {/* TAB 1: MERGE PDF & IMAGES */}
         {tab === 'merge_build' && (
-          <div className="mt-6 grid gap-6 lg:grid-cols-12">
-            <div className="min-w-0 lg:col-span-7 space-y-5 border border-[#DED8CC] bg-white p-5 sm:p-6">
+          <div className="mt-4 grid gap-5 lg:grid-cols-12">
+            <div className="min-w-0 lg:col-span-7 space-y-5 rounded-xl border border-[#DED8CC] bg-white p-5 sm:p-6 shadow-xs">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EFECE5] pb-4">
                 <div>
                   <h2 className="font-display text-base font-bold text-[#11151C]">步骤 1：添加 PDF 与图片证据并排序</h2>
@@ -789,7 +784,7 @@ export const EvidencePdfToolkit: React.FC = () => {
             </div>
 
             {/* Right: Compression & Optional Stamp Config */}
-            <div className="min-w-0 lg:col-span-5 space-y-5 border border-[#DED8CC] bg-white p-5 sm:p-6">
+            <div className="min-w-0 lg:col-span-5 space-y-5 rounded-xl border border-[#DED8CC] bg-white p-5 sm:p-6 shadow-xs">
               <h2 className="font-display text-base font-bold text-[#11151C] border-b border-[#EFECE5] pb-3.5">
                 步骤 2：画质瘦身与顺手加页码/水印
               </h2>
@@ -918,7 +913,7 @@ export const EvidencePdfToolkit: React.FC = () => {
                 type="button"
                 disabled={busy || queue.length === 0}
                 onClick={() => handleBuildMergedPdf()}
-                className="inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-[2px] bg-[#11151C] px-5 py-3 text-xs font-semibold text-[#F6F4EF] hover:bg-[#0E223D] disabled:opacity-50"
+                className="inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-lg bg-[#0E223D] px-5 py-3 text-xs font-bold text-[#F6F4EF] hover:bg-[#17345C] disabled:opacity-50"
               >
                 {busy ? <Loader2 className="h-4 w-4 animate-spin text-[#D1B27A]" /> : <Download className="h-4 w-4 text-[#D1B27A]" />}
                 <span>{busy ? statusMsg || '本地生成中...' : '一键在本地生成并下载规范证据 PDF'}</span>
@@ -929,8 +924,8 @@ export const EvidencePdfToolkit: React.FC = () => {
 
         {/* TAB 2: STAMP & NUMBER EXISTING PDF */}
         {tab === 'stamp_number' && (
-          <div className="mt-6 grid gap-6 lg:grid-cols-12">
-            <div className="min-w-0 lg:col-span-6 space-y-4 border border-[#DED8CC] bg-white p-5 sm:p-6">
+          <div className="mt-4 grid gap-5 lg:grid-cols-12">
+            <div className="min-w-0 lg:col-span-6 space-y-4 rounded-xl border border-[#DED8CC] bg-white p-5 sm:p-6 shadow-xs">
               <h2 className="font-display text-base font-bold text-[#11151C] border-b border-[#EFECE5] pb-3.5">
                 上传需要编页码或加水印的 PDF（仅本地读取）
               </h2>
@@ -1009,7 +1004,7 @@ export const EvidencePdfToolkit: React.FC = () => {
               </div>
             </div>
 
-            <div className="min-w-0 lg:col-span-6 space-y-4 border border-[#DED8CC] bg-white p-5 sm:p-6">
+            <div className="min-w-0 lg:col-span-6 space-y-4 rounded-xl border border-[#DED8CC] bg-white p-5 sm:p-6 shadow-xs">
               <div className="space-y-3 border border-[#E4DFD4] bg-[#FAF9F6] p-4 text-xs">
                 <label className="flex cursor-pointer items-center gap-2 font-bold text-[#11151C]">
                   <input
@@ -1071,7 +1066,7 @@ export const EvidencePdfToolkit: React.FC = () => {
                 type="button"
                 disabled={busy || !stampFile}
                 onClick={handleRunStampPdf}
-                className="inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-[2px] bg-[#11151C] px-5 py-3 text-xs font-semibold text-[#F6F4EF] hover:bg-[#0E223D] disabled:opacity-50"
+                className="inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-lg bg-[#0E223D] px-5 py-3 text-xs font-bold text-[#F6F4EF] hover:bg-[#17345C] disabled:opacity-50"
               >
                 {busy ? <Loader2 className="h-4 w-4 animate-spin text-[#D1B27A]" /> : <Download className="h-4 w-4 text-[#D1B27A]" />}
                 <span>{busy ? statusMsg : '立即在本地加页码/水印并下载'}</span>
@@ -1082,7 +1077,7 @@ export const EvidencePdfToolkit: React.FC = () => {
 
         {/* TAB 3: SPLIT / EXTRACT PAGES */}
         {tab === 'split_extract' && (
-          <div className="mt-6 border border-[#DED8CC] bg-white p-6 sm:p-8 space-y-5">
+          <div className="mt-4 rounded-xl border border-[#DED8CC] bg-white p-5 sm:p-6 space-y-5 shadow-xs">
             <h2 className="font-display text-base font-bold text-[#11151C] border-b border-[#EFECE5] pb-3.5">
               大卷宗 PDF 按页码拆分提取（本地瞬时完成）
             </h2>

@@ -744,6 +744,7 @@ export const ElementsComplaintTool: React.FC = () => {
   const [redactingImg, setRedactingImg] = useState<AiImageAttachment | null>(null);
 
   const [showAiCopilot, setShowAiCopilot] = useState(() => Boolean(initialWs?.showAiCopilot));
+  const [showTemplateBrowser, setShowTemplateBrowser] = useState(false);
   const [aiRefineInput, setAiRefineInput] = useState('');
   const [aiRefining, setAiRefining] = useState(false);
   const [aiRefineLog, setAiRefineLog] = useState('');
@@ -1014,8 +1015,106 @@ export const ElementsComplaintTool: React.FC = () => {
     byok.pinEnabled && activeProvider?.apiKeyEncrypted && !sessionUnlockedPin
   );
 
+  const focusRowInputById = (rowId: string, scroll = false) => {
+    window.requestAnimationFrame(() => {
+      const card = document.getElementById(`spc-row-card-${rowId}`);
+      const input = document.getElementById(`spc-row-input-${rowId}`) as
+        | HTMLTextAreaElement
+        | HTMLInputElement
+        | null;
+      if (scroll && card) {
+        card.scrollIntoView({ behavior: 'auto', block: 'center' });
+      }
+      if (input) {
+        input.focus({ preventScroll: !scroll });
+      }
+    });
+  };
+
+  const handleFillFictionalSample = (overrideTpl?: OfficialSpcTemplate) => {
+    const activeTpl = overrideTpl || tpl;
+    if (!activeTpl) return;
+    if (draft && hasNonEmptySpcDraft(activeTpl, draft)) {
+      pushUndoSnapshot(draft);
+    }
+    const sample = createInitialSpcDraft(activeTpl);
+    sample.signerName = '杭州云栖示例商贸有限公司（虚构样例）';
+    setCompanionCourt('杭州市西湖区人民法院');
+    let sampleTextIdx = 0;
+
+    for (const r of activeTpl.rows) {
+      if (r.roleTag === 'plaintiff_org' && r.templateText) {
+        const q = createEmptyPartyQuickFill();
+        q.name = '杭州云栖示例商贸有限公司';
+        q.creditCode = '91330106MA2DEMO01X';
+        q.legalRep = '林示例';
+        q.orgType = '有限责任公司';
+        q.ownershipNature = '民营';
+        q.domicile = '杭州市西湖区文三路100号示例大厦8层';
+        q.regAddress = '杭州市西湖区文三路100号示例大厦8层';
+        sample.rowValues[r.id] = applyPartyQuickFillToCellText(r.templateText, 'plaintiff_org', q);
+      } else if (r.roleTag === 'defendant_org' && r.templateText) {
+        const q = createEmptyPartyQuickFill();
+        q.name = '宁波海潮示例实业有限公司';
+        q.creditCode = '91330200MA2DEMO02Y';
+        q.legalRep = '陈示例';
+        q.orgType = '有限责任公司';
+        q.ownershipNature = '民营';
+        q.domicile = '宁波市鄞州区天童南路200号示例中心12层';
+        q.regAddress = '宁波市鄞州区天童南路200号示例中心12层';
+        sample.rowValues[r.id] = applyPartyQuickFillToCellText(r.templateText, 'defendant_org', q);
+      } else if (r.roleTag === 'mediation_benefit' && r.templateText) {
+        sample.rowValues[r.id] = setAllMediationBenefitChoices(r.templateText, true);
+      } else if (r.roleTag === 'mediation_agree' && r.templateText) {
+        sample.rowValues[r.id] = toggleCheckboxAtIndex(r.templateText, 0);
+      } else if (
+        (r.kind === 'field' || r.kind === 'full_input') &&
+        !r.roleTag &&
+        sampleTextIdx < 3
+      ) {
+        const base = r.templateText || '';
+        const tks = parseCheckboxTokens(base);
+        const checkedBase = tks.length > 0 ? toggleCheckboxAtIndex(base, 0) : base;
+        const demoNote =
+          sampleTextIdx === 0
+            ? '【虚构演示样例】判令被告支付尚欠款项人民币 380,000 元及逾期付款损失。'
+            : sampleTextIdx === 1
+            ? '【虚构演示样例】判令本案诉讼费用由被告承担。'
+            : '【虚构演示样例】2026年3月1日双方签订书面合同，原告已按约履行全部义务并经签收确认。';
+        sample.rowValues[r.id] = checkedBase ? `${checkedBase}\n${demoNote}` : demoNote;
+        sampleTextIdx += 1;
+      }
+    }
+
+    setDraft(sample);
+    setDraftsByTemplate((prev) => ({ ...prev, [activeTpl.id]: sample }));
+    setShowTemplateBrowser(false);
+    setActiveMode('form');
+    showToast(`已载入《${activeTpl.displayName}》虚构办案样例（可随时点“撤销上一轮”或“重置”恢复空白）`);
+    const firstField = activeTpl.rows.find((r) => r.kind === 'field' || r.kind === 'full_input');
+    if (firstField) focusRowInputById(firstField.id, false);
+  };
+
+  useEffect(() => {
+    if (!workspaceHydrated || !corpus || !tpl) return;
+    try {
+      if (sessionStorage.getItem('spc2025_auto_load_demo_sample') === '1') {
+        sessionStorage.removeItem('spc2025_auto_load_demo_sample');
+        handleFillFictionalSample(tpl);
+      }
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceHydrated, corpus]);
+
   const handleSelectTemplate = (nextTpl: OfficialSpcTemplate) => {
-    if (tpl && nextTpl.id === tpl.id) return;
+    if (tpl && nextTpl.id === tpl.id) {
+      setShowTemplateBrowser(false);
+      const sameFirst = nextTpl.rows.find((r) => r.kind === 'field' || r.kind === 'full_input');
+      if (sameFirst) focusRowInputById(sameFirst.id, false);
+      return;
+    }
     if (tpl) {
       setUndoStacksByTemplate((prev) => ({ ...prev, [tpl.id]: draftUndoStack }));
     }
@@ -1031,6 +1130,13 @@ export const ElementsComplaintTool: React.FC = () => {
     setAiRefineTurns([]);
     setAiSessionMappings([]);
     setEditingBatchItemId(null);
+    setShowTemplateBrowser(false);
+    setActiveMode('form');
+    const excludedSet = new Set(switched.nextDraft.excludedRowIds || []);
+    const firstField = nextTpl.rows.find(
+      (r) => (r.kind === 'field' || r.kind === 'full_input') && !excludedSet.has(r.id)
+    );
+    if (firstField) focusRowInputById(firstField.id, false);
     showToast(
       switched.restoredExisting
         ? `已切回《${nextTpl.displayName}》（已自动恢复您此前的本机填表草稿）`
@@ -2023,40 +2129,37 @@ ${JSON.stringify(editableRowSpecs)}`;
 
   return (
     <div className="py-4 sm:py-6 px-3.5 sm:px-6 mx-auto max-w-5xl space-y-4">
-      {/* Header & Official 113-Template Browser */}
-      <section className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 shadow-xs space-y-3.5">
-        <div className="flex flex-wrap items-start justify-between gap-2.5">
-          <div>
-            <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold tracking-wide text-[#9A773E]">
-              <FileSpreadsheet className="h-3.5 w-3.5 text-[#B89254]" />
-              <span>
-                最高人民法院《{corpus.standard}》官方示范文本 · 9 大领域 · 67 类纠纷 · {corpus.count} 份全量模板
+      {/* Compact Mobile-First Header & Collapsible 113-Template Selector */}
+      <section className="rounded-xl border border-[#DED8CC] bg-white p-3.5 sm:p-4 shadow-xs space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="font-display text-lg sm:text-xl font-bold text-[#11151C]">
+                要素式起诉状 / 答辩状 / 申请书
+              </h1>
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${
+                  saveStatus === 'error'
+                    ? 'bg-red-100 text-red-800 border border-red-300'
+                    : saveStatus === 'saving'
+                    ? 'bg-sky-50 text-sky-800 border border-sky-200'
+                    : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                }`}
+                title={saveErrorMsg || '按模板独立自动保存在本机浏览器（不上传服务器）'}
+              >
+                {saveStatus === 'error'
+                  ? '⚠ 存储满额·请下载草稿'
+                  : saveStatus === 'saving'
+                  ? '正在保存…'
+                  : '● 本机已自动保存'}
               </span>
             </div>
-            <h1 className="mt-1 font-display text-xl sm:text-2xl font-bold text-[#11151C]">
-              要素式起诉状 / 答辩状 / 申请书官方模板工作台
-            </h1>
-            <p className="mt-1 text-xs leading-5 text-slate-600">
-              100% 对照最高人民法院 2025 年 7 月 14 日起全国推广的官方示范文本原表生成（完整保留官方《说明》、全部表格要素行、多列案号/专利表、勾选项与知识产权证据清单附件）；支持离线直接勾选填表、下载空白官方模板，或 AI 转写传统诉状。
+            <p className="mt-0.5 text-[11px] text-slate-500">
+              最高法《{corpus.standard}》113 份官方原表：<strong>① 选模板 → ② 勾选填写 → ③ 预览导出 Word</strong>
             </p>
           </div>
+
           <div className="flex flex-wrap items-center gap-1.5">
-            <span
-              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                saveStatus === 'error'
-                  ? 'bg-red-100 text-red-800 border border-red-300'
-                  : saveStatus === 'saving'
-                  ? 'bg-sky-50 text-sky-800 border border-sky-200'
-                  : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-              }`}
-              title={saveErrorMsg || '按模板独立自动保存在本机浏览器（不上传服务器）'}
-            >
-              {saveStatus === 'error'
-                ? '⚠ 本机存储满额（请下载草稿）'
-                : saveStatus === 'saving'
-                ? '正在保存草稿…'
-                : '● 本机已自动保存'}
-            </span>
             <input
               ref={draftBundleInputRef}
               type="file"
@@ -2066,41 +2169,41 @@ ${JSON.stringify(editableRowSpecs)}`;
             />
             <button
               type="button"
-              onClick={handleExportDraftBundle}
-              className="inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2.5 py-2 text-xs font-semibold text-[#11151C]"
-              title="将各模板已填草稿与导入材料导出为本机 .json 文件"
-            >
-              <Save className="h-3.5 w-3.5 text-[#9A773E]" /> 下载草稿
-            </button>
-            <button
-              type="button"
-              onClick={() => draftBundleInputRef.current?.click()}
-              className="inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2.5 py-2 text-xs font-semibold text-slate-600"
-              title="从此前导出的 .json 草稿文件恢复"
-            >
-              恢复草稿
-            </button>
-            <button
-              type="button"
               onClick={() => handleDownloadWord(false)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-3.5 py-2 text-xs font-bold text-[#F6F4EF] shadow-xs"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#0E223D] hover:bg-[#17345C] px-3 py-1.5 text-xs font-bold text-[#F6F4EF] shadow-xs"
             >
-              <Download className="h-3.5 w-3.5 text-[#D1B27A]" /> 导出官方 Word (.docx)
+              <Download className="h-3.5 w-3.5 text-[#D1B27A]" /> 导出 Word (.docx)
             </button>
             <button
               type="button"
               onClick={() => handleDownloadWord(true)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D1B27A] bg-[#FBF7EE] hover:bg-[#F3E9D2] px-3 py-2 text-xs font-semibold text-[#7A5922]"
+              className="inline-flex items-center gap-1 rounded-lg border border-[#D1B27A] bg-[#FBF7EE] hover:bg-[#F3E9D2] px-2.5 py-1.5 text-xs font-semibold text-[#7A5922]"
               title="直接下载该案由的最高法官方空白 Word 模板"
             >
-              <FileText className="h-3.5 w-3.5" /> 下载官方空白表
+              <FileText className="h-3.5 w-3.5" /> 空白表
             </button>
             <button
               type="button"
               onClick={handlePrintPdf}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D8D1C3] bg-[#FAF9F6] hover:border-[#0E223D] px-3 py-2 text-xs font-semibold text-[#11151C]"
+              className="inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] bg-[#FAF9F6] hover:border-[#0E223D] px-2.5 py-1.5 text-xs font-semibold text-[#11151C]"
             >
-              <Printer className="h-3.5 w-3.5 text-[#9A773E]" /> A4 打印/PDF
+              <Printer className="h-3.5 w-3.5 text-[#9A773E]" /> A4打印
+            </button>
+            <button
+              type="button"
+              onClick={handleExportDraftBundle}
+              className="inline-flex items-center gap-1 rounded-lg border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2 py-1.5 text-[11px] font-semibold text-slate-700"
+              title="将各模板已填草稿导出为本机 .json 文件"
+            >
+              <Save className="h-3 w-3 text-[#9A773E]" /> 存草稿
+            </button>
+            <button
+              type="button"
+              onClick={() => draftBundleInputRef.current?.click()}
+              className="rounded-lg border border-[#D8D1C3] bg-white hover:border-[#0E223D] px-2 py-1.5 text-[11px] font-medium text-slate-600"
+              title="从此前导出的 .json 草稿文件恢复"
+            >
+              恢复
             </button>
           </div>
         </div>
@@ -2118,16 +2221,52 @@ ${JSON.stringify(editableRowSpecs)}`;
           </div>
         )}
 
-        {/* Official Template Search + 9 Domains + Role Filter */}
-        <div className="pt-3 border-t border-[#EFECE5] space-y-2.5">
+        {/* Active Template Compact Bar + Collapsible Trigger + 1-Tap Fictional Sample */}
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#FAF8F3] border border-[#E6DFCE] px-3 py-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <span className="font-semibold text-slate-500">当前模板：</span>
+            <strong className="text-[#0E223D] font-bold">{tpl.displayName}</strong>
+            <span className="text-[11px] text-slate-500">
+              （{tpl.rows.length} 行要素{tpl.attachments.length > 0 ? ` + ${tpl.attachments.length} 份附件` : ''}）
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => handleFillFictionalSample()}
+              className="rounded-md border border-[#D1B27A] bg-white hover:bg-[#FBF7EE] px-2.5 py-1 text-[11px] font-semibold text-[#7A5922]"
+              title="无需 API Key，一键填入虚构商事纠纷样例以体验完整填表与 Word 导出"
+            >
+              填入虚构样例
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowTemplateBrowser((v) => !v)}
+              className="inline-flex items-center gap-1 rounded-md bg-[#0E223D] hover:bg-[#17345C] px-2.5 py-1 text-[11px] font-bold text-white"
+            >
+              <Search className="h-3 w-3 text-[#D1B27A]" />
+              <span>{showTemplateBrowser ? '收起模板库' : `切换模板 (${corpus.count}份)`}</span>
+              {showTemplateBrowser ? (
+                <ChevronUp className="h-3.5 w-3.5 text-[#D1B27A]" />
+              ) : (
+                <ChevronDown className="h-3.5 w-3.5 text-[#D1B27A]" />
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Expanded Official Template Search + 9 Domains + Role Filter */}
+        {showTemplateBrowser && (
+        <div className="pt-2.5 border-t border-[#EFECE5] space-y-2.5">
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative flex-1 min-w-[200px]">
               <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
+                autoFocus
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="秒搜全部 113 份最高法示范文本（如：买卖、民间借贷、劳动、著作权、答辩状、执行异议、行政处罚…）"
+                placeholder="秒搜全部 113 份最高法示范文本（如：买卖、民间借贷、劳动、著作权、答辩状、执行异议…）"
                 className="w-full rounded-lg border border-[#D8D1C3] bg-[#FAF9F6] pl-8 pr-8 py-1.5 text-xs focus:border-[#0E223D] focus:bg-white focus:outline-none"
               />
               {searchQuery && (
@@ -2179,7 +2318,7 @@ ${JSON.stringify(editableRowSpecs)}`;
             </div>
           )}
 
-          <div className="max-h-48 overflow-y-auto pr-1 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5">
+          <div className="max-h-52 overflow-y-auto pr-1 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5">
             {filteredTemplates.map((item) => {
               const active = item.id === tpl.id;
               const itemHasSavedDraft = hasNonEmptySpcDraft(
@@ -2239,23 +2378,8 @@ ${JSON.stringify(editableRowSpecs)}`;
               </div>
             )}
           </div>
-
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[#FAF9F6] border border-[#EAE5DA] px-3 py-1.5 text-[11px] text-slate-700">
-            <span>
-              当前启用官方原表：<strong className="text-[#0E223D]">{tpl.displayName}</strong>
-              {tpl.docSubtitle ? ` ${tpl.docSubtitle}` : ''}（共 {tpl.rows.length} 行官方表格结构
-              {tpl.attachments.length > 0 ? ` + ${tpl.attachments.length} 份官方附件` : ''}）
-            </span>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
-                <CheckCircle2 className="h-3 w-3 text-emerald-600" /> 已自动暂存本机（刷新不丢）
-              </span>
-              <span className="text-slate-500 font-mono text-[10px]">
-                依据：最高人民法院 {corpus.standard}（{corpus.effectiveDate} 起全国推广）
-              </span>
-            </div>
-          </div>
         </div>
+        )}
       </section>
 
       {/* 4-Tab Mode Switcher */}
@@ -2616,9 +2740,13 @@ ${JSON.stringify(editableRowSpecs)}`;
         const editableRows = tpl.rows.filter(
           (r) => r.kind === 'field' || r.kind === 'full_input'
         );
-        const filledCount = editableRows.filter(
-          (r) => !isRowUntouched(r, draft.rowValues[r.id])
-        ).length;
+        const activeEditableRows = editableRows.filter(
+          (r) => !(draft.excludedRowIds || []).includes(r.id)
+        );
+        const untouchedRows = activeEditableRows.filter((r) =>
+          isRowUntouched(r, draft.rowValues[r.id])
+        );
+        const filledCount = activeEditableRows.length - untouchedRows.length;
         const excludedCount = (draft.excludedRowIds || []).length;
         const customExtraCount = draft.extraRows.length;
 
@@ -2630,27 +2758,36 @@ ${JSON.stringify(editableRowSpecs)}`;
         ];
 
         return (
-        <div className="space-y-4">
-          {/* Live Progress + AI Multi-Turn Table Editor Entry Bar */}
-          <section className="rounded-xl border border-[#D8CEB9] bg-white shadow-xs overflow-hidden">
-            <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-gradient-to-r from-[#0E223D] to-[#153156] text-[#F6F4EF]">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <MessageSquare className="h-4 w-4 text-[#DFC086] flex-none" />
-                <span className="font-display font-bold">
-                  AI 多轮对话改表助手 & 手动增删控制台
+        <div className="space-y-3">
+          {/* Missing / Untouched Field Quick-Jump Strip + AI Copilot Toggle */}
+          <section className="rounded-xl border border-[#DED8CC] bg-white shadow-xs overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2.5 bg-[#FAF8F3]">
+              <div className="flex flex-wrap items-center gap-1.5 text-xs min-w-0">
+                <span className="rounded-md bg-[#0E223D] px-2 py-0.5 text-[11px] font-bold text-[#F6F4EF]">
+                  已填 {filledCount}/{activeEditableRows.length} 栏
                 </span>
-                <span className="rounded-full bg-white/12 px-2 py-0.5 text-[10.5px] text-[#E5CB96]">
-                  已填 {filledCount}/{editableRows.length} 栏
-                </span>
-                {excludedCount > 0 && (
-                  <span className="rounded-full bg-amber-400/20 px-2 py-0.5 text-[10.5px] text-amber-200">
-                    已排除 {excludedCount} 行
-                  </span>
-                )}
-                {customExtraCount > 0 && (
-                  <span className="rounded-full bg-emerald-400/20 px-2 py-0.5 text-[10.5px] text-emerald-200">
-                    新增 {customExtraCount} 行
-                  </span>
+                {untouchedRows.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => focusRowInputById(untouchedRows[0].id, true)}
+                      className="rounded-md border border-[#B89254] bg-white hover:bg-[#FBF7EE] px-2 py-0.5 text-[11px] font-bold text-[#7A5922]"
+                    >
+                      跳至待填项 →
+                    </button>
+                    <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full">
+                      {untouchedRows.slice(0, 5).map((ur) => (
+                        <button
+                          key={ur.id}
+                          type="button"
+                          onClick={() => focusRowInputById(ur.id, true)}
+                          className="flex-none rounded border border-[#E2DAC7] bg-white hover:border-[#0E223D] px-1.5 py-0.5 text-[10.5px] text-slate-600"
+                        >
+                          {(ur.label || '填写栏').replace(/\n/g, '').slice(0, 10)}
+                        </button>
+                      ))}
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -2662,27 +2799,27 @@ ${JSON.stringify(editableRowSpecs)}`;
                       setDraft((p) => (p ? { ...p, excludedRowIds: [] } : p));
                       showToast('已恢复全部被排除的官方表格行');
                     }}
-                    className="rounded-md border border-white/20 bg-white/10 hover:bg-white/20 px-2.5 py-1 text-[11px] font-medium text-white"
+                    className="rounded-md border border-[#D8D1C3] bg-white px-2 py-0.5 text-[11px] text-slate-600"
                   >
-                    恢复全部隐藏行
+                    恢复隐藏 ({excludedCount})
                   </button>
                 )}
                 {draftUndoStack.length > 0 && (
                   <button
                     type="button"
                     onClick={handleUndoLastEdit}
-                    className="inline-flex items-center gap-1 rounded-md border border-[#DFC086]/60 bg-[#DFC086]/15 hover:bg-[#DFC086]/25 px-2.5 py-1 text-[11px] font-semibold text-[#E8CF9C]"
+                    className="inline-flex items-center gap-1 rounded-md border border-[#B89254] bg-white px-2 py-0.5 text-[11px] font-semibold text-[#7A5922]"
                   >
-                    <Undo2 className="h-3 w-3" /> 撤销上一轮 ({draftUndoStack.length})
+                    <Undo2 className="h-3 w-3" /> 撤销 ({draftUndoStack.length})
                   </button>
                 )}
                 <button
                   type="button"
                   onClick={() => setShowAiCopilot((v) => !v)}
-                  className="inline-flex items-center gap-1 rounded-md bg-[#CFA968] hover:bg-[#DFBE82] px-3 py-1 text-[11px] font-bold text-[#0E1A2B]"
+                  className="inline-flex items-center gap-1 rounded-md border border-[#0E223D]/25 bg-white hover:border-[#0E223D] px-2.5 py-0.5 text-[11px] font-semibold text-[#0E223D]"
                 >
-                  <Sparkles className="h-3 w-3" />
-                  {showAiCopilot ? '收起 AI 改表对话' : '展开 AI 多轮对话改表'}
+                  <Sparkles className="h-3 w-3 text-[#B89254]" />
+                  {showAiCopilot ? '收起 AI 改表' : 'AI 对话改表（可选）'}
                 </button>
               </div>
             </div>
@@ -3107,10 +3244,10 @@ ${JSON.stringify(editableRowSpecs)}`;
                   }
 
                   return (
-                    <div key={row.id} className="space-y-2">
+                    <div key={row.id} id={`spc-row-card-${row.id}`} className="space-y-2">
                       <div className="rounded-lg border border-[#EAE5DA] bg-[#FCFBF8] p-3 space-y-2">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <label className="text-xs font-bold text-[#11151C]">
+                          <label htmlFor={`spc-row-input-${row.id}`} className="text-xs font-bold text-[#11151C]">
                             {row.kind === 'full_input'
                               ? '整行填写栏'
                               : (row.label || '').replace(/\n/g, ' ')}
@@ -3226,6 +3363,7 @@ ${JSON.stringify(editableRowSpecs)}`;
                         )}
 
                         <textarea
+                          id={`spc-row-input-${row.id}`}
                           rows={Math.min(11, Math.max(2, lineCount + 1))}
                           value={val}
                           onChange={(e) => updateRowValue(row.id, e.target.value)}

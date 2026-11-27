@@ -404,16 +404,21 @@ export const LawsAndChecklistsTab: React.FC = () => {
         </div>
       ) : subTab === 'statutes' ? (
         <div className="mt-5 space-y-4">
-          {/* Search & Scope Bar */}
-          <div className="rounded-lg border border-[#DED8CC] bg-white p-4 sm:p-5">
-            <div className="flex items-center justify-between gap-2 mb-2.5">
-              <span className="font-display text-sm sm:text-base font-bold text-[#11151C]">
-                法庭 / 看守所无信号离线秒查（民法典 + 著作权法 + 民诉法 + 25部核心司解）
-              </span>
-              <span className="flex-none whitespace-nowrap inline-flex items-center gap-1 rounded-full bg-emerald-950/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-900">
-                <WifiOff className="h-3 w-3 text-emerald-700" /> 离线就绪 · 语料截至{' '}
-                {corpus?.dataAsOf || LEGAL_DATA_MANIFEST.lawsOffline.asOf}
-              </span>
+          {/* Search & Scope Bar (Compact Mobile-First Header) */}
+          <div className="rounded-xl border border-[#DED8CC] bg-white p-4 sm:p-5 shadow-xs">
+            <div className="mb-2.5 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <h1 className="font-display text-base sm:text-lg font-bold text-[#11151C]">
+                  离线法条检索
+                </h1>
+                <span className="flex-none inline-flex items-center gap-1 rounded-full bg-emerald-950/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-900">
+                  <WifiOff className="h-3 w-3 text-emerald-700" /> 语料截至{' '}
+                  {corpus?.dataAsOf || LEGAL_DATA_MANIFEST.lawsOffline.asOf}
+                </span>
+              </div>
+              <p className="text-[11px] leading-4 text-slate-500">
+                内置 4,111 条：民法典 · 民诉法 · 公司法 · 著作权法 · 25 部核心司法解释（断网可用）
+              </p>
             </div>
 
             <div className="relative">
@@ -422,8 +427,8 @@ export const LawsAndChecklistsTab: React.FC = () => {
                 type="search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="输入条号（如 585、54）0毫秒直达，或搜关键词（如 信息网络传播权、违约金调减、举证期限）…"
-                className="w-full rounded-md border border-[#D8D1C3] bg-[#FAF9F6] pl-10 pr-4 py-2.5 text-xs sm:text-sm text-[#11151C] focus:border-[#0E223D] focus:bg-white focus:outline-none"
+                placeholder="输入 585、民法典第585条、民法典第五百八十五条，或搜关键词（如违约金调减）…"
+                className="w-full rounded-lg border border-[#D8D1C3] bg-[#FAF9F6] pl-10 pr-4 py-2.5 text-xs sm:text-sm text-[#11151C] focus:border-[#0E223D] focus:bg-white focus:outline-none"
               />
             </div>
 
